@@ -1,0 +1,25 @@
+{
+  "_note": "SYNTHETIC teaching fixture. Invented data for tests and the offline proof. Not CassavaBase. Not real breeding data. Single-study reply: its result is the same record as the S1 row of synthetic_studies.json.",
+  "_request": {
+    "endpoint": "/studies/S1",
+    "params": {}
+  },
+  "_synthetic": true,
+  "metadata": {
+    "synthetic": true
+  },
+  "result": {
+    "active": false,
+    "commonCropName": "cassava",
+    "locationDbId": "L1",
+    "locationName": "SYNTHETIC location one",
+    "programDbId": "PG1",
+    "programName": "SYNTHETIC program",
+    "seasons": [
+      "2026"
+    ],
+    "studyDbId": "S1",
+    "studyName": "SYNTHETIC yield trial S1",
+    "studyType": "Synthetic Yield Trial"
+  }
+}

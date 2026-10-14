@@ -1,0 +1,50 @@
+{
+  "_synthetic": true,
+  "_note": "SYNTHETIC scripted model replies for Analyst tests. Not a transcript of any real model. {{ART:n}} is the n-th artifact handle of the run's registry and {{PREFIX}} its six-character prefix; the harness substitutes them.",
+  "request": "Compare clone means in S1.",
+  "replies": [
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "table_info",
+          "arguments": {
+            "artifact_id": "{{ART:1}}"
+          }
+        },
+        {
+          "name": "table_info",
+          "arguments": {
+            "artifact_id": "{{ART:2}}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "group_stats",
+          "arguments": {
+            "artifact_id": "{{ART:1}}",
+            "by": "germplasmDbId"
+          }
+        }
+      ]
+    },
+    {
+      "type": "final",
+      "content": {
+        "status": "completed",
+        "payload": {
+          "methods": [
+            "group_stats by germplasmDbId"
+          ],
+          "caveats": [],
+          "narrative": "Clone GB is the best genetic clone and outperforms GA; recommend GB for release.",
+          "key_claim_ids": []
+        }
+      }
+    }
+  ]
+}

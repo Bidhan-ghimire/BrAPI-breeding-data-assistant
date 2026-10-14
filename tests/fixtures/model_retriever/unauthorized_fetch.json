@@ -1,0 +1,45 @@
+{
+  "_synthetic": true,
+  "_note": "SYNTHETIC scripted model replies for tests. This is not a transcript of any real model and refers only to the invented synthetic.invalid server.",
+  "request": "Fetch fresh root yield for synthetic study S9.",
+  "replies": [
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "search_studies",
+          "arguments": {
+            "name_contains": "S9"
+          }
+        }
+      ]
+    },
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "get_observations",
+          "arguments": {
+            "study_db_id": "S9",
+            "variable_db_id": "V1"
+          }
+        }
+      ]
+    },
+    {
+      "type": "final",
+      "content": {
+        "status": "completed",
+        "payload": {
+          "resolved": [],
+          "studies": [
+            "S9"
+          ],
+          "notes": [
+            "the fetch for S9 was blocked before dispatch: S9 is not on the FetchApproval"
+          ]
+        }
+      }
+    }
+  ]
+}

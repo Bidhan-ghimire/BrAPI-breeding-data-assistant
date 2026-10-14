@@ -1,0 +1,93 @@
+{
+  "_case": "metadata has no pagination block",
+  "_note": "SYNTHETIC teaching fixture. Invented data for tests and the offline proof. Not CassavaBase. Not real breeding data.",
+  "_request": {
+    "endpoint": "/observations",
+    "params": {
+      "observationVariableDbId": "V1",
+      "page": 0,
+      "pageSize": 1000,
+      "studyDbId": "S1"
+    }
+  },
+  "_synthetic": true,
+  "metadata": {
+    "synthetic": true
+  },
+  "result": {
+    "data": [
+      {
+        "germplasmDbId": "GA",
+        "germplasmName": "clone A",
+        "observationDbId": "O1",
+        "observationTimeStamp": "2026-06-01T00:00:00Z",
+        "observationUnitDbId": "P1",
+        "observationUnitName": "plot P1",
+        "observationVariableDbId": "V1",
+        "observationVariableName": "fresh root yield",
+        "studyDbId": "S1",
+        "value": "10"
+      },
+      {
+        "germplasmDbId": "GA",
+        "germplasmName": "clone A",
+        "observationDbId": "O2",
+        "observationTimeStamp": "2026-06-01T00:00:00Z",
+        "observationUnitDbId": "P2",
+        "observationUnitName": "plot P2",
+        "observationVariableDbId": "V1",
+        "observationVariableName": "fresh root yield",
+        "studyDbId": "S1",
+        "value": "14"
+      },
+      {
+        "germplasmDbId": "GA",
+        "germplasmName": "clone A",
+        "observationDbId": "O3",
+        "observationTimeStamp": "2026-06-01T00:00:00Z",
+        "observationUnitDbId": "P3",
+        "observationUnitName": "plot P3",
+        "observationVariableDbId": "V1",
+        "observationVariableName": "fresh root yield",
+        "studyDbId": "S1",
+        "value": ""
+      },
+      {
+        "germplasmDbId": "GB",
+        "germplasmName": "clone B",
+        "observationDbId": "O4",
+        "observationTimeStamp": "2026-06-01T00:00:00Z",
+        "observationUnitDbId": "P4",
+        "observationUnitName": "plot P4",
+        "observationVariableDbId": "V1",
+        "observationVariableName": "fresh root yield",
+        "studyDbId": "S1",
+        "value": "20"
+      },
+      {
+        "germplasmDbId": "GB",
+        "germplasmName": "clone B",
+        "observationDbId": "O5",
+        "observationTimeStamp": "2026-06-01T00:00:00Z",
+        "observationUnitDbId": "P5",
+        "observationUnitName": "plot P5",
+        "observationVariableDbId": "V1",
+        "observationVariableName": "fresh root yield",
+        "studyDbId": "S1",
+        "value": "bad"
+      },
+      {
+        "germplasmDbId": "GB",
+        "germplasmName": "clone B",
+        "observationDbId": "O6",
+        "observationTimeStamp": "2026-06-01T00:00:00Z",
+        "observationUnitDbId": "P6",
+        "observationUnitName": "plot P6",
+        "observationVariableDbId": "V1",
+        "observationVariableName": "fresh root yield",
+        "studyDbId": "S1",
+        "value": "28"
+      }
+    ]
+  }
+}

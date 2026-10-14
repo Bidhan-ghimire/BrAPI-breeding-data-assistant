@@ -1,0 +1,60 @@
+{
+  "_synthetic": true,
+  "_note": "SYNTHETIC scripted model replies for Analyst tests. Not a transcript of any real model. {{ART:n}} is the n-th artifact handle of the run's registry and {{PREFIX}} its six-character prefix; the harness substitutes them.",
+  "request": "Mean fresh root yield in S1?",
+  "replies": [
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "table_info",
+          "arguments": {
+            "artifact_id": "{{ART:1}}"
+          }
+        },
+        {
+          "name": "table_info",
+          "arguments": {
+            "artifact_id": "{{ART:2}}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "numeric_summary",
+          "arguments": {
+            "artifact_id": "{{ART:3}}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "numeric_summary",
+          "arguments": {
+            "artifact_id": "{{ART:1}}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "final",
+      "content": {
+        "status": "completed",
+        "payload": {
+          "methods": [
+            "numeric_summary"
+          ],
+          "caveats": [],
+          "narrative": "Pooled mean 18 from 4 valid plot values.",
+          "key_claim_ids": []
+        }
+      }
+    }
+  ]
+}

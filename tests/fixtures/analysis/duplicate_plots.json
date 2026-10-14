@@ -1,0 +1,192 @@
+{
+  "_synthetic": true,
+  "_note": "SYNTHETIC analysis fixture. Invented rows for tests of the fixed calculation tools. Not CassavaBase. Not real breeding data.",
+  "tables": {
+    "repeated_measurements": {
+      "kind": "observations",
+      "complete": true,
+      "study_ids": [
+        "S1"
+      ],
+      "variable_ids": [
+        "V1"
+      ],
+      "measurement": {
+        "trait": "fresh root yield"
+      },
+      "columns": [
+        "observationDbId",
+        "observationUnitDbId",
+        "observationUnitName",
+        "germplasmDbId",
+        "germplasmName",
+        "studyDbId",
+        "observationVariableDbId",
+        "observationVariableName",
+        "observationTimeStamp",
+        "value"
+      ],
+      "rows": [
+        {
+          "observationDbId": "O1",
+          "observationUnitDbId": "P1",
+          "observationUnitName": "plot P1",
+          "germplasmDbId": "GA",
+          "germplasmName": "clone GA",
+          "studyDbId": "S1",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "10"
+        },
+        {
+          "observationDbId": "O2",
+          "observationUnitDbId": "P1",
+          "observationUnitName": "plot P1",
+          "germplasmDbId": "GA",
+          "germplasmName": "clone GA",
+          "studyDbId": "S1",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "12"
+        },
+        {
+          "observationDbId": "O3",
+          "observationUnitDbId": "P2",
+          "observationUnitName": "plot P2",
+          "germplasmDbId": "GA",
+          "germplasmName": "clone GA",
+          "studyDbId": "S1",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "14"
+        },
+        {
+          "observationDbId": "O4",
+          "observationUnitDbId": "P4",
+          "observationUnitName": "plot P4",
+          "germplasmDbId": "GB",
+          "germplasmName": "clone GB",
+          "studyDbId": "S1",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "20"
+        },
+        {
+          "observationDbId": "O5",
+          "observationUnitDbId": "P5",
+          "observationUnitName": "plot P5",
+          "germplasmDbId": "GB",
+          "germplasmName": "clone GB",
+          "studyDbId": "S1",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "bad"
+        },
+        {
+          "observationDbId": "O6",
+          "observationUnitDbId": "P6",
+          "observationUnitName": "plot P6",
+          "germplasmDbId": "GB",
+          "germplasmName": "clone GB",
+          "studyDbId": "S1",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "28"
+        }
+      ]
+    },
+    "repeated_observation_id": {
+      "kind": "observations",
+      "complete": true,
+      "study_ids": [
+        "S1"
+      ],
+      "variable_ids": [
+        "V1"
+      ],
+      "measurement": {
+        "trait": "fresh root yield"
+      },
+      "columns": [
+        "observationDbId",
+        "observationUnitDbId",
+        "observationUnitName",
+        "germplasmDbId",
+        "germplasmName",
+        "studyDbId",
+        "observationVariableDbId",
+        "observationVariableName",
+        "observationTimeStamp",
+        "value"
+      ],
+      "rows": [
+        {
+          "observationDbId": "O1",
+          "observationUnitDbId": "P1",
+          "observationUnitName": "plot P1",
+          "germplasmDbId": "GA",
+          "germplasmName": "clone GA",
+          "studyDbId": "S1",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "10"
+        },
+        {
+          "observationDbId": "O1",
+          "observationUnitDbId": "P1",
+          "observationUnitName": "plot P1",
+          "germplasmDbId": "GA",
+          "germplasmName": "clone GA",
+          "studyDbId": "S1",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "10"
+        },
+        {
+          "observationDbId": "O3",
+          "observationUnitDbId": "P2",
+          "observationUnitName": "plot P2",
+          "germplasmDbId": "GA",
+          "germplasmName": "clone GA",
+          "studyDbId": "S1",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "14"
+        },
+        {
+          "observationDbId": "O4",
+          "observationUnitDbId": "P4",
+          "observationUnitName": "plot P4",
+          "germplasmDbId": "GB",
+          "germplasmName": "clone GB",
+          "studyDbId": "S1",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "20"
+        },
+        {
+          "observationDbId": "O6",
+          "observationUnitDbId": "P6",
+          "observationUnitName": "plot P6",
+          "germplasmDbId": "GB",
+          "germplasmName": "clone GB",
+          "studyDbId": "S1",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "28"
+        }
+      ]
+    }
+  }
+}

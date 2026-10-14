@@ -1,0 +1,59 @@
+{
+  "_synthetic": true,
+  "_note": "SYNTHETIC scripted model replies for Analyst tests. Not a transcript of any real model. {{ART:n}} is the n-th artifact handle of the run's registry and {{PREFIX}} its six-character prefix; the harness substitutes them.",
+  "request": "Mean yield of the duplicated-plot table?",
+  "replies": [
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "table_info",
+          "arguments": {
+            "artifact_id": "{{ART:1}}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "numeric_summary",
+          "arguments": {
+            "artifact_id": "{{ART:1}}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "numeric_summary",
+          "arguments": {
+            "artifact_id": "{{ART:1}}",
+            "duplicate_policy": "mean_per_unit"
+          }
+        }
+      ]
+    },
+    {
+      "type": "final",
+      "content": {
+        "status": "completed",
+        "payload": {
+          "methods": [
+            "table_info",
+            "numeric_summary refused: repeated measurement",
+            "numeric_summary with duplicate_policy=mean_per_unit"
+          ],
+          "caveats": [
+            "plot P1 had two rows; they were averaged within the plot before pooling"
+          ],
+          "narrative": "Pooled mean 18.25 from 4 plots after averaging within plot P1.",
+          "key_claim_ids": []
+        }
+      }
+    }
+  ]
+}

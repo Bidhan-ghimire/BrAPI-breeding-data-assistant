@@ -1,0 +1,24 @@
+{
+  "_case": "result is null but totalCount says 6",
+  "_note": "SYNTHETIC teaching fixture. Invented data for tests and the offline proof. Not CassavaBase. Not real breeding data.",
+  "_request": {
+    "endpoint": "/observations",
+    "params": {
+      "observationVariableDbId": "V1",
+      "page": 0,
+      "pageSize": 1000,
+      "studyDbId": "S1"
+    }
+  },
+  "_synthetic": true,
+  "metadata": {
+    "pagination": {
+      "currentPage": 0,
+      "pageSize": 1000,
+      "totalCount": 6,
+      "totalPages": 1
+    },
+    "synthetic": true
+  },
+  "result": null
+}

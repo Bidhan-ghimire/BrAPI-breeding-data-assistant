@@ -1,0 +1,126 @@
+{
+  "_note": "SYNTHETIC teaching fixture. Invented data for tests and the offline proof. Not CassavaBase. Not real breeding data.",
+  "_request": {
+    "endpoint": "/serverinfo",
+    "params": {}
+  },
+  "_synthetic": true,
+  "metadata": {
+    "synthetic": true
+  },
+  "result": {
+    "calls": [
+      {
+        "dataTypes": [
+          "application/json"
+        ],
+        "methods": [
+          "GET"
+        ],
+        "service": "serverinfo",
+        "versions": [
+          "2.1"
+        ]
+      },
+      {
+        "dataTypes": [
+          "application/json"
+        ],
+        "methods": [
+          "GET"
+        ],
+        "service": "commoncropnames",
+        "versions": [
+          "2.1"
+        ]
+      },
+      {
+        "dataTypes": [
+          "application/json"
+        ],
+        "methods": [
+          "GET"
+        ],
+        "service": "studies",
+        "versions": [
+          "2.1"
+        ]
+      },
+      {
+        "dataTypes": [
+          "application/json"
+        ],
+        "methods": [
+          "GET"
+        ],
+        "service": "variables",
+        "versions": [
+          "2.1"
+        ]
+      },
+      {
+        "dataTypes": [
+          "application/json"
+        ],
+        "methods": [
+          "GET"
+        ],
+        "service": "observations",
+        "versions": [
+          "2.1"
+        ]
+      },
+      {
+        "dataTypes": [
+          "application/json"
+        ],
+        "methods": [
+          "GET"
+        ],
+        "service": "observationunits",
+        "versions": [
+          "2.1"
+        ]
+      },
+      {
+        "dataTypes": [
+          "application/json"
+        ],
+        "methods": [
+          "GET"
+        ],
+        "service": "locations",
+        "versions": [
+          "2.1"
+        ]
+      },
+      {
+        "dataTypes": [
+          "application/json"
+        ],
+        "methods": [
+          "GET"
+        ],
+        "service": "programs",
+        "versions": [
+          "2.1"
+        ]
+      },
+      {
+        "dataTypes": [
+          "application/json"
+        ],
+        "methods": [
+          "GET"
+        ],
+        "service": "seasons",
+        "versions": [
+          "2.1"
+        ]
+      }
+    ],
+    "organizationName": "SYNTHETIC",
+    "serverDescription": "Invented BrAPI v2 replies for offline testing",
+    "serverName": "SYNTHETIC fixture server"
+  }
+}

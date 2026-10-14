@@ -1,0 +1,69 @@
+{
+  "_synthetic": true,
+  "_note": "SYNTHETIC scripted model replies for Analyst tests. Not a transcript of any real model. {{ART:n}} is the n-th artifact handle of the run's registry and {{PREFIX}} its six-character prefix; the harness substitutes them.",
+  "request": "Compare fresh root yield of clones A and B in synthetic study S1.",
+  "replies": [
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "table_info",
+          "arguments": {
+            "artifact_id": "{{ART:1}}"
+          }
+        },
+        {
+          "name": "table_info",
+          "arguments": {
+            "artifact_id": "{{ART:2}}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "numeric_summary",
+          "arguments": {
+            "artifact_id": "{{ART:1}}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "group_stats",
+          "arguments": {
+            "artifact_id": "{{ART:1}}",
+            "by": "germplasmDbId"
+          }
+        }
+      ]
+    },
+    {
+      "type": "final",
+      "content": {
+        "status": "completed",
+        "payload": {
+          "methods": [
+            "table_info on both supplied artifacts: complete, one variable V1, unit roster of 6 plots",
+            "numeric_summary on the observations",
+            "group_stats by germplasmDbId"
+          ],
+          "caveats": [
+            "means are descriptive; the roster confirms 6 expected plots, 4 with valid values"
+          ],
+          "narrative": "Pooled mean fresh root yield is 18 from 4 valid plot values, with 1 missing and 1 invalid token [clm_{{PREFIX}}_0001_mean]. Clone A mean 12 from 2 plots [clm_{{PREFIX}}_0001_mean_germplasmDbId_GA]; clone B mean 24 from 2 plots [clm_{{PREFIX}}_0001_mean_germplasmDbId_GB].",
+          "key_claim_ids": [
+            "clm_{{PREFIX}}_0001_mean",
+            "clm_{{PREFIX}}_0001_mean_germplasmDbId_GA",
+            "clm_{{PREFIX}}_0001_mean_germplasmDbId_GB"
+          ]
+        }
+      }
+    }
+  ]
+}

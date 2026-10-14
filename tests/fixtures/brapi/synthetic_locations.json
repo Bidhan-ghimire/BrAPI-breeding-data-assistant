@@ -1,0 +1,29 @@
+{
+  "_note": "SYNTHETIC teaching fixture. Invented data for tests and the offline proof. Not CassavaBase. Not real breeding data.",
+  "_request": {
+    "endpoint": "/locations",
+    "params": {
+      "page": 0,
+      "pageSize": 1000
+    }
+  },
+  "_synthetic": true,
+  "metadata": {
+    "pagination": {
+      "currentPage": 0,
+      "pageSize": 1000,
+      "totalCount": 1,
+      "totalPages": 1
+    },
+    "synthetic": true
+  },
+  "result": {
+    "data": [
+      {
+        "countryName": "Nowhere",
+        "locationDbId": "L1",
+        "locationName": "SYNTHETIC location one"
+      }
+    ]
+  }
+}

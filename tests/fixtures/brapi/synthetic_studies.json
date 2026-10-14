@@ -1,0 +1,38 @@
+{
+  "_note": "SYNTHETIC teaching fixture. Invented data for tests and the offline proof. Not CassavaBase. Not real breeding data.",
+  "_request": {
+    "endpoint": "/studies",
+    "params": {
+      "page": 0,
+      "pageSize": 1000
+    }
+  },
+  "_synthetic": true,
+  "metadata": {
+    "pagination": {
+      "currentPage": 0,
+      "pageSize": 1000,
+      "totalCount": 1,
+      "totalPages": 1
+    },
+    "synthetic": true
+  },
+  "result": {
+    "data": [
+      {
+        "active": false,
+        "commonCropName": "cassava",
+        "locationDbId": "L1",
+        "locationName": "SYNTHETIC location one",
+        "programDbId": "PG1",
+        "programName": "SYNTHETIC program",
+        "seasons": [
+          "2026"
+        ],
+        "studyDbId": "S1",
+        "studyName": "SYNTHETIC yield trial S1",
+        "studyType": "Synthetic Yield Trial"
+      }
+    ]
+  }
+}

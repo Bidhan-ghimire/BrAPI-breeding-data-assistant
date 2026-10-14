@@ -1,0 +1,36 @@
+{
+  "_synthetic": true,
+  "_note": "SYNTHETIC scripted model replies for Analyst tests. Not a transcript of any real model. {{ART:n}} is the n-th artifact handle of the run's registry and {{PREFIX}} its six-character prefix; the harness substitutes them.",
+  "request": "Mean yield of the partial fetch?",
+  "replies": [
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "table_info",
+          "arguments": {
+            "artifact_id": "{{ART:1}}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "numeric_summary",
+          "arguments": {
+            "artifact_id": "{{ART:1}}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "final",
+      "content": {
+        "status": "needs_clarification",
+        "question": "The artifact is not a complete collection (the fetch stopped early), so no study-level mean can be given. Should the Retriever complete the fetch first?"
+      }
+    }
+  ]
+}

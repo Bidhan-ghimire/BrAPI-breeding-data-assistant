@@ -1,0 +1,93 @@
+{
+  "_synthetic": true,
+  "_note": "SYNTHETIC analysis fixture. Invented rows for tests of the fixed calculation tools. Not CassavaBase. Not real breeding data.",
+  "tables": {
+    "odd_group_ids": {
+      "kind": "observations",
+      "complete": true,
+      "study_ids": [
+        "S1"
+      ],
+      "variable_ids": [
+        "V1"
+      ],
+      "measurement": {
+        "trait": "fresh root yield"
+      },
+      "columns": [
+        "observationDbId",
+        "observationUnitDbId",
+        "observationUnitName",
+        "germplasmDbId",
+        "germplasmName",
+        "studyDbId",
+        "observationVariableDbId",
+        "observationVariableName",
+        "observationTimeStamp",
+        "value"
+      ],
+      "rows": [
+        {
+          "observationDbId": "O1",
+          "observationUnitDbId": "P1",
+          "observationUnitName": "plot P1",
+          "germplasmDbId": "",
+          "germplasmName": "",
+          "studyDbId": "S1",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "10"
+        },
+        {
+          "observationDbId": "O2",
+          "observationUnitDbId": "P2",
+          "observationUnitName": "plot P2",
+          "germplasmDbId": "null",
+          "germplasmName": "literally null",
+          "studyDbId": "S1",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "20"
+        },
+        {
+          "observationDbId": "O3",
+          "observationUnitDbId": "P3",
+          "observationUnitName": "plot P3",
+          "germplasmDbId": "None",
+          "germplasmName": "literally None",
+          "studyDbId": "S1",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "30"
+        },
+        {
+          "observationDbId": "O4",
+          "observationUnitDbId": "P4",
+          "observationUnitName": "plot P4",
+          "germplasmDbId": "GA",
+          "germplasmName": "clone GA",
+          "studyDbId": "S1",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "40"
+        },
+        {
+          "observationDbId": "O5",
+          "observationUnitDbId": "P5",
+          "observationUnitName": "plot P5",
+          "germplasmDbId": "GA",
+          "germplasmName": "clone GA",
+          "studyDbId": "S1",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "50"
+        }
+      ]
+    }
+  }
+}

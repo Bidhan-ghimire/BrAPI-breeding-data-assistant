@@ -1,0 +1,44 @@
+{
+  "_synthetic": true,
+  "_note": "SYNTHETIC scripted model replies for Analyst tests. Not a transcript of any real model. {{ART:n}} is the n-th artifact handle of the run's registry and {{PREFIX}} its six-character prefix; the harness substitutes them.",
+  "request": "How many synthetic studies are there, by study type?",
+  "replies": [
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "table_info",
+          "arguments": {
+            "artifact_id": "{{ART:1}}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "count_records",
+          "arguments": {
+            "artifact_id": "{{ART:1}}",
+            "group_by": "studyType"
+          }
+        }
+      ]
+    },
+    {
+      "type": "final",
+      "content": {
+        "status": "completed",
+        "payload": {
+          "methods": [
+            "count_records grouped by studyType on the complete studies export"
+          ],
+          "caveats": [],
+          "narrative": "One study, of type Synthetic Yield Trial.",
+          "key_claim_ids": []
+        }
+      }
+    }
+  ]
+}

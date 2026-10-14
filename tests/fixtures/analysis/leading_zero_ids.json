@@ -1,0 +1,81 @@
+{
+  "_synthetic": true,
+  "_note": "SYNTHETIC analysis fixture. Invented rows for tests of the fixed calculation tools. Not CassavaBase. Not real breeding data.",
+  "tables": {
+    "clones": {
+      "kind": "observations",
+      "complete": true,
+      "study_ids": [
+        "S1"
+      ],
+      "variable_ids": [
+        "V1"
+      ],
+      "measurement": {
+        "trait": "fresh root yield"
+      },
+      "columns": [
+        "observationDbId",
+        "observationUnitDbId",
+        "observationUnitName",
+        "germplasmDbId",
+        "germplasmName",
+        "studyDbId",
+        "observationVariableDbId",
+        "observationVariableName",
+        "observationTimeStamp",
+        "value"
+      ],
+      "rows": [
+        {
+          "observationDbId": "O1",
+          "observationUnitDbId": "P01",
+          "observationUnitName": "plot P01",
+          "germplasmDbId": "007",
+          "germplasmName": "clone 007",
+          "studyDbId": "S1",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "10"
+        },
+        {
+          "observationDbId": "O2",
+          "observationUnitDbId": "P02",
+          "observationUnitName": "plot P02",
+          "germplasmDbId": "7",
+          "germplasmName": "clone 7",
+          "studyDbId": "S1",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "20"
+        },
+        {
+          "observationDbId": "O3",
+          "observationUnitDbId": "P03",
+          "observationUnitName": "plot P03",
+          "germplasmDbId": "0007",
+          "germplasmName": "clone 0007",
+          "studyDbId": "S1",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "30"
+        },
+        {
+          "observationDbId": "O4",
+          "observationUnitDbId": "P04",
+          "observationUnitName": "plot P04",
+          "germplasmDbId": "007",
+          "germplasmName": "clone 007",
+          "studyDbId": "S1",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "12"
+        }
+      ]
+    }
+  }
+}

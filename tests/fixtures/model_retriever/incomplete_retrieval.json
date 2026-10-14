@@ -1,0 +1,54 @@
+{
+  "_synthetic": true,
+  "_note": "SYNTHETIC scripted model replies for tests. This is not a transcript of any real model and refers only to the invented synthetic.invalid server.",
+  "request": "Fetch fresh root yield for synthetic study S1.",
+  "replies": [
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "search_studies",
+          "arguments": {
+            "name_contains": "S1"
+          }
+        }
+      ]
+    },
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "get_observations",
+          "arguments": {
+            "study_db_id": "S1",
+            "variable_db_id": "V1"
+          }
+        }
+      ]
+    },
+    {
+      "type": "final",
+      "content": {
+        "status": "completed",
+        "payload": {
+          "resolved": [
+            {
+              "kind": "study",
+              "id": "S1"
+            },
+            {
+              "kind": "variable",
+              "id": "V1"
+            }
+          ],
+          "studies": [
+            "S1"
+          ],
+          "notes": [
+            "the observations reply carried no pagination metadata, so the tool could not prove the table complete"
+          ]
+        }
+      }
+    }
+  ]
+}

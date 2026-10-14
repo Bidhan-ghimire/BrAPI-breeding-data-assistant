@@ -1,0 +1,31 @@
+{
+  "_synthetic": true,
+  "_note": "SYNTHETIC scripted model replies for Analyst tests. Not a transcript of any real model. {{ART:n}} is the n-th artifact handle of the run's registry and {{PREFIX}} its six-character prefix; the harness substitutes them.",
+  "request": "What is the mean dry matter content in synthetic study S1?",
+  "replies": [
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "table_info",
+          "arguments": {
+            "artifact_id": "{{ART:1}}"
+          }
+        },
+        {
+          "name": "table_info",
+          "arguments": {
+            "artifact_id": "{{ART:2}}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "final",
+      "content": {
+        "status": "needs_clarification",
+        "question": "The supplied artifact measures fresh root yield (V1) only; dry matter content (V2) was not retrieved. Should the Retriever fetch V2 for S1 first?"
+      }
+    }
+  ]
+}

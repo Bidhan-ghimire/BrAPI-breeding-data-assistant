@@ -1,0 +1,295 @@
+{
+  "_synthetic": true,
+  "_note": "SYNTHETIC analysis fixture. Invented rows for tests of the fixed calculation tools. Not CassavaBase. Not real breeding data.",
+  "tables": {
+    "yield_t_ha": {
+      "kind": "observations",
+      "complete": true,
+      "study_ids": [
+        "S1"
+      ],
+      "variable_ids": [
+        "V1"
+      ],
+      "measurement": {
+        "trait": "fresh root yield",
+        "unit": "t/ha"
+      },
+      "columns": [
+        "observationDbId",
+        "observationUnitDbId",
+        "observationUnitName",
+        "germplasmDbId",
+        "germplasmName",
+        "studyDbId",
+        "observationVariableDbId",
+        "observationVariableName",
+        "observationTimeStamp",
+        "value"
+      ],
+      "rows": [
+        {
+          "observationDbId": "O1",
+          "observationUnitDbId": "P1",
+          "observationUnitName": "plot P1",
+          "germplasmDbId": "GA",
+          "germplasmName": "clone GA",
+          "studyDbId": "S1",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "10"
+        },
+        {
+          "observationDbId": "O2",
+          "observationUnitDbId": "P2",
+          "observationUnitName": "plot P2",
+          "germplasmDbId": "GB",
+          "germplasmName": "clone GB",
+          "studyDbId": "S1",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "20"
+        }
+      ]
+    },
+    "yield_kg_plot": {
+      "kind": "observations",
+      "complete": true,
+      "study_ids": [
+        "S2"
+      ],
+      "variable_ids": [
+        "V1"
+      ],
+      "measurement": {
+        "trait": "fresh root yield",
+        "unit": "kg/plot"
+      },
+      "columns": [
+        "observationDbId",
+        "observationUnitDbId",
+        "observationUnitName",
+        "germplasmDbId",
+        "germplasmName",
+        "studyDbId",
+        "observationVariableDbId",
+        "observationVariableName",
+        "observationTimeStamp",
+        "value"
+      ],
+      "rows": [
+        {
+          "observationDbId": "O11",
+          "observationUnitDbId": "Q1",
+          "observationUnitName": "plot Q1",
+          "germplasmDbId": "GA",
+          "germplasmName": "clone GA",
+          "studyDbId": "S2",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "1000"
+        },
+        {
+          "observationDbId": "O12",
+          "observationUnitDbId": "Q2",
+          "observationUnitName": "plot Q2",
+          "germplasmDbId": "GB",
+          "germplasmName": "clone GB",
+          "studyDbId": "S2",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "2000"
+        }
+      ]
+    },
+    "dry_matter": {
+      "kind": "observations",
+      "complete": true,
+      "study_ids": [
+        "S2"
+      ],
+      "variable_ids": [
+        "V2"
+      ],
+      "measurement": {
+        "trait": "dry matter content",
+        "unit": "%"
+      },
+      "columns": [
+        "observationDbId",
+        "observationUnitDbId",
+        "observationUnitName",
+        "germplasmDbId",
+        "germplasmName",
+        "studyDbId",
+        "observationVariableDbId",
+        "observationVariableName",
+        "observationTimeStamp",
+        "value"
+      ],
+      "rows": [
+        {
+          "observationDbId": "O21",
+          "observationUnitDbId": "R1",
+          "observationUnitName": "plot R1",
+          "germplasmDbId": "GA",
+          "germplasmName": "clone GA",
+          "studyDbId": "S2",
+          "observationVariableDbId": "V2",
+          "observationVariableName": "dry matter content",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "35"
+        }
+      ]
+    },
+    "later_timepoint": {
+      "kind": "observations",
+      "complete": true,
+      "study_ids": [
+        "S3"
+      ],
+      "variable_ids": [
+        "V1"
+      ],
+      "measurement": {
+        "trait": "fresh root yield",
+        "unit": "t/ha",
+        "timepoint": "harvest 2"
+      },
+      "columns": [
+        "observationDbId",
+        "observationUnitDbId",
+        "observationUnitName",
+        "germplasmDbId",
+        "germplasmName",
+        "studyDbId",
+        "observationVariableDbId",
+        "observationVariableName",
+        "observationTimeStamp",
+        "value"
+      ],
+      "rows": [
+        {
+          "observationDbId": "O31",
+          "observationUnitDbId": "T1",
+          "observationUnitName": "plot T1",
+          "germplasmDbId": "GA",
+          "germplasmName": "clone GA",
+          "studyDbId": "S3",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-09-01T00:00:00Z",
+          "value": "11"
+        }
+      ]
+    },
+    "compatible_s2": {
+      "kind": "observations",
+      "complete": true,
+      "study_ids": [
+        "S2"
+      ],
+      "variable_ids": [
+        "V1"
+      ],
+      "measurement": {
+        "trait": "fresh root yield",
+        "unit": "t/ha"
+      },
+      "columns": [
+        "observationDbId",
+        "observationUnitDbId",
+        "observationUnitName",
+        "germplasmDbId",
+        "germplasmName",
+        "studyDbId",
+        "observationVariableDbId",
+        "observationVariableName",
+        "observationTimeStamp",
+        "value"
+      ],
+      "rows": [
+        {
+          "observationDbId": "O41",
+          "observationUnitDbId": "Q1",
+          "observationUnitName": "plot Q1",
+          "germplasmDbId": "GA",
+          "germplasmName": "clone GA",
+          "studyDbId": "S2",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "30"
+        },
+        {
+          "observationDbId": "O42",
+          "observationUnitDbId": "Q2",
+          "observationUnitName": "plot Q2",
+          "germplasmDbId": "GB",
+          "germplasmName": "clone GB",
+          "studyDbId": "S2",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "40"
+        }
+      ]
+    },
+    "two_variables_inside": {
+      "kind": "observations",
+      "complete": true,
+      "study_ids": [
+        "S1"
+      ],
+      "variable_ids": [
+        "V1",
+        "V2"
+      ],
+      "measurement": {
+        "trait": "fresh root yield"
+      },
+      "columns": [
+        "observationDbId",
+        "observationUnitDbId",
+        "observationUnitName",
+        "germplasmDbId",
+        "germplasmName",
+        "studyDbId",
+        "observationVariableDbId",
+        "observationVariableName",
+        "observationTimeStamp",
+        "value"
+      ],
+      "rows": [
+        {
+          "observationDbId": "O51",
+          "observationUnitDbId": "P1",
+          "observationUnitName": "plot P1",
+          "germplasmDbId": "GA",
+          "germplasmName": "clone GA",
+          "studyDbId": "S1",
+          "observationVariableDbId": "V1",
+          "observationVariableName": "fresh root yield",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "10"
+        },
+        {
+          "observationDbId": "O52",
+          "observationUnitDbId": "P1",
+          "observationUnitName": "plot P1",
+          "germplasmDbId": "GA",
+          "germplasmName": "clone GA",
+          "studyDbId": "S1",
+          "observationVariableDbId": "V2",
+          "observationVariableName": "dry matter content",
+          "observationTimeStamp": "2026-06-01T00:00:00Z",
+          "value": "35"
+        }
+      ]
+    }
+  }
+}

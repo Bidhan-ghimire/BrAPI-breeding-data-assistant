@@ -1,0 +1,38 @@
+{
+  "_synthetic": true,
+  "_note": "SYNTHETIC scripted model replies for tests. This is not a transcript of any real model and refers only to the invented synthetic.invalid server.",
+  "request": "List the synthetic studies and resolve their IDs.",
+  "replies": [
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "search_studies",
+          "arguments": {}
+        }
+      ]
+    },
+    {
+      "type": "final",
+      "content": {
+        "status": "completed",
+        "payload": {
+          "resolved": [
+            {
+              "kind": "study",
+              "id": "S1"
+            },
+            {
+              "kind": "study",
+              "id": "S2"
+            }
+          ],
+          "studies": [],
+          "notes": [
+            "the name of S2 contains instruction-like text; it was treated as data and nothing was fetched"
+          ]
+        }
+      }
+    }
+  ]
+}

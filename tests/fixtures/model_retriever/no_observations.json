@@ -1,0 +1,78 @@
+{
+  "_synthetic": true,
+  "_note": "SYNTHETIC scripted model replies for tests. This is not a transcript of any real model and refers only to the invented synthetic.invalid server.",
+  "request": "Fetch fresh root yield for synthetic studies S1 and S2.",
+  "replies": [
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "search_studies",
+          "arguments": {
+            "name_contains": "S"
+          }
+        }
+      ]
+    },
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "list_variables",
+          "arguments": {
+            "name_contains": "fresh"
+          }
+        }
+      ]
+    },
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "get_observations",
+          "arguments": {
+            "study_db_id": "S1",
+            "variable_db_id": "V1"
+          }
+        }
+      ]
+    },
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "get_observations",
+          "arguments": {
+            "study_db_id": "S2",
+            "variable_db_id": "V1"
+          }
+        }
+      ]
+    },
+    {
+      "type": "final",
+      "content": {
+        "status": "completed",
+        "payload": {
+          "resolved": [
+            {
+              "kind": "study",
+              "id": "S1"
+            },
+            {
+              "kind": "variable",
+              "id": "V1"
+            }
+          ],
+          "studies": [
+            "S1",
+            "S2"
+          ],
+          "notes": [
+            "S2 returned zero observation rows for V1; it stays on the ledger as empty"
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "_note": "SYNTHETIC teaching fixture. Invented data for tests and the offline proof. Not CassavaBase. Not real breeding data.",
+  "_request": {
+    "endpoint": "/seasons",
+    "params": {
+      "page": 0,
+      "pageSize": 1000
+    }
+  },
+  "_synthetic": true,
+  "metadata": {
+    "pagination": {
+      "currentPage": 0,
+      "pageSize": 1000,
+      "totalCount": 1,
+      "totalPages": 1
+    },
+    "synthetic": true
+  },
+  "result": {
+    "data": [
+      {
+        "seasonDbId": "2026",
+        "seasonName": "2026",
+        "year": 2026
+      }
+    ]
+  }
+}

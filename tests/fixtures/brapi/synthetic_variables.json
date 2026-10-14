@@ -1,0 +1,64 @@
+{
+  "_note": "SYNTHETIC teaching fixture. Invented data for tests and the offline proof. Not CassavaBase. Not real breeding data.",
+  "_request": {
+    "endpoint": "/variables",
+    "params": {
+      "page": 0,
+      "pageSize": 1000
+    }
+  },
+  "_synthetic": true,
+  "metadata": {
+    "pagination": {
+      "currentPage": 0,
+      "pageSize": 1000,
+      "totalCount": 2,
+      "totalPages": 1
+    },
+    "synthetic": true
+  },
+  "result": {
+    "data": [
+      {
+        "commonCropName": "cassava",
+        "method": {
+          "methodDbId": "M1",
+          "methodName": "weigh all roots per plot"
+        },
+        "observationVariableDbId": "V1",
+        "observationVariableName": "fresh root yield",
+        "scale": {
+          "dataType": "Numerical",
+          "scaleDbId": "SC1",
+          "scaleName": "t/ha",
+          "units": "t/ha"
+        },
+        "status": "SYNTHETIC",
+        "trait": {
+          "traitDbId": "T1",
+          "traitName": "fresh root yield"
+        }
+      },
+      {
+        "commonCropName": "cassava",
+        "method": {
+          "methodDbId": "M2",
+          "methodName": "oven drying"
+        },
+        "observationVariableDbId": "V2",
+        "observationVariableName": "dry matter content",
+        "scale": {
+          "dataType": "Numerical",
+          "scaleDbId": "SC2",
+          "scaleName": "percent",
+          "units": "%"
+        },
+        "status": "SYNTHETIC",
+        "trait": {
+          "traitDbId": "T2",
+          "traitName": "dry matter content"
+        }
+      }
+    ]
+  }
+}

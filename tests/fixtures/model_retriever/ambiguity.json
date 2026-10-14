@@ -1,0 +1,34 @@
+{
+  "_synthetic": true,
+  "_note": "SYNTHETIC scripted model replies for tests. This is not a transcript of any real model and refers only to the invented synthetic.invalid server.",
+  "request": "Get the root measurements for the synthetic trial.",
+  "replies": [
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "search_studies",
+          "arguments": {}
+        }
+      ]
+    },
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "list_variables",
+          "arguments": {
+            "name_contains": ""
+          }
+        }
+      ]
+    },
+    {
+      "type": "final",
+      "content": {
+        "status": "needs_clarification",
+        "question": "Two variables could be 'root measurements': V1 fresh root yield (t/ha) or V2 dry matter content (%). Which one do you want?"
+      }
+    }
+  ]
+}

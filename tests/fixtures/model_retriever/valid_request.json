@@ -1,0 +1,80 @@
+{
+  "_synthetic": true,
+  "_note": "SYNTHETIC scripted model replies for tests. This is not a transcript of any real model and refers only to the invented synthetic.invalid server.",
+  "request": "Find synthetic study S1 and its fresh-root-yield variable.",
+  "replies": [
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "search_studies",
+          "arguments": {
+            "name_contains": "S1"
+          }
+        }
+      ]
+    },
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "list_variables",
+          "arguments": {
+            "name_contains": "fresh"
+          }
+        }
+      ]
+    },
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "get_observations",
+          "arguments": {
+            "study_db_id": "S1",
+            "variable_db_id": "V1"
+          }
+        }
+      ]
+    },
+    {
+      "type": "tool_calls",
+      "calls": [
+        {
+          "name": "get_observation_units",
+          "arguments": {
+            "study_db_id": "S1"
+          }
+        }
+      ]
+    },
+    {
+      "type": "final",
+      "content": {
+        "status": "completed",
+        "payload": {
+          "resolved": [
+            {
+              "kind": "study",
+              "id": "S1"
+            },
+            {
+              "kind": "variable",
+              "id": "V1"
+            },
+            {
+              "kind": "location",
+              "id": "L1"
+            }
+          ],
+          "studies": [
+            "S1"
+          ],
+          "notes": [
+            "S1 / V1: observation rows saved as an artifact; observation units saved as a second artifact"
+          ]
+        }
+      }
+    }
+  ]
+}
