@@ -52,7 +52,7 @@ def _allowed(c: Any, stage: str) -> list[str]:
         allowed = ["retrieve", "stop"]
         if c.supervision["plan_revisions"] < MAX_PLAN_REVISIONS:
             allowed.append("revise_plan")
-            if c.supervisor_answers < c.config.max_clarification_rounds:
+            if c.clarification_answers < c.config.max_clarification_rounds:   # one cap for planner and coordinator questions
                 allowed.append("clarify")
         return allowed
     reviewed = (c.retrieval is not None and c.retrieval.status == "completed"
@@ -137,6 +137,9 @@ async def run_agent_led(c: Any) -> bool:
                     c.notes.append("coordinator clarification canceled; no retrieval was performed")
                     return False
                 c.supervisor_answers += 1
+                c.clarification_answers += 1
+                c.notes.append(f"clarification {c.clarification_answers}: the coordinator asked: {choice.question} - "
+                               f"answer{' (simulated)' if c.answers_simulated else ''}: {answer}")
                 c.planner_questions.append(choice.question)
                 c.config = replace(c.config, question=add_clarification(c.config.question, answer))
                 c.supervision["clarifications"].append({"question": choice.question, "answer": answer,

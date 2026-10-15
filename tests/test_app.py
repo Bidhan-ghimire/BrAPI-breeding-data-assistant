@@ -8,7 +8,8 @@ What these tests prove, in plain words:
   before any model call. Each chat state carries its own run.
 * A vague question shows the planner's own question in the chat (on 2026-09-29 it reached only the PowerShell window);
   "cancel" there ends the run, and so does closing the tab. A short answer is ADDED to the first question and is enough;
-  after three answers the run ends with the planner's question still shown.
+  after three answers the run ends with the planner's question still shown. The three count for the whole run, also after
+  the coordinator asks for a new plan or asks its own question, and the last message lists every round.
 * The Analyst's question is shown too; the answer goes back to it with the data already fetched (nothing fetched again).
   "New question" ends a waiting run and clears the chat; while the app works the input is dimmed (locked/unlocked).
   The header is Bidhan's wording: the server, approve, accept, descriptive numbers only.
@@ -29,7 +30,7 @@ from brapi_client import TransportResponse
 from cache_store import CacheStore
 from llm import FakeModelClient, reply_text
 from part2_support import load_fixture, seed_fixture
-from part2_support import part2_runtime, synthetic_models
+from part2_support import part2_runtime, synthetic_models, synthetic_plan_draft
 
 
 @pytest.fixture(autouse=True)
@@ -173,6 +174,74 @@ def test_three_answers_at_most_and_the_question_stays_visible(live):
     last = history[-1]["content"]
     assert "More detail is needed" in last and "still not ready after 3 clarification rounds" in last and "Which study is meant?" in last
     assert "job" not in state and server.calls == []
+
+
+ASKS = {"status": "needs_clarification", "question": "Which study is meant?"}
+READY = {"status": "completed", "payload": synthetic_plan_draft("S1", "V1")}
+
+
+def scripted(*replies: dict) -> FakeModelClient:
+    return FakeModelClient([reply_text(json.dumps(r), model="mock-model") for r in replies], reported_model="mock-model")
+
+
+def last_run(tmp_path: Path) -> ctl.RunResult:
+    answer = next((tmp_path / "out").glob("run_*/answer.json"))
+    return ctl.RunResult.model_validate_json(answer.read_text(encoding="utf-8"))
+
+
+def test_the_cap_holds_for_the_whole_run_and_the_last_message_lists_every_round(live):
+    """Run 20261015T165633: after two answers the plan was ready, the coordinator asked for a new plan, and the planner then
+    asked three more times ("answer 4 of 3", "answer 5 of 3"); the last message showed only two rounds."""
+    server, kwargs, tmp_path = live
+    planner = scripted(ASKS, ASKS, READY, ASKS, ASKS, ASKS)
+    supervisor = scripted({"status": "completed", "payload": {"action": "revise_plan", "reason": "Scripted: a new plan.",
+                                                              "instruction": "Reframe the request and ask which study is meant."}})
+    kw = {**kwargs, "make_models": lambda: dataclasses.replace(synthetic_models(), coordinator=planner, supervisor=supervisor)}
+    history, state = turn(VAGUE, [], {}, kw)
+    shown = [history[-1]["content"]]
+    answers = ("a yield study", "S1, mean yield per clone", "list all traits")
+    for answer in answers:
+        history, state = turn(answer, history, state, kw)
+        shown.append(history[-1]["content"])
+    for number in (1, 2, 3):                        # the third prompt comes after the coordinator's new plan: still "3 of 3"
+        assert f"(answer {number} of 3)" in shown[number - 1]
+    assert not any("answer 4 of 3" in text for text in shown) and "job" not in state and server.calls == []
+    last = shown[-1]
+    assert "More detail is needed" in last and "still not ready after 3 clarification rounds" in last
+    for number, answer in enumerate(answers, 1):    # every round, not only the last ones
+        assert f"clarification {number}: the planner asked: Which study is meant? - answer: {answer}" in last
+    result = last_run(tmp_path)
+    assert [n.split(":", 1)[0] for n in result.notes if n.startswith("clarification ")] == [f"clarification {n}" for n in (1, 2, 3)]
+    assert result.execution_status == "needs_clarification" and len(planner.requests) == 5
+
+
+def test_the_coordinators_own_question_counts_toward_the_same_cap(live):
+    server, kwargs, tmp_path = live
+    planner = scripted(ASKS, READY, ASKS, ASKS)
+    supervisor = scripted({"status": "completed", "payload": {"action": "clarify", "reason": "Scripted: one question first.",
+                                                              "question": "Should the plan include 2025?"}})
+    kw = {**kwargs, "make_models": lambda: dataclasses.replace(synthetic_models(), coordinator=planner, supervisor=supervisor)}
+    history, state = turn(VAGUE, [], {}, kw)                                      # answer 1 of 3: the planner's question
+    history, state = turn("S1, mean yield per clone", history, state, kw)
+    assert "Should the plan include 2025?" in history[-1]["content"]             # answer 2: the coordinator's question
+    history, state = turn("no, only 2026", history, state, kw)
+    assert "(answer 3 of 3)" in history[-1]["content"]
+    history, state = turn("list all traits", history, state, kw)
+    last = history[-1]["content"]
+    assert "still not ready after 3 clarification rounds" in last and "job" not in state and server.calls == []
+    assert "clarification 2: the coordinator asked: Should the plan include 2025? - answer: no, only 2026" in last
+    assert "clarification 3: the planner asked: Which study is meant? - answer: list all traits" in last
+
+
+@pytest.mark.parametrize("answers, offered", [(2, True), (3, False)])
+def test_the_coordinator_may_ask_only_while_answers_are_left(answers, offered):
+    from types import SimpleNamespace
+
+    from coordination_runtime import _allowed
+
+    c = SimpleNamespace(plan=SimpleNamespace(status="ready"), retrieval=None, supervision={"plan_revisions": 0},
+                        clarification_answers=answers, supervisor_answers=0, config=SimpleNamespace(max_clarification_rounds=3))
+    assert ("clarify" in _allowed(c, "planned")) is offered
 
 
 def test_the_analysts_question_is_shown_and_the_answer_reuses_the_fetched_data(live):

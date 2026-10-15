@@ -342,6 +342,11 @@ def _provider_failure(controller: Any) -> tuple[str, str, str] | None:
     return None
 
 
+# A clarification round in the run's notes (run.clarify_phase, coordination_runtime), and the note that ends the last one.
+# When the cap ends a run, the chat lists every round: run 20261015T165633 showed only the last two of five.
+_ROUND_NOTE = re.compile(r"(?:clarification \d+: |still not ready after )")
+
+
 def answer_summary(controller: Any) -> str:
     """One compact answer from typed claims; no model narrative or internal evidence IDs."""
     status = getattr(controller, "execution_status", "unknown")
@@ -369,7 +374,11 @@ def answer_summary(controller: Any) -> str:
                                  *reasons, next_step, "Full report keeps the exact failure and any completed retrieval evidence."])
         if not reasons:
             notes = getattr(controller, "notes", [])
-            reasons = [_text(_human_note(note)) for note in notes if re.search(r"error|fail|block|missing|not |timeout|cancel|limit|incomplete|clarification|stop|refus", note, re.I)][-3:]
+            if status == "needs_clarification" and any(note.startswith("still not ready after ") for note in notes):
+                picked = [note for note in notes if _ROUND_NOTE.match(note)]    # every round, then what is still unclear
+            else:
+                picked = [note for note in notes if re.search(r"error|fail|block|missing|not |timeout|cancel|limit|incomplete|clarification|stop|refus", note, re.I)][-3:]
+            reasons = [_text(_human_note(note)) for note in picked]
         if not reasons:
             reasons = ["The run did not produce a complete, verified analysis."]
         retry = []

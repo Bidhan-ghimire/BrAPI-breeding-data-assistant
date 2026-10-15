@@ -464,6 +464,7 @@ class Controller:
         self.analysis: AnalysisReport | None = None
         self.analysis_execution: dict[str, Any] = {"route": "not_started", "tool_transport": None}
         self.planner_questions: list[str] = []                          # what the planner asked the person, in order (context for it)
+        self.clarification_answers = 0      # answers to the planner's and the coordinator's questions in this whole run (the cap)
         self.retriever_questions: list[str] = []
         self.retriever_answers = 0
         self.retrieval_canceled = False
@@ -779,9 +780,12 @@ class Controller:
         """A plan that is not ready needs a human. --auto has none, so it stops here, structured and nonzero.
 
         Each answer is ADDED to the question (add_clarification): the planner then reads the first words and every answer, so a
-        short answer such as '4501' is enough. The planner's question goes into the notes, so the evidence shows what was asked."""
+        short answer such as '4501' is enough. The planner's question goes into the notes, so the evidence shows what was asked.
+
+        The cap counts every clarification answer in the run, not per call: this phase runs again after the coordinator revises
+        a plan, and run 20261015T165633 then asked a 4th and 5th time with a cap of 3 ("answer 4 of 3")."""
         rounds = self.config.max_clarification_rounds
-        for round_no in range(1, rounds + 1):
+        while self.clarification_answers < rounds:
             questions = [q for q in (self.coordination.questions if self.coordination else []) if q and q.strip()]
             if self._planning_ended():
                 return False
@@ -796,7 +800,9 @@ class Controller:
                 self.execution_status = "canceled"
                 self.notes.append("no clarification answer; run canceled at the clarification prompt")
                 return False
-            self.notes.append(f"clarification {round_no}: the planner asked: {' | '.join(questions) or '(no question was given)'} - "
+            self.clarification_answers += 1
+            self.notes.append(f"clarification {self.clarification_answers}: the planner asked: "
+                              f"{' | '.join(questions) or '(no question was given)'} - "
                               f"answer{' (simulated)' if self.answers_simulated else ''}: {answer}")
             self.planner_questions.append(" | ".join(questions) or "(no question was given)")
             self.config = replace(self.config, question=add_clarification(self.config.question, answer))

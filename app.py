@@ -21,7 +21,6 @@ import triage
 from app_style import CSS, HERO_HTML, build_theme
 from app_help import QUICK_START, QUESTION_GUIDE, faq_items
 from chat_presenter import answer_summary, approval_summary
-from agents.coordinator import clarifications_given
 from brapi_client import load_settings
 from run import (ANALYST_PROMPT, CLARIFY_PROMPT, CATALOG_PROMPT, DATA_REVIEW_PROMPT, RETRIEVER_PROMPT, SUPERVISOR_PROMPT,
                  Controller, Models, RunConfig, analyst_questions, source_host)
@@ -215,8 +214,7 @@ def render(job: Job, event: tuple[str, Any]) -> tuple[str, bool]:
         questions = (controller.coordination.questions if controller.coordination else []) if planner else analyst_questions(controller.analysis)
         asked = [_shorten(" ".join(q.split())) for q in questions if q and q.strip()]
         shown = "\n".join(f"> {q}" for q in asked) or "> (no question was given; say in a few more words what you mean)"
-        number = (max(0, clarifications_given(controller.config.question) - getattr(controller, "approval_revisions", 0))
-                  if planner else controller.analyst_answers) + 1
+        number = (getattr(controller, "clarification_answers", 0) if planner else controller.analyst_answers) + 1  # the cap's own count
         if planner:
             who = "I need one more detail before I can make a plan"
             hint = "Your answer is added to your question, so a few words are enough, for example **study 4501** or **all studies from 2026**."
