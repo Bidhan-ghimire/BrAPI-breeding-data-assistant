@@ -199,7 +199,7 @@ def test_the_cap_holds_for_the_whole_run_and_the_last_message_lists_every_round(
     kw = {**kwargs, "make_models": lambda: dataclasses.replace(synthetic_models(), coordinator=planner, supervisor=supervisor)}
     history, state = turn(VAGUE, [], {}, kw)
     shown = [history[-1]["content"]]
-    answers = ("a yield study", "S1, mean yield per clone", "list all traits")
+    answers = ("a yield study", "S1, mean yield per clone", "the yield trait")     # ("list all traits" is a new question now)
     for answer in answers:
         history, state = turn(answer, history, state, kw)
         shown.append(history[-1]["content"])
@@ -226,11 +226,11 @@ def test_the_coordinators_own_question_counts_toward_the_same_cap(live):
     assert "Should the plan include 2025?" in history[-1]["content"]             # answer 2: the coordinator's question
     history, state = turn("no, only 2026", history, state, kw)
     assert "(answer 3 of 3)" in history[-1]["content"]
-    history, state = turn("list all traits", history, state, kw)
+    history, state = turn("the yield trait", history, state, kw)
     last = history[-1]["content"]
     assert "still not ready after 3 clarification rounds" in last and "job" not in state and server.calls == []
     assert "clarification 2: the coordinator asked: Should the plan include 2025? - answer: no, only 2026" in last
-    assert "clarification 3: the planner asked: Which study is meant? - answer: list all traits" in last
+    assert "clarification 3: the planner asked: Which study is meant? - answer: the yield trait" in last
 
 
 @pytest.mark.parametrize("answers, offered", [(2, True), (3, False)])
@@ -271,6 +271,64 @@ def test_the_analysts_question_is_shown_and_the_answer_reuses_the_fetched_data(l
     assert result.execution_status == "completed" and result.human_acceptance == "accepted" and len(made) == 2
     assert any(n.startswith("analyst clarification 1: the analyst asked: Use the seasons column instead?")
                and n.endswith("answer: yes, use seasons") for n in result.notes)
+
+
+def front_door_model(*labels: str):
+    """The chat's own model (front door and waiting messages), scripted: one reply per label, in order."""
+    replies = [reply_text(json.dumps({"label": label, "reason": "scripted", "reply": "I am the Breeding data assistant." if
+                                      label == "side_question" else ""}), model="mock-model") for label in labels]
+    model = FakeModelClient(replies, reported_model="mock-model")
+    return model, (lambda: model)
+
+
+def test_a_side_question_at_the_planners_question_leaves_the_run_waiting(live):
+    """2026-10-15: "what's your name?" typed at the planner's question became clarification answer 1. Now it is answered, the
+    question is repeated, and only the real answer is added to the question."""
+    server, kwargs, tmp_path = live
+    model, factory = front_door_model("side_question", "answer_to_pending")
+    kw = {**kwargs, "triage_model": factory}
+    history, state = turn(VAGUE, [], {}, kw)
+    job = state["job"]
+    history, state = turn("what's your name?", history, state, kw)
+    shown = history[-1]["content"]
+    assert shown.startswith("I am the Breeding data assistant.") and "I'm still waiting for your answer to my question (or reply **cancel**): “Which study is meant?" in shown
+    assert state["job"] is job and job.waiting_on == ctl.CLARIFY_PROMPT and job.controller.config.question == VAGUE
+    history, state = turn("S1, mean yield per clone", history, state, kw)
+    assert "Review this plan before approving" in history[-1]["content"] and server.calls == []
+    history, state = turn("cancel", history, state, kw)                         # an exact word: no model call
+    result = last_run(tmp_path)
+    assert result.plan.question == f"{VAGUE}\nClarification 1 from the person: S1, mean yield per clone"
+    assert [n.split(":", 1)[0] for n in result.notes if n.startswith("clarification ")] == ["clarification 1"]
+    assert len(model.requests) == 2 and "what's your name?" not in json.dumps(result.notes)
+
+
+def test_a_side_question_at_the_analysts_question_fetches_nothing_and_the_analyst_still_gets_its_answer(live):
+    server, kwargs, tmp_path = live
+    made = []
+
+    def analyst(prefix):
+        made.append(prefix)
+        if len(made) == 1:
+            return FakeModelClient([reply_text(json.dumps({"status": "needs_clarification", "question": "Use the seasons column instead?"}),
+                                               model="mock-model")], reported_model="mock-model")
+        return synthetic_models().analyst_factory(prefix)
+
+    model, factory = front_door_model("side_question", "answer_to_pending")
+    kw = {**kwargs, "triage_model": factory, "make_models": lambda: dataclasses.replace(synthetic_models(), analyst_factory=analyst)}
+    history, state = turn(Q, [], {}, kw)                                          # a data question: the rules start the run
+    history, state = turn("approve", history, state, kw)                         # an exact word: no model call
+    fetched = list(server.calls)
+    history, state = turn("what's your name?", history, state, kw)
+    shown = history[-1]["content"]
+    assert "I'm still waiting for your answer to my question (or reply **cancel**): “Use the seasons column instead?”" in shown and len(made) == 1
+    assert state["job"].waiting_on == ctl.ANALYST_PROMPT and server.calls == fetched
+    history, state = turn("yes, use seasons", history, state, kw)
+    assert "| Mean |" in history[-1]["content"] and server.calls == fetched and len(made) == 2
+    history, state = turn("accept", history, state, kw)
+    result = last_run(tmp_path)
+    assert result.execution_status == "completed" and len(model.requests) == 2
+    assert [n for n in result.notes if n.startswith("analyst clarification")] == [
+        "analyst clarification 1: the analyst asked: Use the seasons column instead? - answer: yes, use seasons"]
 
 
 def test_the_reply_buttons_follow_what_the_run_waits_for(live):

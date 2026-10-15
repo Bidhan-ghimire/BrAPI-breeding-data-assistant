@@ -193,10 +193,9 @@ def test_approve_button_at_review_means_continue_and_does_not_reapprove_fetches(
     assert manifest["data_review"]["status"] == "approved"
 
 
-@pytest.mark.parametrize("reply, status", [("cancel", "canceled"), ("reject", "canceled"),
-                                           ("yes", "blocked"), ("accept", "blocked"), ("go ahead", "blocked")])
+@pytest.mark.parametrize("reply, status", [("cancel", "canceled"), ("reject", "canceled")])
 
-def test_data_review_denial_or_unsupported_reply_never_starts_analysis(chat, reply, status):
+def test_data_review_denial_never_starts_analysis(chat, reply, status):
     history, state, job = start_approved(chat)
     assert_review_wait(chat, history, state, job)
     fetched = list(chat.server.calls)
@@ -208,6 +207,24 @@ def test_data_review_denial_or_unsupported_reply_never_starts_analysis(chat, rep
     assert chat.server.calls == fetched and result.counts.live_attempts == 2
     assert manifest["data_review"]["status"] == status
     assert manifest["data_review"]["artifacts"]
+
+
+@pytest.mark.parametrize("reply", ["yes", "accept", "go ahead"])
+def test_data_review_unsupported_reply_never_starts_analysis(chat, reply):
+    """Until Step 2a the chat sent these to the run, which ended as 'blocked'. Now they never reach the run: the chat repeats the
+    review's choices and the run keeps waiting, with no analysis and no new fetch, until a literal continue or cancel."""
+    history, state, job = start_approved(chat)
+    assert_review_wait(chat, history, state, job)
+    fetched = list(chat.server.calls)
+    history, state = turn(chat, reply, history, state)
+    assert "The data review above is still waiting: reply **continue**" in history[-1]["content"]
+    assert state["job"] is job and job.waiting_on == ctl.DATA_REVIEW_PROMPT and job.controller.analysis is None
+    assert chat.analysis_entries == [] and chat.server.calls == fetched
+    history, state = turn(chat, "cancel", history, state)
+    result, manifest = saved(job)
+    assert result.execution_status == "canceled" and result.analysis is None and chat.analysis_entries == [] and "job" not in state
+    assert chat.server.calls == fetched and result.counts.live_attempts == 2
+    assert manifest["data_review"]["status"] == "canceled" and manifest["data_review"]["artifacts"]
 
 
 def test_data_review_eof_stops_without_analysis_and_keeps_fetch_receipts(chat):

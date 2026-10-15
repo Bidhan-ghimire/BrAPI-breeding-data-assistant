@@ -4,7 +4,8 @@ app_space.py selects agent-led coordination, the shared MCP service, and human
 review before retrieval and analysis. Each browser session has its own run;
 the Full report retains sources, calculations, answers and review decisions.
 A new message first passes the front door (triage.py): greetings and questions
-about the app are answered without starting a run.
+about the app are answered without starting a run. A message typed while a run
+waits is sorted by conversation.py before anything reaches the run.
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ import threading
 from typing import Any, Callable, Iterator, Mapping
 from urllib.parse import urlsplit
 
+import conversation
 import triage
 from app_style import CSS, HERO_HTML, build_theme
 from app_help import QUICK_START, QUESTION_GUIDE, faq_items
@@ -58,6 +60,7 @@ class Job:
         self.outbox: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.reply_timeout_s = reply_timeout_s
         self.answer_shown = False
+        self.locations_listed = False            # the planner's location list is shown once per run, not on every re-ask
         self.waiting_on = ""                     # the prompt the run is waiting on; set by the run's thread before it is shown
         self.controller = Controller(make_config(question), models=make_models(), answer_fn=self._ask, answers_from_human=True)
         self.thread = threading.Thread(target=self._run, name=f"job-{self.controller.run_id}", daemon=True)
@@ -153,11 +156,15 @@ def live_preflight(question: str, make_config: Callable[[str], RunConfig] = live
     return problems
 
 
-def clarification_choices(questions: list[str], metadata: Any) -> str:
-    """Hints from validated catalogs, only displayed; never added to the person's words."""
+LOCATION_LIST_LEAD = "Locations with the most studies:"
+
+
+def clarification_choices(questions: list[str], metadata: Any, *, list_locations: bool = True) -> str:
+    """Hints from validated catalogs, only displayed; never added to the person's words. The hint "You can ask 'list all
+    traits'" is gone: the planner does not understand that command yet (run 20261015T181947), so it is shown nowhere."""
     text = " ".join(questions).lower()
     lines = []
-    if re.search(r"\blocations?\b", text) and metadata is not None:
+    if list_locations and re.search(r"\blocations?\b", text) and metadata is not None:
         locations = {}
         for study in metadata.studies:
             if not study.location_id:
@@ -168,14 +175,12 @@ def clarification_choices(questions: list[str], metadata: Any) -> str:
                 item["names"].add(study.location_name)
         ranked = sorted(locations.items(), key=lambda item: (-len(item[1]["studies"]), item[0]))[:10]
         if ranked:
-            lines += ["", "Locations with the most studies: These are popular database locations, not confirmed matches "
+            lines += ["", f"{LOCATION_LIST_LEAD} These are popular database locations, not confirmed matches "
                       "for the place you requested. Choosing one changes the location scope of your question."]
             for location_id, item in ranked:
                 count = len(item["studies"])
                 name = " / ".join(sorted(item["names"])) or "(name not stated)"
                 lines.append(f"- {location_id} · {name} — {count} {'study' if count == 1 else 'studies'}")
-    if re.search(r"\b(traits?|variables?)\b", text):
-        lines += ["", "You can ask 'list all traits' to see their names."]
     return "\n".join(lines)
 
 
@@ -226,7 +231,10 @@ def render(job: Job, event: tuple[str, Any]) -> tuple[str, bool]:
             who = "I have the data and need one more detail before I can answer"
             hint = "Your answer is used with the data I already have; nothing new is fetched."
         if planner:
-            shown += clarification_choices(questions, controller.metadata)
+            choices = clarification_choices(questions, controller.metadata, list_locations=not getattr(job, "locations_listed", False))
+            if LOCATION_LIST_LEAD in choices:
+                job.locations_listed = True
+            shown += choices
         return f"{who} (answer {number} of {controller.config.max_clarification_rounds}):\n\n{shown}\n\n{hint} Or reply **cancel**.", False
     if kind == "prompt":
         return str(payload).strip(), False
@@ -303,14 +311,103 @@ def _reply_without_run(label: str, topic: str | None, text: str, model_text: str
     return content, state
 
 
+OPEN_QUESTIONS = ("new_question", "unsent_reply")   # the tab's own open question while a run waits: drop or keep / send it?
+
+
+def _without(state: dict[str, Any], *keys: str) -> dict[str, Any]:
+    return {k: v for k, v in state.items() if k not in keys}
+
+
+def _waiting_on(job: Job) -> str:
+    return getattr(job, "waiting_on", "") or ""          # unknown: the message goes straight to the run, as before
+
+
+def _pending_questions(job: Job) -> list[str]:
+    """The question the run is waiting on, as the person saw it: the planner's, the coordinator's, the Retriever's or the
+    Analyst's. Empty for the approval, data review and final review prompts."""
+    controller, waiting_on = job.controller, _waiting_on(job)
+    if waiting_on == CLARIFY_PROMPT:
+        return list(getattr(controller.coordination, "questions", None) or [])
+    if waiting_on == SUPERVISOR_PROMPT:
+        return list(controller.supervisor_questions)
+    if waiting_on == RETRIEVER_PROMPT:
+        return list(controller.retriever_questions)
+    if waiting_on == ANALYST_PROMPT:
+        return list(analyst_questions(controller.analysis))
+    return []
+
+
+def _run_has_ended(job: Job) -> bool:
+    """The run's thread has finished while the chat went on (it waits 15 minutes for a reply, then records itself canceled)."""
+    thread = getattr(job, "thread", None)
+    return thread is not None and thread.ident is not None and not thread.is_alive()
+
+
+def _sort_waiting_message(text: str, job: Job, state: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
+    """Code first, for a message typed while the run waits: (route, payload, state). route "run": payload goes to the run;
+    "reply": payload is shown and nothing reaches the run; "drop": payload is the new question; "ask_model": the model labels it."""
+    kind, pending = conversation.waiting_kind(_waiting_on(job)), _pending_questions(job)
+    if "new_question" in state:                                         # the drop-or-keep question is open
+        choice = conversation.drop_or_keep(text)
+        if choice == "drop":
+            return "drop", state["new_question"], _without(state, *OPEN_QUESTIONS)
+        if choice == "keep":
+            content, _ = render(job, ("prompt", _waiting_on(job)))      # the waiting question again, as it was shown
+            return "reply", content, _without(state, *OPEN_QUESTIONS)
+        return "reply", conversation.drop_or_keep_question(state["new_question"]), state
+    if "unsent_reply" in state:                                         # "should I send it as your answer?" is open
+        unsent, state = state["unsent_reply"], _without(state, "unsent_reply")
+        if triage.is_yes(text):
+            return "run", unsent, state
+        if conversation.is_no(text):
+            return "reply", conversation.still_waiting_line(kind, pending), state
+    if conversation.goes_straight_to_the_run(text, _waiting_on(job)):
+        return "run", text, state
+    word = conversation.control_word(text, _waiting_on(job))
+    if word is not None:
+        return "run", word, state                                       # the prompt's exact word, found by code
+    if conversation.is_list_request(text, pending):
+        return "reply", conversation.drop_or_keep_question(text), {**state, "new_question": text}
+    return "ask_model", text, state
+
+
+def _ask_while_waiting(text: str, job: Job, triage_model: Callable[[], Any]) -> conversation.WaitingDecision | None:
+    prompt = conversation.waiting_prompt(kind=conversation.waiting_kind(_waiting_on(job)), pending=_pending_questions(job),
+                                         source=_source_name(), reference=triage.reference_text(_faq()))
+    return conversation.ask_model(text, triage_model, prompt=prompt)
+
+
+def _route_waiting_decision(decision: conversation.WaitingDecision | None, text: str, job: Job,
+                            state: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
+    """The model's label, applied by code. Only the person's own text ever goes to the run, never the model's words, and only
+    where the run can take it as a reply (conversation.sendable)."""
+    kind = conversation.waiting_kind(_waiting_on(job))
+    pending = _pending_questions(job)
+    sendable = conversation.sendable(kind, text)
+    if decision is None:                                                # no model or no decision: what the run can take goes
+        return ("run", text, state) if sendable else ("reply", conversation.not_understood(kind, pending), state)
+    if decision.label == "side_question":
+        return "reply", conversation.side_reply(decision.reply, kind, pending), state
+    if decision.label == "new_data_question":
+        return "reply", conversation.drop_or_keep_question(text), {**state, "new_question": text}
+    if decision.label == "answer_to_pending" and sendable:
+        return "run", text, state
+    if decision.label == "unsure" and sendable:                         # ask before anything is sent
+        return "reply", conversation.confirm_question(kind, text, pending), {**state, "unsent_reply": text}
+    return "reply", conversation.not_understood(kind, pending), state  # the run could not take it: its choices again
+
+
 def respond(message: str, history: list[Message], state: dict[str, Any], *, make_config: Callable[[str], RunConfig] = live_config,
             make_models: Callable[[], Models] = default_models,
             preflight: Callable[[str], list[str]] | None = None,
             triage_model: Callable[[], Any] | None = None) -> Iterator[tuple[list[Message], dict[str, Any], str]]:
-    """One chat turn. While a run waits, the text is its reply. A new message first passes the front door (triage.py):
-    a data question starts a run; greetings, app questions and unsure messages start nothing and get one triage_model
-    call that writes the reply (the line written by code when there is no model or the call fails). A message the rules
-    cannot place is sorted by that same call; without a decision it starts a run as before. Yields (history, state, box)."""
+    """One chat turn. A message typed while a run waits is sorted first (conversation.py): the prompt's exact control words
+    go to the run; any other message gets one triage_model call that labels it, and only an answer to the waiting question
+    reaches the run (a side question is answered while the run keeps waiting; a new data question asks drop or keep; without
+    a decision the message goes to the run as before). A new message passes the front door (triage.py): a data question
+    starts a run; greetings, app questions and unsure messages start nothing and get one triage_model call that writes the
+    reply (the line written by code when there is no model or the call fails). A message the rules cannot place is sorted
+    by that same call; without a decision it starts a run as before. Yields (history, state, box)."""
     text = (message or "").strip()
     if not text:
         yield history, state, ""
@@ -318,6 +415,34 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
     history = list(history) + [{"role": "user", "content": text}]
     job: Job | None = state.get("job")
     working = False                          # the progress line is already shown (while the front door asked the model)
+    if job is not None and _run_has_ended(job):                                    # it ended while the chat went on
+        content, _ = render(job, job.next_event(timeout=5))
+        history.append({"role": "assistant", "content": "This question had already ended, so your message was not sent to it.\n\n"
+                        + content})
+        state = {**_without(state, "job", *OPEN_QUESTIONS), "full_report": job.controller.answer_markdown()}
+        yield history, state, ""
+        return
+    if job is not None:
+        route, payload, state = _sort_waiting_message(text, job, state)            # code only: no model call
+        if route == "ask_model":
+            if triage_model is None:                                               # no model: what the run can take goes, as before
+                route, payload, state = _route_waiting_decision(None, text, job, state)
+            else:
+                history.append({"role": "assistant", "content": WORKING})
+                yield history, state, ""
+                decision = _ask_while_waiting(text, job, triage_model)
+                history = history[:-1]
+                route, payload, state = _route_waiting_decision(decision, text, job, state)
+        if route == "reply":                                                       # nothing reaches the run: it keeps waiting
+            history.append({"role": "assistant", "content": payload})
+            yield history, state, ""
+            return
+        if route == "drop":
+            job.close()                                                            # the waiting run ends and is recorded ...
+            job, text = None, payload                                              # ... and the new question starts below
+            state = {k: v for k, v in state.items() if k == "guide_shown"}
+        else:
+            job.reply(payload)                                                     # the person's own words, or the exact word
     if job is None:
         pending = state.get("pending_question")
         state = {k: v for k, v in state.items() if k != "pending_question"}      # this message answers it either way
@@ -368,8 +493,6 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
             yield history, state, ""
             return
         state = {"job": job, **{k: state[k] for k in ("guide_shown",) if k in state}}   # a new question clears the old report
-    else:
-        job.reply(text)
     if not working:
         history.append({"role": "assistant", "content": WORKING})
     yield history, state, ""
@@ -429,9 +552,11 @@ def _close_job(state: dict[str, Any]) -> None:
 
 def reply_buttons(state: dict[str, Any] | None) -> tuple[bool, bool, bool, bool]:
     """Which quick replies fit what the run waits for: (Approve, Cancel, Accept, Reject). On 2026-09-29 '1032', 'done' and
-    'accept' were typed where the app waited for approve / cancel; buttons show the valid replies (typing still works)."""
+    'accept' were typed where the app waited for approve / cancel; buttons show the valid replies (typing still works).
+    While the tab asks its own question (drop or keep, or "is that your answer?"), the run's buttons are hidden."""
     job = (state or {}).get("job")
-    waiting = job.waiting_on if job is not None else ""
+    asking = any(key in (state or {}) for key in OPEN_QUESTIONS)
+    waiting = job.waiting_on if job is not None and not asking else ""
     approval = waiting.startswith("approve / edit / cancel") or waiting in (CATALOG_PROMPT, DATA_REVIEW_PROMPT)
     answer = waiting.startswith("accept / reject")
     question = waiting in (CLARIFY_PROMPT, ANALYST_PROMPT, RETRIEVER_PROMPT, SUPERVISOR_PROMPT)

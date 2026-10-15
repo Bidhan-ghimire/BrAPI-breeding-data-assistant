@@ -1,0 +1,449 @@
+"""
+tests/test_conversation.py — a message typed while a run is waiting for a reply (conversation.py and app.respond), offline.
+
+What these tests prove, in plain words:
+* At every waiting prompt (the planner's, the coordinator's, the Retriever's and the Analyst's questions, the plan approval,
+  the catalog setup, the data review and the final review), a side question gets the model's short reply and one line
+  written by code that repeats what the run waits for; NOTHING reaches the run.
+* The prompt's own words (approve, edit, cancel, continue, accept, reject) reach the run with no model call, also as
+  "Approve." or " CANCEL "; the model's words never do, whatever label it gives and even when it writes "approve".
+* A new data question typed mid-run ("list all traits", caught by code, or one the model labels) asks drop or keep and
+  starts nothing until answered: keep shows the waiting question again; drop ends the waiting run and starts the new one.
+* Unsure asks "should I send it as your answer?": "yes" sends the person's own words, "no" drops them. Only what the run
+  itself can take is ever sent: an answer to a question, or a described change at the plan approval ("yes", "ok" or
+  "Uganda" alone would end it as a denial). Elsewhere the run's choices are repeated. No model, a failed call or an
+  invalid reply: an answer still goes to the run as before; anything the run could not take gets its choices again.
+* A run that has ended meanwhile (15 minutes without a reply) gets nothing: the chat says so and shows how it ended.
+* The planner's location list is shown once per run; the hint "You can ask 'list all traits'" is shown nowhere (the
+  planner does not understand that command yet). The run's buttons are hidden while the tab asks its own question.
+Fake runs and scripted models only: no thread, no model provider and no network (the conftest guard blocks sockets).
+"""
+from __future__ import annotations
+
+import json
+from types import SimpleNamespace
+
+import pytest
+
+import app
+import conversation
+from app_help import faq_items
+from llm import FakeModelClient, LlmConfigError, ModelProviderError, reply_text, reply_tools
+from run import (ANALYST_PROMPT, CATALOG_PROMPT, CLARIFY_PROMPT, DATA_REVIEW_PROMPT, RETRIEVER_PROMPT, SUPERVISOR_PROMPT,
+                 RunConfig)
+from agents.coordinator import KnownMetadata, KnownStudy
+
+SOURCE = "https://waiting.invalid/brapi/v2"
+APPROVAL = "approve / edit / cancel: "
+FINAL_REVIEW = "accept / reject (anything else = leave pending): "
+EDIT_IDS = "study IDs, comma separated (empty = keep): "
+QUESTIONS = {CLARIFY_PROMPT: "Which study is meant?", SUPERVISOR_PROMPT: "Should the plan include 2025?",
+             RETRIEVER_PROMPT: "Which label should be used?", ANALYST_PROMPT: "Use the seasons column instead?"}
+STILL_WAITING = {APPROVAL: "The plan above is still waiting: reply **approve**",
+                 CATALOG_PROMPT: "The catalog setup above is still waiting: reply **approve** or **cancel**.",
+                 DATA_REVIEW_PROMPT: "The data review above is still waiting: reply **continue**",
+                 FINAL_REVIEW: "The answer above is still waiting for your review: reply **accept** or **reject**.",
+                 **{prompt: f"I'm still waiting for your answer to my question (or reply **cancel**): “{q}”" for prompt, q in QUESTIONS.items()}}
+EVERY_PROMPT = list(STILL_WAITING)
+IDS = {CLARIFY_PROMPT: "planner", SUPERVISOR_PROMPT: "coordinator", RETRIEVER_PROMPT: "retriever", ANALYST_PROMPT: "analyst",
+       APPROVAL: "plan-approval", CATALOG_PROMPT: "catalog", DATA_REVIEW_PROMPT: "data-review", FINAL_REVIEW: "final-review"}
+DECIDED_BY_TYPED_WORDS = [CATALOG_PROMPT, DATA_REVIEW_PROMPT, FINAL_REVIEW]
+
+
+def waiting_controller(**changes) -> SimpleNamespace:
+    values = dict(coordination=SimpleNamespace(questions=[QUESTIONS[CLARIFY_PROMPT]]), metadata=None, plan=None,
+                  approval_revisions=0, clarification_answers=0,
+                  config=SimpleNamespace(question="Tell me about a study.", max_clarification_rounds=3),
+                  analysis=SimpleNamespace(caveats=[f"clarification needed: {QUESTIONS[ANALYST_PROMPT]}"]), analyst_answers=0,
+                  retriever_questions=[QUESTIONS[RETRIEVER_PROMPT]], retriever_answers=0,
+                  supervisor_questions=[QUESTIONS[SUPERVISOR_PROMPT]],
+                  catalog_approval_screen=lambda: "Catalog scope: studies and variables", answer_markdown=lambda: "full report")
+    values.update(changes)
+    return SimpleNamespace(**values)
+
+
+class WaitingJob:
+    """A run that waits on one prompt. It records every reply that reaches it; it has no thread, model or request."""
+
+    def __init__(self, waiting_on: str, controller: SimpleNamespace | None = None):
+        self.waiting_on = waiting_on
+        self.controller = controller or waiting_controller()
+        self.answer_shown = waiting_on == FINAL_REVIEW
+        self.locations_listed = False
+        self.replies: list[str] = []
+        self.closed = False
+
+    def reply(self, text):
+        self.replies.append(text)
+
+    def close(self):
+        self.closed = True
+        self.reply("cancel")
+
+    def next_event(self, timeout=None):
+        self.waiting_on = "the next step: "              # any later prompt; the tests only look at what reached the run
+        return "prompt", "the next step: "
+
+
+class RecordingJob:
+    """Stands in for app.Job when a new question starts: it records the question and waits."""
+
+    started: list[str] = []
+
+    def __init__(self, question, *, make_config, make_models):
+        RecordingJob.started.append(question)
+        self.controller = SimpleNamespace(run_id="recorded-run", answer_markdown=lambda: "recorded report")
+        self.answer_shown = False
+        self.waiting_on = ""
+        self.locations_listed = False
+
+    def start(self):
+        return self
+
+    def next_event(self, timeout=None):
+        self.waiting_on = "the recorded run waits: "
+        return "prompt", "the recorded run waits: "
+
+
+def decision(label: str, reply: str = "") -> str:
+    return json.dumps({"label": label, "reason": "scripted for this test", "reply": reply})
+
+
+def scripted(*replies):
+    """A model factory for the chat: the same scripted model each time, and a list of every time it was built."""
+    model = FakeModelClient(list(replies))
+    built: list[FakeModelClient] = []
+
+    def factory():
+        built.append(model)
+        return model
+    return model, built, factory
+
+
+def unusable_settings():
+    raise LlmConfigError("LLM_MODEL is blank")
+
+
+@pytest.fixture
+def chat(tmp_path, monkeypatch):
+    import brapi_client as bc
+
+    monkeypatch.setenv("BRAPI_BASE_URL", SOURCE)
+    requests: list[object] = []
+    monkeypatch.setattr(bc, "RequestsTransport", lambda: requests.append)     # a database request would be recorded here
+    monkeypatch.setattr(app, "Job", RecordingJob)
+    RecordingJob.started = []
+
+    def turn(message, job, state=None, **options):
+        state = {"job": job} if state is None else state
+        out = list(app.respond(message, [], state, make_config=lambda q: RunConfig(question=q, out_dir=tmp_path / "out"),
+                               make_models=lambda: None, preflight=lambda q: [], **options))
+        assert out[-1][2] == ""
+        return out[-1][0], out[-1][1]
+
+    return SimpleNamespace(turn=turn, requests=requests, out=tmp_path / "out")
+
+
+# --------------------------------------------------------------------------
+# A side question: answered, and the run keeps waiting
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("waiting_on", EVERY_PROMPT, ids=[IDS[p] for p in EVERY_PROMPT])
+def test_a_side_question_is_answered_and_nothing_reaches_the_run(chat, waiting_on):
+    job = WaitingJob(waiting_on)
+    model, _, factory = scripted(reply_text(decision("side_question", "I am the Breeding data assistant.")))
+    history, state = chat.turn("what's your name?", job, triage_model=factory)
+    content = history[-1]["content"]
+    assert content.startswith("I am the Breeding data assistant.\n\n") and STILL_WAITING[waiting_on] in content
+    assert job.replies == [] and not job.closed and state["job"] is job                # untouched, still waiting
+    assert [m["role"] for m in history] == ["user", "assistant"] and chat.requests == [] and not chat.out.exists()
+    [request] = model.requests                                                          # one call, no tools
+    assert request["tools"] == [] and request["messages"][1] == {"role": "user", "content": "what's your name?"}
+    prompt = request["messages"][0]["content"]
+    assert "while the Breeding data assistant was waiting for their reply" in prompt and "waiting.invalid" in prompt
+    if waiting_on in QUESTIONS:                                                         # the model saw the waiting question
+        assert QUESTIONS[waiting_on] in prompt and "answer_to_pending" in prompt
+    if waiting_on in DECIDED_BY_TYPED_WORDS:                                            # there only typed words decide
+        assert "answer_to_pending" not in prompt
+
+
+def test_the_side_reply_is_escaped_and_cut_like_database_text(chat):
+    job = WaitingJob(CLARIFY_PROMPT)
+    _, _, factory = scripted(reply_text(decision("side_question", "<img src=x onerror=alert(1)> [x](http://x.invalid) " + "a" * 900)))
+    history, _ = chat.turn("tell me a joke", job, triage_model=factory)
+    content = history[-1]["content"]
+    assert "<img" not in content and "&lt;img" in content and "](" not in content and "a" * 601 not in content
+    assert job.replies == []
+
+
+def test_an_empty_side_reply_still_says_what_the_run_waits_for(chat):
+    job = WaitingJob(SUPERVISOR_PROMPT)
+    _, _, factory = scripted(reply_text(decision("side_question", "")))
+    history, _ = chat.turn("hmm", job, triage_model=factory)
+    assert history[-1]["content"] == STILL_WAITING[SUPERVISOR_PROMPT] and job.replies == []
+
+
+# --------------------------------------------------------------------------
+# The prompt's own words go to the run; the model's words never do
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("waiting_on, typed, sent", [
+    (CLARIFY_PROMPT, "cancel", "cancel"), (SUPERVISOR_PROMPT, " CANCEL ", "cancel"), (RETRIEVER_PROMPT, "Cancel.", "cancel"),
+    (ANALYST_PROMPT, "cancel", "cancel"), (APPROVAL, "Approve.", "approve"), (APPROVAL, "edit", "edit"), (APPROVAL, "cancel", "cancel"),
+    (CATALOG_PROMPT, "approve", "approve"), (CATALOG_PROMPT, "approve catalog", "approve catalog"), (CATALOG_PROMPT, "cancel", "cancel"),
+    (DATA_REVIEW_PROMPT, "continue", "continue"), (DATA_REVIEW_PROMPT, "Approve", "approve"), (DATA_REVIEW_PROMPT, "cancel", "cancel"),
+    (DATA_REVIEW_PROMPT, "Continue to analysis", "continue"),                     # the button's own label, typed
+    (FINAL_REVIEW, "accept", "accept"), (FINAL_REVIEW, "Reject!", "reject"),
+    (RETRIEVER_PROMPT, "change scope: only S2", "change scope: only S2"),        # the Retriever reads this itself
+    (EDIT_IDS, "S1, S2", "S1, S2"),                                                # the study IDs after edit
+], ids=["planner-cancel", "coordinator-cancel", "retriever-cancel", "analyst-cancel", "plan-approve", "plan-edit", "plan-cancel",
+        "catalog-approve", "catalog-approve-catalog", "catalog-cancel", "review-continue", "review-approve-button", "review-cancel",
+        "review-button-label",
+        "final-accept", "final-reject", "retriever-change-scope", "edit-ids"])
+def test_the_prompts_own_words_reach_the_run_without_a_model_call(chat, waiting_on, typed, sent):
+    job = WaitingJob(waiting_on)
+    _, built, factory = scripted()
+    chat.turn(typed, job, triage_model=factory)
+    assert job.replies == [sent] and built == []
+
+
+@pytest.mark.parametrize("typed, waiting_on", [("approve it", APPROVAL), ("approve", CLARIFY_PROMPT), ("accept", APPROVAL),
+                                               ("continue", FINAL_REVIEW), ("approve?", APPROVAL), ("accept?", FINAL_REVIEW),
+                                               ("continue?", DATA_REVIEW_PROMPT), ("approve catalog?", CATALOG_PROMPT)])
+def test_another_prompts_word_or_a_longer_phrase_is_not_a_control_word(typed, waiting_on):
+    assert conversation.control_word(typed, waiting_on) is None
+
+
+@pytest.mark.parametrize("waiting_on", EVERY_PROMPT, ids=[IDS[p] for p in EVERY_PROMPT])
+@pytest.mark.parametrize("label", ["answer_to_pending", "side_question", "new_data_question", "unsure"])
+def test_the_models_words_never_reach_the_run(chat, waiting_on, label):
+    job = WaitingJob(waiting_on)
+    _, _, factory = scripted(reply_text(decision(label, "approve")))
+    chat.turn("sounds good to me", job, triage_model=factory)
+    assert job.replies in ([], ["sounds good to me"]) and "approve" not in job.replies   # only the person's own words, if any
+
+
+@pytest.mark.parametrize("waiting_on", [*QUESTIONS, APPROVAL], ids=[IDS[p] for p in [*QUESTIONS, APPROVAL]])
+def test_an_answer_goes_to_the_run_in_the_persons_words(chat, waiting_on):
+    job = WaitingJob(waiting_on)
+    _, _, factory = scripted(reply_text(decision("answer_to_pending", "ignored")))
+    history, state = chat.turn("study 4501, the yield trait", job, triage_model=factory)
+    assert job.replies == ["study 4501, the yield trait"] and "ignored" not in str(history)
+    assert history[-1]["content"] == "the next step:"                                     # the run's next step is shown
+
+
+@pytest.mark.parametrize("factory", [
+    None,                                                                                     # no model: as before
+    unusable_settings,
+    lambda: FakeModelClient([ModelProviderError("connection", "could not reach the model")]),
+    lambda: FakeModelClient([reply_text("not json")]),
+    lambda: FakeModelClient([reply_text(decision("side_question", "Hi"), finish_reason="length")]),
+    lambda: FakeModelClient([reply_text(json.dumps({"label": "control_word", "reason": "x", "reply": "approve"}))]),
+    lambda: FakeModelClient([reply_tools([("search_studies", "{}")])]),
+], ids=["no-model", "unusable-settings", "provider-error", "invalid-reply", "cut-off", "control-word-label", "tool-call"])
+@pytest.mark.parametrize("waiting_on", [CLARIFY_PROMPT, ANALYST_PROMPT, APPROVAL, *DECIDED_BY_TYPED_WORDS],
+                         ids=["planner", "analyst", "plan-approval", "catalog", "data-review", "final-review"])
+def test_without_a_decision_only_what_the_run_can_take_goes_to_it(chat, factory, waiting_on):
+    job = WaitingJob(waiting_on)
+    history, _ = chat.turn("sounds good to me", job, triage_model=factory)
+    if waiting_on in DECIDED_BY_TYPED_WORDS:                       # there it could only cancel, deny or leave it pending
+        assert job.replies == [] and history[-1]["content"].startswith("I did not take that as a decision. ")
+    else:                                                          # an answer, or a described change: as before
+        assert job.replies == ["sounds good to me"]
+
+
+@pytest.mark.parametrize("typed", ["approve?", "yes", "ok", "Uganda", "go ahead"])
+@pytest.mark.parametrize("factory", [None, lambda: FakeModelClient([reply_text(decision("answer_to_pending"))]),
+                                     lambda: FakeModelClient([reply_text(decision("unsure"))])],
+                         ids=["no-model", "answer", "unsure"])
+def test_at_the_plan_words_the_run_would_take_as_a_denial_are_never_sent(chat, typed, factory):
+    job = WaitingJob(APPROVAL)
+    history, state = chat.turn(typed, job, triage_model=factory)
+    assert job.replies == [] and "unsent_reply" not in state
+    assert history[-1]["content"] == ("I did not take that as a decision. The plan above is still waiting: reply **approve** to "
+                                      "use it or **cancel**, or describe a change.")
+
+
+def test_at_the_plan_a_described_change_is_sent_or_offered(chat):
+    job = WaitingJob(APPROVAL)
+    _, _, factory = scripted(reply_text(decision("answer_to_pending")), reply_text(decision("unsure")))
+    chat.turn("only 2025 please", job, triage_model=factory)
+    assert job.replies == ["only 2025 please"]
+    job = WaitingJob(APPROVAL)
+    _, state = chat.turn("add study 4501", job, triage_model=factory)
+    assert job.replies == [] and state["unsent_reply"] == "add study 4501"
+
+
+# --------------------------------------------------------------------------
+# A new data question mid-run: drop or keep
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("waiting_on", EVERY_PROMPT, ids=[IDS[p] for p in EVERY_PROMPT])
+def test_list_all_traits_mid_run_asks_drop_or_keep_without_a_model_call(chat, waiting_on):
+    job = WaitingJob(waiting_on)
+    _, built, factory = scripted()
+    history, state = chat.turn("list all traits", job, triage_model=factory)
+    assert history[-1]["content"].startswith("That sounds like a new question: “list all traits”. Reply **drop**")
+    assert job.replies == [] and built == [] and state["new_question"] == "list all traits" and state["job"] is job
+    assert app.reply_buttons(state) == (False, False, False, False)                         # the tab asks; no run buttons
+
+
+@pytest.mark.parametrize("typed", ["list all traits", "Show me the locations", "please list the seasons", "list studies",
+                                   "can you please list all traits", "show me every trait", "list every study", "list all traits please"])
+def test_requests_to_list_the_catalog_are_new_questions(typed):
+    assert conversation.is_list_request(typed, [QUESTIONS[CLARIFY_PROMPT]])
+
+
+@pytest.mark.parametrize("typed", ["the yield trait", "all of them", "study 4501", "show me the yield trait", "list",
+                                   "show the locations too", "list studies separately"])
+def test_answers_are_not_list_requests(typed):
+    assert not conversation.is_list_request(typed, [QUESTIONS[CLARIFY_PROMPT]])
+
+
+def test_when_the_waiting_question_is_about_listing_the_model_decides(chat):
+    job = WaitingJob(ANALYST_PROMPT, waiting_controller(analysis=SimpleNamespace(
+        caveats=["clarification needed: Should I list the trials or only count them?"])))
+    model, _, factory = scripted(reply_text(decision("answer_to_pending")))
+    chat.turn("list the trials", job, triage_model=factory)
+    assert job.replies == ["list the trials"] and len(model.requests) == 1
+
+
+def test_a_new_data_question_the_model_finds_asks_drop_or_keep_too(chat):
+    job = WaitingJob(RETRIEVER_PROMPT)
+    _, _, factory = scripted(reply_text(decision("new_data_question")))
+    history, state = chat.turn("which studies have a 2025 season?", job, triage_model=factory)
+    assert "“which studies have a 2025 season?”" in history[-1]["content"] and "**keep**" in history[-1]["content"]
+    assert job.replies == [] and state["new_question"] == "which studies have a 2025 season?"
+
+
+def test_keep_shows_the_waiting_question_again_and_sends_nothing(chat):
+    job = WaitingJob(CLARIFY_PROMPT)
+    _, state = chat.turn("list all traits", job)
+    history, state = chat.turn("something else", job, state)                 # neither drop nor keep: asked again
+    assert history[-1]["content"].startswith("That sounds like a new question") and job.replies == []
+    history, state = chat.turn("Keep", job, state)
+    content = history[-1]["content"]
+    assert "I need one more detail before I can make a plan (answer 1 of 3)" in content and "Which study is meant?" in content
+    assert job.replies == [] and "new_question" not in state and state["job"] is job and RecordingJob.started == []
+
+
+@pytest.mark.parametrize("waiting_on", [ANALYST_PROMPT, FINAL_REVIEW], ids=["analyst", "final-review"])
+def test_drop_ends_the_waiting_run_and_starts_the_new_question(chat, waiting_on):
+    job = WaitingJob(waiting_on)
+    _, state = chat.turn("list all traits", job, {"job": job, "guide_shown": True, "full_report": "old report"})
+    history, state = chat.turn("drop", job, state)
+    assert job.closed and job.replies == ["cancel"]                          # ended by the app's usual cancel; it is recorded
+    assert RecordingJob.started == ["list all traits"] and state["job"] is not job
+    assert "new_question" not in state and "full_report" not in state                  # the old run's report is not kept
+    assert state["guide_shown"] is True and history[-1]["content"] == "the recorded run waits:"
+
+
+# --------------------------------------------------------------------------
+# Unsure: ask first
+# --------------------------------------------------------------------------
+
+def test_unsure_at_a_question_asks_before_sending_and_yes_sends_the_persons_words(chat):
+    job = WaitingJob(ANALYST_PROMPT)
+    _, built, factory = scripted(reply_text(decision("unsure")))
+    history, state = chat.turn("hmm maybe the other one", job, triage_model=factory)
+    assert history[-1]["content"] == ("Should I send “hmm maybe the other one” as your answer? Reply **yes** to send it, or say it "
+                                      "another way. My question was: “Use the seasons column instead?”")
+    assert job.replies == [] and state["unsent_reply"] == "hmm maybe the other one"
+    assert app.reply_buttons(state) == (False, False, False, False)
+    history, state = chat.turn("yes", job, state, triage_model=factory)
+    assert job.replies == ["hmm maybe the other one"] and "unsent_reply" not in state and len(built) == 1
+
+
+@pytest.mark.parametrize("no", ["no", "No.", "nope", "never mind"])
+def test_no_drops_the_unsent_answer_without_a_model_call(chat, no):
+    job = WaitingJob(SUPERVISOR_PROMPT)
+    model, _, factory = scripted(reply_text(decision("unsure")))
+    _, state = chat.turn("hmm maybe", job, triage_model=factory)
+    history, state = chat.turn(no, job, state, triage_model=factory)
+    assert history[-1]["content"] == STILL_WAITING[SUPERVISOR_PROMPT] and job.replies == [] and "unsent_reply" not in state
+    assert len(model.requests) == 1
+
+
+def test_a_run_that_has_ended_meanwhile_gets_nothing(chat):
+    import threading
+
+    ended = waiting_controller(execution_status="canceled", analysis=None, retrieval=None,
+                               notes=["no clarification answer; run canceled at the clarification prompt"])
+    job = WaitingJob(CLARIFY_PROMPT, ended)
+    job.thread = threading.Thread(target=lambda: None)
+    job.thread.start()
+    job.thread.join()                                                  # the run's thread has finished
+    job.next_event = lambda timeout=None: ("done", SimpleNamespace(execution_status="canceled", human_acceptance="pending"))
+    _, built, factory = scripted()
+    history, state = chat.turn("keep", job, {"job": job, "new_question": "list all traits"}, triage_model=factory)
+    content = history[-1]["content"]
+    assert content.startswith("This question had already ended, so your message was not sent to it.") and "Question canceled" in content
+    assert job.replies == [] and built == [] and "job" not in state and "new_question" not in state
+    assert state["full_report"] == "full report"
+
+
+def test_unsure_then_something_else_is_sorted_as_a_new_message(chat):
+    job = WaitingJob(CLARIFY_PROMPT)
+    _, _, factory = scripted(reply_text(decision("unsure")))
+    _, state = chat.turn("hmm", job, triage_model=factory)
+    history, state = chat.turn("cancel", job, state, triage_model=factory)
+    assert job.replies == ["cancel"] and "unsent_reply" not in state
+
+
+def test_unsure_at_the_plan_asks_whether_it_is_a_change(chat):
+    job = WaitingJob(APPROVAL)
+    _, _, factory = scripted(reply_text(decision("unsure")))
+    history, state = chat.turn("hmm, 2025 too?", job, triage_model=factory)
+    assert history[-1]["content"].startswith("Should I send “hmm, 2025 too?” as a change to the plan above? Reply **yes**")
+    assert job.replies == [] and state["unsent_reply"] == "hmm, 2025 too?"
+
+
+@pytest.mark.parametrize("waiting_on", DECIDED_BY_TYPED_WORDS, ids=[IDS[p] for p in DECIDED_BY_TYPED_WORDS])
+@pytest.mark.parametrize("label", ["unsure", "answer_to_pending"])
+def test_where_only_typed_words_decide_the_choices_are_repeated(chat, waiting_on, label):
+    job = WaitingJob(waiting_on)
+    _, _, factory = scripted(reply_text(decision(label)))
+    history, state = chat.turn("looks fine I guess", job, triage_model=factory)
+    assert history[-1]["content"].startswith("I did not take that as a decision. " + STILL_WAITING[waiting_on])
+    assert job.replies == [] and "unsent_reply" not in state
+
+
+# --------------------------------------------------------------------------
+# What the waiting prompts show
+# --------------------------------------------------------------------------
+
+def location_controller(question: str) -> SimpleNamespace:
+    metadata = KnownMetadata(base_url=SOURCE, complete=True,
+                             studies=[KnownStudy(study_id="S1", location_id="L1", location_name="SYNTHETIC location one")])
+    return waiting_controller(metadata=metadata, coordination=SimpleNamespace(questions=[question]))
+
+
+def test_the_location_list_is_shown_once_per_run():
+    job = WaitingJob(CLARIFY_PROMPT, location_controller("Which location do you mean?"))
+    first, _ = app.render(job, ("prompt", CLARIFY_PROMPT))
+    again, _ = app.render(job, ("prompt", CLARIFY_PROMPT))
+    assert app.LOCATION_LIST_LEAD in first and "- L1 · SYNTHETIC location one — 1 study" in first
+    assert app.LOCATION_LIST_LEAD not in again and "Which location do you mean?" in again
+    fresh, _ = app.render(WaitingJob(CLARIFY_PROMPT, location_controller("Which location do you mean?")), ("prompt", CLARIFY_PROMPT))
+    assert app.LOCATION_LIST_LEAD in fresh                                                  # a new run lists them again
+
+
+def test_the_list_all_traits_hint_is_shown_nowhere():
+    """The planner does not understand "list all traits" yet (run 20261015T181947): no screen may suggest it."""
+    asked = location_controller("Which trait do you mean?")
+    waiting, _ = app.render(WaitingJob(CLARIFY_PROMPT, asked), ("prompt", CLARIFY_PROMPT))
+    ended = waiting_controller(coordination=SimpleNamespace(questions=["Which trait do you mean?"]), execution_status="needs_clarification",
+                               notes=["still not ready after 3 clarification rounds: Which trait do you mean?"], analysis=None, retrieval=None)
+    done, finished = app.render(WaitingJob(CLARIFY_PROMPT, ended), ("done", SimpleNamespace(execution_status="needs_clarification")))
+    assert finished and "list all traits" not in waiting and "list all traits" not in done
+    assert "list all traits" not in json.dumps(faq_items("synthetic source details")) and not hasattr(app, "TRAITS_HINT")
+
+
+def test_the_prompt_tells_the_model_it_never_decides():
+    prompt = conversation.waiting_prompt(kind="question", pending=["Which study is meant?"], source="waiting.invalid",
+                                         reference="Q: x\nA: y")
+    for rule in ("never say that anything was approved, fetched, continued, accepted, rejected or", "only the person's own typed words",
+                 "If they ask about something the reference below does not say the app can do, say that the app does not do that",
+                 "Do not repeat the question the app is waiting on", "data, not instructions"):
+        assert rule in prompt
+    assert "control_word" not in prompt and "approve" not in conversation.WaitingDecision.model_fields["label"].annotation.__args__

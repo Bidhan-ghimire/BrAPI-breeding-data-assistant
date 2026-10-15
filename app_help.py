@@ -42,7 +42,9 @@ def faq_items(source_details: str, *, data_sharing_policy: str = "") -> list[tup
         ("Why does the assistant ask another question?",
          "It may need to identify a study or trait, resolve an ambiguous request, or clarify an analysis. Reply in the chat. "
          "A clarification during retrieval cannot broaden the data access you already approved. "
-         "To request different studies or traits, choose **Cancel** and start a **New question**."),
+         "To request different studies or traits, choose **Cancel** and start a **New question**. "
+         "While it waits, you can still ask something else: it answers and repeats its question. A new data question, "
+         "such as 'Which studies have a 2025 season?', gets a choice: drop the current question or keep it."),
         ("Why might I not get an answer?",
          "The requested data may be missing, incomplete, outside the approved request, or unavailable within the app's limits. "
          "Check the explanation in the chat and try a narrower question. A request waiting for your reply ends after 15 minutes. "
