@@ -129,7 +129,7 @@ def default_models() -> Models:
 
 
 def default_triage_model():
-    """The configured model for the front door's one sorting call. Built only when the rules cannot place a message."""
+    """The configured model for the front door's one call. Built only for a message that does not go straight to a run."""
     from llm import OpenAICompatibleClient, load_llm_settings
 
     return OpenAICompatibleClient(load_llm_settings())
@@ -287,13 +287,22 @@ def _source_name() -> str:
         return "the breeding database"
 
 
-def _front_door_reply(sorted_message: triage.Triage, text: str) -> str:
-    """Written by code; at most the label came from the model."""
-    if sorted_message.label == "greeting_or_smalltalk":
-        return triage.greeting_reply(text)
-    if sorted_message.label == "app_question":
-        return triage.app_reply(sorted_message.topic, _faq())
-    return triage.unsure_reply(_source_name())
+def _ask_front_door(text: str, triage_model: Callable[[], Any], known_label: str | None = None) -> triage.TriageDecision | None:
+    return triage.ask_model(text, triage_model, source=_source_name(), reference=triage.reference_text(_faq()),
+                            known_label=known_label)
+
+
+def _reply_without_run(label: str, topic: str | None, text: str, model_text: str,
+                       state: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """The answer to a message that starts nothing, and the tab's state after it. It only returns text: no run, no request."""
+    show_guide = label == "greeting_or_smalltalk" and not state.get("guide_shown")     # "Questions to try" once per tab
+    content = triage.front_door_reply(label, model_text, text=text, topic=topic, faq=_faq(), source=_source_name(),
+                                      show_guide=show_guide)
+    if show_guide:
+        state = {**state, "guide_shown": True}
+    if label == "unsure":
+        state = {**state, "pending_question": text}                                    # a later "yes" starts it
+    return content, state
 
 
 def respond(message: str, history: list[Message], state: dict[str, Any], *, make_config: Callable[[str], RunConfig] = live_config,
@@ -301,9 +310,9 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
             preflight: Callable[[str], list[str]] | None = None,
             triage_model: Callable[[], Any] | None = None) -> Iterator[tuple[list[Message], dict[str, Any], str]]:
     """One chat turn. While a run waits, the text is its reply. A new message first passes the front door (triage.py):
-    greetings and app questions get a code-written answer and start nothing; a data question starts a run. A message the
-    rules cannot place costs one triage_model call; without that model, or when the call fails, it starts a run as before.
-    Yields (history, state, box)."""
+    a data question starts a run; greetings, app questions and unsure messages start nothing and get one triage_model
+    call that writes the reply (the line written by code when there is no model or the call fails). A message the rules
+    cannot place is sorted by that same call; without a decision it starts a run as before. Yields (history, state, box)."""
     text = (message or "").strip()
     if not text:
         yield history, state, ""
@@ -320,8 +329,17 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
         else:
             by_rules = triage.sort_by_rules(text)
             if by_rules is not None and by_rules.label not in triage.PIPELINE_LABELS:
-                history.append({"role": "assistant", "content": _front_door_reply(by_rules, text)})
-                yield history, state, ""                                         # no run, no model call, no request
+                model_text = ""
+                if triage_model is not None:                                     # one call writes the reply
+                    history.append({"role": "assistant", "content": WORKING})
+                    yield history, state, ""
+                    decision = _ask_front_door(text, triage_model, known_label=by_rules.label)
+                    if decision is not None and decision.label == by_rules.label:   # a reply written for another label is not shown
+                        model_text = decision.reply
+                    history = history[:-1]
+                content, state = _reply_without_run(by_rules.label, by_rules.topic, text, model_text, state)
+                history.append({"role": "assistant", "content": content})
+                yield history, state, ""                                         # no run and no database request
                 return
         try:
             problems = (preflight or (lambda q: live_preflight(q, make_config)))(question)
@@ -335,11 +353,10 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
             history.append({"role": "assistant", "content": WORKING})
             working = True
             yield history, state, ""
-            decision = triage.ask_model(text, triage_model)                      # None: no decision, so the run starts
+            decision = _ask_front_door(text, triage_model)                       # None: no decision, so the run starts
             if decision is not None and decision.label not in triage.PIPELINE_LABELS:
-                if decision.label == "unsure":
-                    state = {**state, "pending_question": text}
-                history[-1] = {"role": "assistant", "content": _front_door_reply(triage.Triage(decision.label, "model"), text)}
+                content, state = _reply_without_run(decision.label, None, text, decision.reply, state)
+                history[-1] = {"role": "assistant", "content": content}
                 yield history, state, ""
                 return
         try:
@@ -352,7 +369,7 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
                 history.append(failed)
             yield history, state, ""
             return
-        state = {"job": job}                 # a new question also clears the preceding report
+        state = {"job": job, **{k: state[k] for k in ("guide_shown",) if k in state}}   # a new question clears the old report
     else:
         job.reply(text)
     if not working:
@@ -396,7 +413,7 @@ def hosted_notice(environ: Mapping[str, str] | None = None) -> str:
     except ValueError:
         host = ""
     provider = "OpenAI" if host == "api.openai.com" else "the configured model provider"
-    return (f"Your questions and relevant catalog/data excerpts are sent to **{provider}**. "
+    return (f"Your messages and relevant catalog/data excerpts are sent to **{provider}**. "
             "The planner uses the model before database-fetch approval. Run records are saved on this demo's server; "
             "copy your full report before closing the page. Approval allows database requests; acceptance records your review.")
 
@@ -444,9 +461,10 @@ def after_step(state: dict[str, Any] | None):
 
 
 def start_over(state: dict[str, Any] | None) -> tuple[list[Message], dict[str, Any], str]:
-    """New question: a run that waits for a reply is ended (cancel; it is still recorded) and the chat is cleared."""
+    """New question: a run that waits for a reply is ended (cancel; it is still recorded) and the chat is cleared.
+    The tab keeps only one thing: that it has already shown the example questions (once per tab)."""
     _close_job(state or {})
-    return [], {}, ""
+    return [], {k: v for k, v in (state or {}).items() if k == "guide_shown"}, ""
 
 
 def build_ui(*, make_config: Callable[[str], RunConfig] = live_config, make_models: Callable[[], Models] = default_models,

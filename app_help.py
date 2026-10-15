@@ -53,7 +53,7 @@ def faq_items(source_details: str, *, data_sharing_policy: str = "") -> list[tup
          "Review the source and missing-data notes before using a result in your work. Copy the report to keep it. "
          "Switching between the Assistant and FAQ tabs keeps your current conversation."),
         ("Data sharing policy",
-         data_sharing_policy or "Questions and relevant database excerpts are processed by the app's configured AI model. "
+         data_sharing_policy or "Messages and relevant database excerpts are processed by the app's configured AI model. "
          "Model processing can begin before you approve a database request. "
          "Run records are saved on the computer or server running the app."),
     ]

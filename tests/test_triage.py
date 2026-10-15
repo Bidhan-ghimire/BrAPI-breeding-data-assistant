@@ -4,17 +4,24 @@ tests/test_triage.py — the chat's front door (triage.py and app.respond), offl
 What these tests prove, in plain words:
 * The code rules sort a fixed table of messages. A short number on its own is not a data word; a number that looks
   like an ID (4 or more digits, or letters mixed with digits) is, and so is any number next to a data word.
-* A message the rules cannot place costs exactly one scripted model call with no tools. A missing, failing, slow or
-  invalid model reply means the run starts exactly as before this front door existed.
-* Greetings and app questions make ZERO model calls: the sorting model is never built, no agent model is made,
-  no run starts, no database request is made and no run folder appears.
-* "unsure" asks first and starts nothing; a later "yes" starts the original question; New question forgets it.
-* Replies to a run that is waiting are never sorted, and the app's checks run before the sorting model is asked.
+  Breeding words (yield, clone, variety, ...) are data words. "help" makes an app question only in a message of
+  4 words or fewer, or in one that is nothing but a request for help.
+* Every message that starts nothing (greeting, app question, unsure) costs exactly ONE scripted model call with no
+  tools. That call writes the reply, and for a message the rules cannot place it also picks the label.
+* The model's text is escaped like database text and cut to 600 characters. When the call fails, or the model wrote
+  its reply for another label than the rules chose, the line written by code is shown. The "yes" line for unsure
+  (quoting the person's message) and the example questions (once per tab) are written by code.
+* Nothing in that reply path can start a run: no run, no agent model, no database request and no run folder.
+* A data question never costs a call here; a missing, failing, slow or invalid model makes an unplaced message start
+  the run exactly as before, and the time limit holds even when a helper thread is stuck. A short yes ("yes",
+  "yes, go ahead") after unsure starts the original question; New question forgets it.
+* Replies to a run that is waiting are never sorted, and the app's checks run before an unplaced message is sent.
 The conftest network guard blocks every real socket; the models are scripted.
 """
 from __future__ import annotations
 
 import asyncio
+import html
 import inspect
 import json
 import time
@@ -29,10 +36,15 @@ from llm import FakeModelClient, LlmConfigError, ModelProviderError, reply_text,
 from run import Models, RunConfig
 
 SOURCE = "https://front-door.invalid/brapi/v2"
+REFERENCE = triage.reference_text(faq_items("synthetic source details"))
 
 
-def decision(label: str) -> str:
-    return json.dumps({"label": label, "reason": "scripted for this test"})
+def decision(label: str, reply: str = "") -> str:
+    return json.dumps({"label": label, "reason": "scripted for this test", "reply": reply})
+
+
+def ask(message: str, factory, known_label: str | None = None):
+    return triage.ask_model(message, factory, source="front-door.invalid", reference=REFERENCE, known_label=known_label)
 
 
 # --------------------------------------------------------------------------
@@ -43,6 +55,8 @@ def decision(label: str) -> str:
     ("hello how are you?", "greeting_or_smalltalk"),
     ("Thanks!", "greeting_or_smalltalk"),
     ("Good morning", "greeting_or_smalltalk"),
+    ("namaste", "greeting_or_smalltalk"),
+    ("what's up", "greeting_or_smalltalk"),
     ("what can you do?", "app_question"),
     ("help", "app_question"),
     ("What does approve mean?", "app_question"),                  # 'mean' here is about the app, not a statistic
@@ -57,7 +71,12 @@ def decision(label: str) -> str:
     ("Happy new year to you!", "greeting_or_smalltalk"),          # 'year' is a data word, but this message is only a greeting
     ("hello, which studies have a 2026 season?", "data_question"),  # a greeting in front of a question is still a question
     ("tell me something interesting", None),                       # the rules cannot tell: the model decides
-    ("question", None),
+    ("what's your name?", None),
+    ("bla bla bla", None),
+    ("help me find sweetpotato yield in Clinton", "data_question"),    # 'yield' is a breeding word
+    ("can you help me?", "app_question"),                          # help in a message of 4 words or fewer
+    ("could you please help me with this?", "app_question"),       # longer, but nothing except a request for help
+    ("help me find sweetpotato flowers in Clinton", None),        # longer and about something else: the model decides
 ])
 def test_rules_sort_a_fixed_table_of_messages(message, label):
     sorted_message = triage.sort_by_rules(message)
@@ -82,22 +101,21 @@ def test_a_bare_number_is_not_a_data_word_but_an_id_is(message, label):
     assert (sorted_message.label if sorted_message else None) == label
 
 
+@pytest.mark.parametrize("word", [
+    "yield", "harvest", "disease", "resistance", "clone", "variety", "cultivar", "accession", "genotype", "cross", "parent",
+    "flowering", "maturity", "height", "weight", "score", "observation", "measurement",
+    "yields", "harvests", "varieties", "crosses", "parents", "measurements",
+])
+def test_breeding_words_make_a_data_question(word):
+    assert triage.sort_by_rules(f"show me the {word} please") == triage.Triage("data_question", "rules")
+
+
 @pytest.mark.parametrize("token, looks_like_an_id", [
     ("7", False), ("42", False), ("123", False), ("4501", True), ("0000192", True),
     ("05DISE178HFLNO7", True), ("S1", True), ("abc", False),
 ])
 def test_id_like_means_four_digits_or_letters_with_digits(token, looks_like_an_id):
     assert triage.id_like(token) is looks_like_an_id
-
-
-@pytest.mark.parametrize("message, first_line", [
-    ("hello how are you?", "Hello! I can help you explore public breeding data."),
-    ("Thanks!", "You're welcome!"),
-    ("no", "I can help you explore public breeding data."),
-])
-def test_the_friendly_line_fits_the_message_and_the_examples_follow(message, first_line):
-    reply = triage.greeting_reply(message)
-    assert reply.split("\n", 1)[0] == first_line and "Questions to try" in reply
 
 
 @pytest.mark.parametrize("message", [
@@ -118,33 +136,51 @@ def test_every_app_answer_names_a_question_of_the_help_tab():
 
 
 # --------------------------------------------------------------------------
-# The one model call
+# The prompt and the one model call
 # --------------------------------------------------------------------------
 
+def test_the_prompt_carries_the_rules_the_reference_and_the_examples():
+    prompt = triage.front_door_prompt(source="front-door.invalid", reference=REFERENCE)
+    for rule in ("1 to 3 sentences of plain text", "Mirror the person's greeting and write in the language they used",
+                 "Never claim to have looked anything up", "If they ask about something the reference below does not say "
+                 "the app can do, say that the app does not do that", "Offer one example question only when it helps, "
+                 "and never for unsure", "Do not offer a lookup or suggest a", "leave it empty for data_question and follow_up",
+                 "front-door.invalid", "Choose the label"):
+        assert rule in prompt
+    for fact in ("It does not make parental-selection or line-advancement recommendations", "Which studies have a 2026 season?",
+                 "synthetic source details", "Approve allows the specific database request"):
+        assert fact in prompt
+    assert "*" not in REFERENCE and "`" not in REFERENCE           # no markdown for the model to copy
+    known = triage.front_door_prompt(source="front-door.invalid", reference=REFERENCE, known_label="app_question")
+    assert "already sorted this message as app_question: use that label. Nothing will be looked up for this message" in known
+
+
 @pytest.mark.parametrize("label", ["greeting_or_smalltalk", "app_question", "data_question", "follow_up", "unsure"])
-def test_the_model_is_asked_once_without_tools(label):
-    model = FakeModelClient([reply_text(decision(label))])
-    result = triage.ask_model("tell me something interesting", lambda: model)
-    assert result is not None and result.label == label
+def test_one_call_without_tools_returns_the_label_and_the_reply(label):
+    model = FakeModelClient([reply_text(decision(label, "Hello there"))])
+    result = ask("tell me something interesting", lambda: model)
+    assert result is not None and (result.label, result.reply) == (label, "Hello there")
     [request] = model.requests                                     # exactly one call
     assert request["tools"] == [] and request["max_tokens"] == triage.TRIAGE_MAX_TOKENS
-    assert request["messages"] == [{"role": "system", "content": triage.SYSTEM_PROMPT},
-                                   {"role": "user", "content": "tell me something interesting"}]
+    assert request["messages"] == [
+        {"role": "system", "content": triage.front_door_prompt(source="front-door.invalid", reference=REFERENCE)},
+        {"role": "user", "content": "tell me something interesting"}]
 
 
 @pytest.mark.parametrize("reply", [
     reply_text("not json"),
-    reply_text(json.dumps({"label": "maybe", "reason": "an unknown label"})),
-    reply_text(json.dumps({"label": "unsure", "reason": "x", "extra": "a field the decision does not have"})),
-    reply_text(json.dumps({"label": "unsure"})),                  # the reason is required
-    reply_text("```json\n" + decision("unsure") + "\n```"),     # only the bare JSON object counts
-    reply_text(decision("unsure"), finish_reason="length"),      # a reply cut off at the limit is no decision
-    reply_tools([("search_studies", "{}")]),                      # the sorter has no tools
+    reply_text(json.dumps({"label": "maybe", "reason": "an unknown label", "reply": ""})),
+    reply_text(json.dumps({"label": "unsure", "reason": "x", "reply": "", "extra": "a field the decision does not have"})),
+    reply_text(json.dumps({"label": "unsure", "reply": "hi"})),     # the reason is required
+    reply_text(json.dumps({"label": "unsure", "reason": "x", "reply": "a" * 4001})),
+    reply_text("```json\n" + decision("unsure") + "\n```"),       # only the bare JSON object counts
+    reply_text(decision("unsure"), finish_reason="length"),        # a reply cut off at the limit is no decision
+    reply_tools([("search_studies", "{}")]),                        # the front door has no tools
     ModelProviderError("http_error", "provider returned HTTP 500"),
-])
+], ids=["not-json", "unknown-label", "extra-field", "no-reason", "too-long", "fenced", "cut-off", "tool-call", "provider-error"])
 def test_an_invalid_or_failed_reply_is_no_decision(reply):
     model = FakeModelClient([reply])
-    assert triage.ask_model("tell me something interesting", lambda: model) is None
+    assert ask("tell me something interesting", lambda: model) is None
     assert len(model.requests) == 1                                # asked once, never retried
 
 
@@ -153,7 +189,7 @@ class OpensAndCloses:
 
     def __init__(self):
         self.opened = self.closed = 0
-        self.inner = FakeModelClient([reply_text(decision("app_question"))])
+        self.inner = FakeModelClient([reply_text(decision("app_question", "I find public breeding records."))])
 
     async def __aenter__(self):
         self.opened += 1
@@ -165,17 +201,18 @@ class OpensAndCloses:
 
 def test_a_client_that_needs_async_with_is_opened_and_closed_once():
     client = OpensAndCloses()
-    result = triage.ask_model("tell me something interesting", lambda: client)
+    result = ask("what's your name?", lambda: client)
     assert result is not None and result.label == "app_question"
     assert client.opened == client.closed == 1 and len(client.inner.requests) == 1
 
 
-def test_no_model_unusable_settings_or_a_slow_model_give_no_decision(monkeypatch):
-    assert triage.ask_model("tell me something interesting", None) is None
+def unusable_settings():
+    raise LlmConfigError("LLM_MODEL is blank")
 
-    def unusable():
-        raise LlmConfigError("LLM_MODEL is blank")
-    assert triage.ask_model("tell me something interesting", unusable) is None
+
+def test_no_model_unusable_settings_or_a_slow_model_give_no_decision(monkeypatch):
+    assert ask("tell me something interesting", None) is None
+    assert ask("tell me something interesting", unusable_settings) is None
 
     class Slow:
         calls = 0
@@ -185,7 +222,59 @@ def test_no_model_unusable_settings_or_a_slow_model_give_no_decision(monkeypatch
             await asyncio.sleep(30)
 
     monkeypatch.setattr(triage, "TRIAGE_TIMEOUT_S", 0.05)
-    assert triage.ask_model("tell me something interesting", Slow) is None and Slow.calls == 1
+    assert ask("tell me something interesting", Slow) is None and Slow.calls == 1
+
+
+def test_the_time_limit_holds_even_when_a_helper_thread_is_stuck(monkeypatch):
+    class StuckLookup:   # like a host-name lookup that hangs in a helper thread, which the event loop cannot stop
+        async def complete(self, messages, tools, *, max_tokens):
+            await asyncio.get_running_loop().run_in_executor(None, time.sleep, 2)
+
+    monkeypatch.setattr(triage, "TRIAGE_TIMEOUT_S", 0.05)
+    started = time.perf_counter()
+    assert ask("tell me something interesting", StuckLookup) is None
+    assert time.perf_counter() - started < 1.0                     # asyncio.run would wait the full 2 s for that thread
+
+
+# --------------------------------------------------------------------------
+# What the person sees for a message that starts nothing
+# --------------------------------------------------------------------------
+
+def shown(label, model_text, *, message="hello", topic=None, show_guide=False):
+    return triage.front_door_reply(label, model_text, text=message, topic=topic, faq=faq_items("synthetic source details"),
+                                   source="front-door.invalid", show_guide=show_guide)
+
+
+def test_the_models_text_is_escaped_like_database_text_and_cut():
+    unsafe = '<script>alert(1)</script> **bold** | `code` [link](http://x.invalid) ' + "a" * 2000
+    content = shown("app_question", unsafe)
+    assert "<script>" not in content and "&lt;script&gt;" in content
+    assert "**" not in content and "&#42;&#42;bold&#42;&#42;" in content
+    assert "&#124;" in content and "&#96;code&#96;" in content and "&#91;link&#93;&#40;" in content
+    assert len(html.unescape(content)) == triage.REPLY_MAX_CHARS + 1 and content.endswith("…")   # 600 characters shown, then "…"
+
+
+def test_code_adds_the_yes_line_for_unsure_and_the_examples_only_when_asked():
+    unsure = shown("unsure", "I am not sure what you mean", message="cassava")
+    assert unsure == ("I am not sure what you mean\n\n"
+                      "Reply **yes** to look up “cassava” in front-door.invalid as you typed it, or ask your data question.")
+    quoted = shown("unsure", "Hmm", message="<b>cassava</b> **2026** " + "x" * 300)   # the person's words, escaped and cut
+    assert "“&lt;b&gt;cassava&lt;/b&gt; &#42;&#42;2026&#42;&#42; x" in quoted and "<b>" not in quoted and "x" * 121 not in quoted
+    assert "Questions to try" in shown("greeting_or_smalltalk", "Hello there", show_guide=True)
+    assert shown("greeting_or_smalltalk", "Hello there", show_guide=False) == "Hello there"
+
+
+@pytest.mark.parametrize("label, message, topic, expected", [
+    ("greeting_or_smalltalk", "hello how are you?", None, "Hello! I can help you explore public breeding data."),
+    ("greeting_or_smalltalk", "Thanks!", None, "You're welcome!"),
+    ("greeting_or_smalltalk", "no", None, "I can help you explore public breeding data."),
+    ("greeting_or_smalltalk", "bye", None, "Goodbye! Come back any time."),
+    ("app_question", "what can you do?", "capabilities", "**What can I use this assistant for?**"),
+    ("app_question", "what's your name?", None, "### Your first question"),
+    ("unsure", "bla bla bla", None, "Do you want me to look this up in front-door.invalid? Reply **yes**"),
+])
+def test_without_model_text_the_line_written_by_code_is_shown(label, message, topic, expected):
+    assert shown(label, "   ", message=message, topic=topic).startswith(expected)
 
 
 # --------------------------------------------------------------------------
@@ -246,8 +335,20 @@ def chat(tmp_path, monkeypatch):
     return SimpleNamespace(turn=turn, counts=counts, requests=requests, out=tmp_path / "out")
 
 
-def sorter(*replies):
-    """A sorting-model factory that records whether it was ever called."""
+@pytest.fixture
+def no_runs(monkeypatch):
+    """Replaces the code that starts a run with a trap: if anything calls it, the test sees it."""
+    calls: list[tuple] = []
+
+    def trap(*args, **kwargs):
+        calls.append(args)
+        raise AssertionError("a run was started from the front door's reply path")
+    monkeypatch.setattr(app, "Job", trap)
+    return calls
+
+
+def model_factory(*replies):
+    """A front-door model factory that records whether it was ever called."""
     model = FakeModelClient(list(replies))
     built: list[FakeModelClient] = []
 
@@ -257,134 +358,200 @@ def sorter(*replies):
     return model, built, factory
 
 
-@pytest.mark.parametrize("message, shown", [
-    ("hello how are you?", "Questions to try"),
-    ("Thanks!", "You're welcome!"),
-    ("what can you do?", "What can I use this assistant for?"),
-    ("help", "Your first question"),
-    ("What does approve mean?", "**Approve** allows the specific database request"),
-    ("Where do the data come from?", SOURCE),
+@pytest.mark.parametrize("message, label", [
+    ("hello how are you?", "greeting_or_smalltalk"),
+    ("namaste", "greeting_or_smalltalk"),
+    ("what's up", "greeting_or_smalltalk"),
+    ("what can you do?", "app_question"),
+    ("help", "app_question"),
+    ("What does approve mean?", "app_question"),
 ])
-def test_greetings_and_app_questions_make_zero_model_calls(chat, message, shown):
-    model, built, factory = sorter(reply_text(decision("data_question")))
-    history, state = chat.turn(message, triage_model=factory)     # the real app.Job: a wrong path would make models and a run
-    assert shown in history[-1]["content"]
-    assert built == [] and model.requests == []                   # the sorting model was never even built
-    assert chat.counts["models"] == 0                             # no run, so no agent model either
-    assert chat.counts["preflight"] == 0 and chat.requests == []  # no run checks, no database request
-    assert not chat.out.exists() and "job" not in state           # no run folder, nothing waiting
-    assert [m["role"] for m in history] == ["user", "assistant"]
+def test_greetings_and_app_questions_get_one_model_reply_and_start_nothing(chat, no_runs, message, label):
+    model, built, factory = model_factory(reply_text(decision(label, "Hello there, I look up public breeding records")))
+    history, state = chat.turn(message, triage_model=factory)
+    assert history[-1]["content"].startswith("Hello there, I look up public breeding records")   # the model's words
+    [request] = model.requests                                     # exactly one call, no tools
+    assert request["tools"] == [] and f"already sorted this message as {label}" in request["messages"][0]["content"]
+    assert no_runs == [] and chat.counts["models"] == 0            # nothing started a run; no agent model was made
+    assert chat.counts["preflight"] == 0 and chat.requests == []   # no run checks, no database request
+    assert not chat.out.exists() and "job" not in state            # no run folder, nothing waiting
+    assert [m["role"] for m in history] == ["user", "assistant"]   # the progress line was replaced
 
 
-def test_a_number_alone_asks_the_model_once_but_an_id_starts_the_run_directly(chat, monkeypatch):
-    monkeypatch.setattr(app, "Job", RecordingJob)
-    model, built, factory = sorter(reply_text(decision("data_question")))
-    history, state = chat.turn("42", triage_model=factory)
-    assert len(model.requests) == 1 and RecordingJob.started == ["42"] and "job" in state
-    assert [m["role"] for m in history] == ["user", "assistant"]  # one reply: the progress line was replaced
-    history, state = chat.turn("4501", triage_model=factory)
-    assert len(model.requests) == 1 and RecordingJob.started == ["42", "4501"]
+@pytest.mark.parametrize("message, label, expected", [
+    ("hello", "data_question", "Hello! I can help you explore public breeding data."),
+    ("hello", "follow_up", "Hello! I can help you explore public breeding data."),
+    ("hello", "unsure", "Hello! I can help you explore public breeding data."),
+    ("hello", "app_question", "Hello! I can help you explore public breeding data."),
+    ("can you help me?", "data_question", "### Your first question"),                         # the rules say app question
+    ("What does approve mean?", "greeting_or_smalltalk", "**What do Approve, Continue and Accept mean?**"),
+], ids=["greeting-data", "greeting-follow-up", "greeting-unsure", "greeting-app", "help-data", "approve-greeting"])
+def test_a_reply_written_for_another_label_is_not_shown_and_starts_nothing(chat, no_runs, message, label, expected):
+    model, _, factory = model_factory(reply_text(decision(label, "I'll search those records now; just say yes.")))
+    history, state = chat.turn(message, triage_model=factory)
+    assert history[-1]["content"].startswith(expected) and "search those records" not in history[-1]["content"]
+    assert len(model.requests) == 1 and no_runs == [] and "job" not in state and "pending_question" not in state
+    assert chat.requests == [] and not chat.out.exists()
 
 
-@pytest.mark.parametrize("label, shown", [
-    ("greeting_or_smalltalk", "Questions to try"),
-    ("app_question", "Your first question"),
-])
-def test_model_labels_without_data_get_a_code_written_reply_and_start_nothing(chat, monkeypatch, label, shown):
-    monkeypatch.setattr(app, "Job", RecordingJob)
-    model, _, factory = sorter(reply_text(decision(label)))
-    history, state = chat.turn("tell me something interesting", triage_model=factory)
-    assert shown in history[-1]["content"] and RecordingJob.started == [] and "job" not in state
-    assert len(model.requests) == 1 and chat.requests == []
-
-
-@pytest.mark.parametrize("label", ["data_question", "follow_up"])
-def test_data_and_follow_up_labels_start_the_run_with_the_message(chat, monkeypatch, label):
-    monkeypatch.setattr(app, "Job", RecordingJob)
-    _, _, factory = sorter(reply_text(decision(label)))
-    history, state = chat.turn("and in that trial?", triage_model=factory)
-    assert RecordingJob.started == ["and in that trial?"] and "job" in state
-    assert "Reply **accept**" in history[-1]["content"]
-
-
-def unusable_settings():
-    raise LlmConfigError("LLM_MODEL is blank")
+def test_the_models_text_reaches_the_chat_escaped(chat, no_runs):
+    _, _, factory = model_factory(reply_text(decision("app_question", "<img src=x onerror=alert(1)> [click](http://x.invalid)")))
+    history, _ = chat.turn("what can you do?", triage_model=factory)
+    content = history[-1]["content"]
+    assert "<img" not in content and "&lt;img" in content and "](" not in content and no_runs == []
 
 
 @pytest.mark.parametrize("factory", [
-    None,                                                                       # no sorting model: today's behaviour
+    None,                                                          # no model: the line written by code, no call
+    unusable_settings,
+    lambda: FakeModelClient([ModelProviderError("connection", "could not reach the model")]),
+    lambda: FakeModelClient([reply_text("not json")]),
+    lambda: FakeModelClient([reply_text(decision("greeting_or_smalltalk", ""))]),         # an empty reply
+    lambda: FakeModelClient([reply_text(decision("greeting_or_smalltalk", "Hi"), finish_reason="length")]),
+], ids=["no-model", "unusable-settings", "provider-error", "invalid-reply", "empty-reply", "cut-off"])
+def test_a_failed_reply_call_shows_the_line_written_by_code(chat, no_runs, factory):
+    history, state = chat.turn("hello how are you?", triage_model=factory)
+    assert history[-1]["content"].startswith("Hello! I can help you explore public breeding data.")
+    assert "Questions to try" in history[-1]["content"] and no_runs == [] and chat.requests == [] and not chat.out.exists()
+    assert [m["role"] for m in history] == ["user", "assistant"]
+
+
+def test_questions_to_try_appear_once_per_tab(chat, no_runs, monkeypatch):
+    _, _, factory = model_factory(*[reply_text(decision("greeting_or_smalltalk", "Hello there")) for _ in range(3)])
+    history, state = chat.turn("hello", triage_model=factory)
+    assert "Questions to try" in history[-1]["content"] and state["guide_shown"] is True
+    history, state = chat.turn("hi again", history, state, triage_model=factory)
+    assert history[-1]["content"] == "Hello there"                # the second greeting: no example box
+    history, state, _ = app.start_over(state)
+    assert (history, state) == ([], {"guide_shown": True})        # New question clears the chat, but it is the same tab
+    history, state = chat.turn("hello", history, state, triage_model=factory)
+    assert history[-1]["content"] == "Hello there"
+    monkeypatch.setattr(app, "Job", RecordingJob)
+    _, state = chat.turn("Which studies have a 2026 season?", history, state)
+    assert "job" in state and state["guide_shown"] is True         # a run keeps it too
+
+
+@pytest.mark.parametrize("label", ["greeting_or_smalltalk", "app_question"])
+def test_one_call_sorts_an_unplaced_message_and_writes_its_reply(chat, no_runs, label):
+    model, _, factory = model_factory(reply_text(decision(label, "My name is the Breeding data assistant")))
+    history, state = chat.turn("what's your name?", triage_model=factory)
+    assert history[-1]["content"].startswith("My name is the Breeding data assistant")
+    assert len(model.requests) == 1 and "Choose the label" in model.requests[0]["messages"][0]["content"]
+    assert no_runs == [] and "job" not in state and chat.requests == []
+
+
+@pytest.mark.parametrize("label", ["data_question", "follow_up"])
+def test_data_and_follow_up_labels_start_the_run_and_ignore_the_text(chat, monkeypatch, label):
+    monkeypatch.setattr(app, "Job", RecordingJob)
+    model, _, factory = model_factory(reply_text(decision(label, "Sure, I have looked it up for you")))
+    history, state = chat.turn("and the other one?", triage_model=factory)   # the rules cannot place it: the model decides
+    assert len(model.requests) == 1 and RecordingJob.started == ["and the other one?"] and "job" in state
+    assert "Reply **accept**" in history[-1]["content"] and "looked it up" not in str(history)
+
+
+@pytest.mark.parametrize("factory", [
+    None,                                                                       # no model: today's behaviour
     unusable_settings,                                                          # the model cannot even be built
     lambda: FakeModelClient([ModelProviderError("connection", "could not reach the model")]),
     lambda: FakeModelClient([reply_text("not json")]),
 ], ids=["no-model", "unusable-settings", "provider-error", "invalid-reply"])
-def test_without_a_decision_the_run_starts_as_before(chat, monkeypatch, factory):
+def test_without_a_decision_an_unplaced_message_starts_the_run_as_before(chat, monkeypatch, factory):
     monkeypatch.setattr(app, "Job", RecordingJob)
     history, state = chat.turn("tell me something interesting", triage_model=factory)
     assert RecordingJob.started == ["tell me something interesting"] and "job" in state
     assert [m["role"] for m in history] == ["user", "assistant"] and "Reply **accept**" in history[-1]["content"]
 
 
+def test_a_number_alone_asks_the_model_once_but_an_id_starts_the_run_directly(chat, monkeypatch):
+    monkeypatch.setattr(app, "Job", RecordingJob)
+    model, _, factory = model_factory(reply_text(decision("data_question")))
+    history, state = chat.turn("42", triage_model=factory)
+    assert len(model.requests) == 1 and RecordingJob.started == ["42"] and "job" in state
+    history, state = chat.turn("4501", triage_model=factory)
+    assert len(model.requests) == 1 and RecordingJob.started == ["42", "4501"]   # a data question costs no call here
+
+
+def test_a_help_request_with_a_breeding_word_starts_the_run_without_a_model_call(chat, monkeypatch):
+    monkeypatch.setattr(app, "Job", RecordingJob)
+    model, built, factory = model_factory()
+    history, state = chat.turn("help me find sweetpotato yield in Clinton", triage_model=factory)
+    assert RecordingJob.started == ["help me find sweetpotato yield in Clinton"] and "job" in state
+    assert built == [] and model.requests == [] and "Reply **accept**" in history[-1]["content"]
+
+
 def test_a_run_that_cannot_start_after_sorting_leaves_one_clear_reply(chat, monkeypatch):
     def cannot_start(*args, **kwargs):
         raise ValueError("secret-that-must-not-appear")
     monkeypatch.setattr(app, "Job", cannot_start)
-    _, _, factory = sorter(reply_text(decision("data_question")))
+    _, _, factory = model_factory(reply_text(decision("data_question")))
     history, state = chat.turn("tell me something interesting", triage_model=factory)
     assert [m["role"] for m in history] == ["user", "assistant"] and "could not start" in history[-1]["content"]
     assert "secret-that-must-not-appear" not in str(history) and state == {}
 
 
-def test_the_page_hands_the_sorting_model_to_the_chat(monkeypatch):
+def test_the_page_hands_the_front_door_model_to_the_chat(monkeypatch):
     assert inspect.signature(app.build_ui).parameters["triage_model"].default is app.default_triage_model  # on by default
     monkeypatch.setattr(app, "source_markdown", lambda: "Synthetic source details")
     monkeypatch.setattr(app, "hosted_notice", lambda: "")
     monkeypatch.setattr(app, "Job", RecordingJob)
     RecordingJob.started = []
-    model, built, factory = sorter(reply_text(decision("unsure")))
+    model, built, factory = model_factory(reply_text(decision("unsure", "I did not quite follow")))
     ui = app.build_ui(preflight=lambda q: [], triage_model=factory)
     [submit] = [f for f in ui.fns.values() if f.name == "on_submit"]
     history, state, box = list(submit.fn("tell me something interesting", [], {}))[-1]
-    assert built == [model] and len(model.requests) == 1
+    assert built == [model] and len(model.requests) == 1 and history[-1]["content"].startswith("I did not quite follow")
     assert state["pending_question"] == "tell me something interesting" and RecordingJob.started == [] and box == ""
 
 
-def test_unsure_asks_first_and_yes_starts_the_original_question(chat, monkeypatch):
+@pytest.mark.parametrize("yes_reply", ["yes", "Yes, go ahead"])
+def test_unsure_asks_first_and_yes_starts_the_original_question(chat, monkeypatch, yes_reply):
     monkeypatch.setattr(app, "Job", RecordingJob)
-    model, _, factory = sorter(reply_text(decision("unsure")))
+    model, _, factory = model_factory(reply_text(decision("unsure", "I am not sure what you would like to know")))
     message = "tell me something interesting"
     history, state = chat.turn(message, triage_model=factory)
-    assert "Do you want me to look this up in front-door.invalid? Reply **yes**" in history[-1]["content"]
+    assert history[-1]["content"] == ("I am not sure what you would like to know\n\nReply **yes** to look up "
+                                      "“tell me something interesting” in front-door.invalid as you typed it, or ask your data question.")
     assert state["pending_question"] == message and RecordingJob.started == [] and chat.requests == []
-    history, state = chat.turn("yes", history, state, triage_model=factory)
+    history, state = chat.turn(yes_reply, history, state, triage_model=factory)
     assert RecordingJob.started == [message] and "job" in state and "pending_question" not in state
-    assert len(model.requests) == 1                                # "yes" itself is never sent to the model
+    assert len(model.requests) == 1                                # the "yes" itself is never sent to the model
+
+
+@pytest.mark.parametrize("reply, means_yes", [
+    ("yes", True), ("Yes!", True), ("y", True), ("yeah", True), ("yes please", True), ("yes, go ahead", True),
+    ("ok, do it", True), ("sure, look it up", True), ("go ahead", True), ("please do", True), ("look it up", True),
+    ("no", False), ("please", False), ("", False), ("yes but for 2025", False), ("yes, cassava in 2025", False),
+    ("ok go ahead please do it now", False),
+])
+def test_yes_means_a_short_reply_made_only_of_yes_words(reply, means_yes):
+    assert triage.is_yes(reply) is means_yes
 
 
 def test_new_question_forgets_a_waiting_question(chat, monkeypatch):
     monkeypatch.setattr(app, "Job", RecordingJob)
-    _, _, factory = sorter(reply_text(decision("unsure")))
+    _, _, factory = model_factory(reply_text(decision("unsure", "What would you like to know?")))
     _, state = chat.turn("tell me something interesting", triage_model=factory)
     assert app.start_over(state) == ([], {}, "")
-    history, state = chat.turn("yes", [], {}, triage_model=factory)
+    history, state = chat.turn("yes", [], {}, triage_model=None)   # now just a word: the greeting line, no run
     assert RecordingJob.started == [] and "Questions to try" in history[-1]["content"]
 
 
 def test_another_message_replaces_a_waiting_question(chat, monkeypatch):
     monkeypatch.setattr(app, "Job", RecordingJob)
-    _, _, factory = sorter(reply_text(decision("unsure")))
+    _, _, factory = model_factory(reply_text(decision("unsure", "What would you like to know?")))
     _, state = chat.turn("tell me something interesting", triage_model=factory)
     history, state = chat.turn("Which studies have a 2026 season?", [], state, triage_model=factory)
     assert RecordingJob.started == ["Which studies have a 2026 season?"] and "pending_question" not in state
 
 
-def test_the_app_checks_run_before_the_sorting_model_is_asked(chat):
-    model, built, factory = sorter(reply_text(decision("data_question")))
+def test_the_app_checks_run_before_an_unplaced_message_is_sent(chat):
+    model, built, factory = model_factory(reply_text(decision("data_question")))
     history, state = chat.turn("tell me something interesting", triage_model=factory, preflight=lambda q: ["BRAPI_MODE is not 'live'"])
     assert "cannot run yet" in history[-1]["content"] and built == [] and model.requests == [] and state == {}
 
 
 def test_replies_to_a_waiting_run_are_never_sorted(chat):
     job = RecordingJob("For synthetic study S1, give the mean yield.", make_config=None, make_models=None)
-    model, built, factory = sorter(reply_text(decision("greeting_or_smalltalk")))
+    model, built, factory = model_factory(reply_text(decision("greeting_or_smalltalk", "Hello there")))
     history, state = chat.turn("hello", [], {"job": job}, triage_model=factory)
-    assert job.replies == ["hello"] and built == [] and "Questions to try" not in history[-1]["content"]
+    assert job.replies == ["hello"] and built == [] and "Hello there" not in history[-1]["content"]

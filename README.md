@@ -53,7 +53,7 @@ Some simple catalog questions can be answered directly from the catalog. Every q
 
 ## Data sharing and saving results
 
-Your questions and relevant database excerpts are sent to OpenAI, sometimes before you approve a database request, and run records are saved on the hosting server. Share only information your program permits, and copy the full report for your records; starting a new question does not delete saved server records.
+Your messages and relevant database excerpts are sent to OpenAI, sometimes before you approve a database request, and run records are saved on the hosting server. Share only information your program permits, and copy the full report for your records; starting a new question does not delete saved server records.
 
 ## Using the code
 
