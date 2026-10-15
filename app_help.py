@@ -32,7 +32,8 @@ def faq_items(source_details: str, *, data_sharing_policy: str = "") -> list[tup
         ("What makes a good question?",
          "Ask about one clear task at a time. Use a study name or ID and the exact trait name when you know them. "
          "Add a season, year or location to narrow a search. If you are unsure what is available, "
-         "start by asking which studies or traits are listed."),
+         "ask **list all traits**, or list all locations, seasons or programs. Add one word to see fewer, "
+         "for example **list traits with yield**. These lists come from the saved catalog; no measurements are fetched."),
         ("What do Approve, Continue and Accept mean?",
          "**Approve** allows the specific database request shown in the chat. The first question may also ask "
          "for permission to prepare study and trait catalogs.\n\n"
@@ -43,7 +44,8 @@ def faq_items(source_details: str, *, data_sharing_policy: str = "") -> list[tup
          "It may need to identify a study or trait, resolve an ambiguous request, or clarify an analysis. Reply in the chat. "
          "A clarification during retrieval cannot broaden the data access you already approved. "
          "To request different studies or traits, choose **Cancel** and start a **New question**. "
-         "While it waits, you can still ask something else: it answers and repeats its question. A new data question, "
+         "While it waits, you can still ask something else: it answers and repeats its question. A list such as "
+         "**list all traits** is shown right away once the catalog is ready. A new data question, "
          "such as 'Which studies have a 2025 season?', gets a choice: drop the current question or keep it."),
         ("Why might I not get an answer?",
          "The requested data may be missing, incomplete, outside the approved request, or unavailable within the app's limits. "

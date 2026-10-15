@@ -57,6 +57,7 @@ from plan_permissions import endpoint_families_for_plan
 from retrieval_review import review_snapshot, verify_reviewed_tables
 from metadata_answers import metadata_only_plan, materialize_metadata, analyze_metadata, render_metadata_facts
 from catalog_answers import catalog_count_plan, capture_catalog_sources, run_catalog_plan_async
+import catalog_lists
 from breeding_mcp_server import BreedingMcpService
 from coordination_runtime import run_agent_led, SUPERVISOR_PROMPT
 
@@ -78,7 +79,8 @@ DATA_REVIEW_PROMPT = "continue to analysis / cancel: "
 _ASKED = "clarification needed: "            # how agents.analyst records the Analyst's question in the report's caveats
 _clock = time.monotonic                      # the clock the budget uses (llm.run_agent_loop's default); tests replace it
 MAX_CLARIFICATION_ROUNDS = 5       # an upper bound for any caller; the command line uses 1, the chat 3
-STATES = ("supervise", "config", "plan", "clarify", "metadata", "resolve", "approve", "retrieve", "review_data", "analyze", "render", "accept", "record")
+STATES = ("supervise", "config", "plan", "clarify", "metadata", "catalog_list", "resolve", "approve", "retrieve", "review_data", "analyze",
+          "render", "accept", "record")
 AnswerFn = Callable[[str], str]
 
 
@@ -107,6 +109,8 @@ class RunConfig:
     agent_led: bool = True
     unified_mcp: bool = True
     max_supervisor_turns: int = 8
+    catalog_list: str | None = None        # "traits", "locations", "seasons" or "programs": a fixed list (catalog_lists.py), no planner
+    catalog_list_word: str | None = None   # keep only the names that contain this word, ignoring case
 
     @property
     def uses_memory_mcp(self) -> bool:
@@ -140,6 +144,7 @@ class RunConfig:
             problems.append("max_fetches must be at least 1")
         if self.max_http_attempts < 1:
             problems.append("max_http_attempts must be at least 1")
+        problems.extend(catalog_lists.config_problems(self.catalog_list, self.catalog_list_word))
         return problems
 
     def _live_problems(self) -> list[str]:
@@ -501,6 +506,9 @@ class Controller:
         self.answers_simulated = self.answer_fn is not None and not self.answers_from_human
         self.run_dir = Path(self.config.out_dir) / self.run_id
         self.catalog_fetched_at: str | None = None                      # when the cached catalogs were fetched (shown on the screen)
+        self.catalog_ctx: ToolContext | None = None                     # the tool context that read the catalogs behind self.metadata
+        self.catalog_tables: dict[str, catalog_lists.CatalogTable] = {}  # those two tables, with their fetch times (catalog lists)
+        self.catalog_list: catalog_lists.CatalogList | None = None      # a list run's answer
         settings = load_settings()
         self.cache_dir = Path(self.config.cache_dir) if self.config.cache_dir else settings.cache_dir / "live"
         self.base_url = settings.base_url
@@ -654,6 +662,8 @@ class Controller:
             self.notes.append(f"live run stopped before any model call: the complete study and variable catalogs of {self.base_url} are not "
                               "cached; start a new question and approve the app's catalog setup request")
             return False
+        if self.config.catalog_list:
+            return self.catalog_list_phase()
         return await run_agent_led(self)
 
     # -- metadata: approved cached exports, never a silent live discovery -------------------
@@ -677,7 +687,18 @@ class Controller:
         metadata = KnownMetadata.from_registry(meta_ctx.registry, base_url=meta_ctx.client.settings.base_url,
                                                studies_artifact=studies.artifact_ids[0], variables_artifact=variables.artifact_ids[0])
         self.base_url = metadata.base_url
+        self._keep_catalog_tables(meta_ctx, studies.artifact_ids[0], variables.artifact_ids[0])
         return metadata
+
+    def _keep_catalog_tables(self, ctx: ToolContext, studies_artifact: str, variables_artifact: str) -> None:
+        """The exact tables behind self.metadata, kept for catalog lists: their source and when they were fetched. Only lists
+        need them: if they cannot be read, a list says so and every other question runs as before."""
+        try:
+            self.catalog_tables = catalog_lists.catalog_tables(ctx, studies=studies_artifact, variables=variables_artifact)
+            self.catalog_ctx = ctx
+        except Exception as exc:  # noqa: BLE001
+            self.catalog_tables, self.catalog_ctx = {}, None
+            self.notes.append(f"catalog lists unavailable in this run: {type(exc).__name__}: {str(exc)[:200]}")
 
     def catalog_approval_screen(self) -> str:
         return (f"First I need the public list of studies and traits from {source_host(self._server())}. "
@@ -731,6 +752,7 @@ class Controller:
                     exports.append(result.artifact_ids[0])
             self.metadata = KnownMetadata.from_registry(meta_ctx.registry, base_url=meta_ctx.client.settings.base_url,
                                                         studies_artifact=exports[0], variables_artifact=exports[1])
+            self._keep_catalog_tables(meta_ctx, exports[0], exports[1])
             fetched = sorted(record.fetched_at_utc.isoformat() for record in meta_ctx.client.provenance()
                              if record.fetched_at_utc is not None)
             self.catalog_fetched_at = fetched[0] if fetched else None
@@ -742,6 +764,30 @@ class Controller:
             self.catalog_setup["requests"] = list(self.catalog_requests)
             if self.catalog_setup["status"] == "fetching":
                 self.catalog_setup["status"] = "interrupted"
+
+    # -- a catalog list: a fixed plan written by code -----------------------------------------
+
+    def catalog_list_phase(self) -> bool:
+        """A catalog list ("list all traits" and the like, catalog_lists.py), read from the checked catalog this run just loaded:
+        no planner, no other model call, no measurements. The catalog table is the run's evidence; acceptance is not asked."""
+        self._enter("catalog_list")
+        if self.metadata is None or self.catalog_ctx is None or not self.catalog_tables:
+            self.execution_status = "failed"
+            self.notes.append("catalog list: the catalog tables behind the metadata are unknown; no list was written")
+            return False
+        request = catalog_lists.ListRequest(self.config.catalog_list or "", self.config.catalog_list_word)
+        self.plan = catalog_lists.fixed_plan(request, self.config.question, self.base_url, self.now())
+        self.ctx = self.catalog_ctx
+        listing = catalog_lists.build(request, self.metadata, self.catalog_tables)
+        self.retrieval, self.analysis = catalog_lists.evidence(listing, self.ctx.registry)
+        if not self.catalog_requests:          # a saved copy: its cache reads are this run's request records (counted once)
+            self.requests = [record.model_dump(mode="json") for record in self.catalog_ctx.client.provenance()]
+            self.meta_requests = 0
+        self.catalog_list = listing            # only now: the chat shows a list only for a list that has its evidence
+        self.execution_status = "completed"
+        self.notes.append(catalog_lists.run_note(listing))
+        self.notes.append("acceptance is not asked for a catalog list; it stays pending")
+        return True
 
     # -- plan and clarify -----------------------------------------------------------------
 
@@ -1227,6 +1273,8 @@ class Controller:
             lines += [f"**Retrieved-data review:** {self.data_review['status']}", ""]
         if self.plan is not None:
             lines += [f"**Interpretation:** {self.plan.interpretation}", ""]
+        if self.catalog_list is not None:
+            lines += [*catalog_lists.report_lines(self.catalog_list), ""]
         if self.analysis is not None and self.analysis.metadata_facts:
             lines += ["## Recorded metadata", "", *render_metadata_facts(self.analysis.metadata_facts), "",
                       "## Limits", "", *[f"- {c}" for c in self.analysis.caveats if not c.lower().startswith(("model:", "key claims (model"))], ""]

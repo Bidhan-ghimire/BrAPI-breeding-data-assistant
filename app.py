@@ -5,11 +5,15 @@ review before retrieval and analysis. Each browser session has its own run;
 the Full report retains sources, calculations, answers and review decisions.
 A new message first passes the front door (triage.py): greetings and questions
 about the app are answered without starting a run. A message typed while a run
-waits is sorted by conversation.py before anything reaches the run.
+waits is sorted by conversation.py before anything reaches the run. "list all
+traits" (and locations, seasons, programs) is answered by code from the cached
+catalog (catalog_lists.py): as a short run of its own, or, while a run waits,
+from that run's catalog.
 """
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import os
 import math
 import re
@@ -18,6 +22,7 @@ import threading
 from typing import Any, Callable, Iterator, Mapping
 from urllib.parse import urlsplit
 
+import catalog_lists
 import conversation
 import triage
 from app_style import CSS, HERO_HTML, build_theme
@@ -159,9 +164,10 @@ def live_preflight(question: str, make_config: Callable[[str], RunConfig] = live
 LOCATION_LIST_LEAD = "Locations with the most studies:"
 
 
-def clarification_choices(questions: list[str], metadata: Any, *, list_locations: bool = True) -> str:
-    """Hints from validated catalogs, only displayed; never added to the person's words. The hint "You can ask 'list all
-    traits'" is gone: the planner does not understand that command yet (run 20261015T181947), so it is shown nowhere."""
+def clarification_choices(questions: list[str], metadata: Any, *, list_locations: bool = True, lists_work: bool = False) -> str:
+    """Hints from validated catalogs, only displayed; never added to the person's words. Under a question about a trait, the
+    hint to ask "list all traits", where code answers it on the spot (lists_work: the run has its catalog tables; and a
+    question that is itself about listing leaves such a reply to the model, so it gets no hint)."""
     text = " ".join(questions).lower()
     lines = []
     if list_locations and re.search(r"\blocations?\b", text) and metadata is not None:
@@ -181,6 +187,9 @@ def clarification_choices(questions: list[str], metadata: Any, *, list_locations
                 count = len(item["studies"])
                 name = " / ".join(sorted(item["names"])) or "(name not stated)"
                 lines.append(f"- {location_id} · {name} — {count} {'study' if count == 1 else 'studies'}")
+    if (lists_work and metadata is not None and re.search(r"\b(traits?|variables?)\b", text)
+            and not conversation.asks_about_listing(questions)):
+        lines += ["", "", catalog_lists.TRAIT_HINT]           # its own paragraph, not inside the quoted question above
     return "\n".join(lines)
 
 
@@ -231,7 +240,8 @@ def render(job: Job, event: tuple[str, Any]) -> tuple[str, bool]:
             who = "I have the data and need one more detail before I can answer"
             hint = "Your answer is used with the data I already have; nothing new is fetched."
         if planner:
-            choices = clarification_choices(questions, controller.metadata, list_locations=not getattr(job, "locations_listed", False))
+            choices = clarification_choices(questions, controller.metadata, list_locations=not getattr(job, "locations_listed", False),
+                                            lists_work=bool(getattr(controller, "catalog_tables", None)))
             if LOCATION_LIST_LEAD in choices:
                 job.locations_listed = True
             shown += choices
@@ -240,6 +250,9 @@ def render(job: Job, event: tuple[str, Any]) -> tuple[str, bool]:
         return str(payload).strip(), False
     if kind == "done":
         result = payload
+        listing = getattr(controller, "catalog_list", None)
+        if listing is not None and getattr(result, "execution_status", None) == "completed":   # a list run: the list itself;
+            return catalog_lists.chat_message(listing, in_report=True), True                     # no accept or reject is asked
         if not job.answer_shown:
             return answer_summary(controller), True
         review = {"accepted": "**Accepted.** Your review is recorded.",
@@ -361,6 +374,12 @@ def _sort_waiting_message(text: str, job: Job, state: dict[str, Any]) -> tuple[s
             return "run", unsent, state
         if conversation.is_no(text):
             return "reply", conversation.still_waiting_line(kind, pending), state
+    listing = catalog_lists.parse_request(text)
+    if listing is not None and not conversation.asks_about_listing(pending):   # "list all traits": from the run's own catalog
+        shown = _list_from_the_runs_catalog(listing, job)                         # (never a study ID or a reply the run reads)
+        if shown is not None:
+            return "reply", f"{shown}\n\n{conversation.still_waiting_line(kind, pending)}", state
+        return "reply", conversation.drop_or_keep_question(text), {**state, "new_question": text}   # no catalog yet: a new run
     if conversation.goes_straight_to_the_run(text, _waiting_on(job)):
         return "run", text, state
     word = conversation.control_word(text, _waiting_on(job))
@@ -369,6 +388,15 @@ def _sort_waiting_message(text: str, job: Job, state: dict[str, Any]) -> tuple[s
     if conversation.is_list_request(text, pending):
         return "reply", conversation.drop_or_keep_question(text), {**state, "new_question": text}
     return "ask_model", text, state
+
+
+def _list_from_the_runs_catalog(listing: catalog_lists.ListRequest, job: Job) -> str | None:
+    """The list, read by code from the catalog the waiting run has loaded; None before it has one (the catalog setup)."""
+    controller = job.controller
+    metadata, tables = getattr(controller, "metadata", None), getattr(controller, "catalog_tables", None)
+    if metadata is None or not tables:
+        return None
+    return catalog_lists.chat_message(catalog_lists.build(listing, metadata, tables), in_report=False)
 
 
 def _ask_while_waiting(text: str, job: Job, triage_model: Callable[[], Any]) -> conversation.WaitingDecision | None:
@@ -402,12 +430,14 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
             preflight: Callable[[str], list[str]] | None = None,
             triage_model: Callable[[], Any] | None = None) -> Iterator[tuple[list[Message], dict[str, Any], str]]:
     """One chat turn. A message typed while a run waits is sorted first (conversation.py): the prompt's exact control words
-    go to the run; any other message gets one triage_model call that labels it, and only an answer to the waiting question
-    reaches the run (a side question is answered while the run keeps waiting; a new data question asks drop or keep; without
-    a decision the message goes to the run as before). A new message passes the front door (triage.py): a data question
-    starts a run; greetings, app questions and unsure messages start nothing and get one triage_model call that writes the
-    reply (the line written by code when there is no model or the call fails). A message the rules cannot place is sorted
-    by that same call; without a decision it starts a run as before. Yields (history, state, box)."""
+    go to the run; a catalog list ("list all traits") is shown from the run's own catalog; any other message gets one
+    triage_model call that labels it, and only an answer to the waiting question reaches the run (a side question is
+    answered while the run keeps waiting; a new data question asks drop or keep; without a decision the message goes to the
+    run as before). A new message passes the front door: a catalog list starts a short list run (catalog_lists.py: no
+    rule, model or planner); otherwise triage.py sorts it. A data question starts a run; greetings, app questions and
+    unsure messages start nothing and get one triage_model call that writes the reply (the line written by code when there
+    is no model or the call fails). A message the rules cannot place is sorted by that same call; without a decision it
+    starts a run as before. Yields (history, state, box)."""
     text = (message or "").strip()
     if not text:
         yield history, state, ""
@@ -446,10 +476,10 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
     if job is None:
         pending = state.get("pending_question")
         state = {k: v for k, v in state.items() if k != "pending_question"}      # this message answers it either way
-        question, by_rules, from_pending = text, None, False
+        question, by_rules, from_pending, listing = text, None, False, None
         if pending and triage.is_yes(text):
             question, from_pending = pending, True                               # "yes" starts the earlier question as typed
-        else:
+        elif (listing := catalog_lists.parse_request(text)) is None:            # a catalog list: code decides, no rule or model
             by_rules = triage.sort_by_rules(text)
             if by_rules is not None and by_rules.label not in triage.PIPELINE_LABELS:
                 model_text = ""
@@ -464,15 +494,17 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
                 history.append({"role": "assistant", "content": content})
                 yield history, state, ""                                         # no run and no database request
                 return
+        config_for = make_config if listing is None else (           # a list run: the same settings plus the fixed list
+            lambda q: dataclasses.replace(make_config(q), catalog_list=listing.entity, catalog_list_word=listing.word))
         try:
-            problems = (preflight or (lambda q: live_preflight(q, make_config)))(question)
+            problems = (preflight or (lambda q: live_preflight(q, config_for)))(question)
         except Exception:  # a bad setting must not leave the chat locked or echo its value
             problems = ["App configuration could not be checked. Ask the operator to review the app and model settings."]
         if problems:
             history.append({"role": "assistant", "content": "This question cannot run yet:\n" + "\n".join(f"- {p}" for p in problems)})
             yield history, state, ""
             return
-        if by_rules is None and not from_pending and triage_model is not None:  # the rules could not tell: one model call
+        if by_rules is None and listing is None and not from_pending and triage_model is not None:  # the rules could not tell
             history.append({"role": "assistant", "content": WORKING})
             working = True
             yield history, state, ""
@@ -483,7 +515,7 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
                 yield history, state, ""
                 return
         try:
-            job = Job(question, make_config=make_config, make_models=make_models).start()
+            job = Job(question, make_config=config_for, make_models=make_models).start()
         except Exception:
             failed = {"role": "assistant", "content": "This question could not start. Ask the operator to check the app settings and output-folder access."}
             if working:

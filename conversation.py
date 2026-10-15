@@ -7,8 +7,10 @@ question five times (run 20261015T165633). Now each message is sorted first:
 * Code first. The exact control words of the prompt the run is waiting on (approve, edit, cancel, continue, accept, reject)
   go to the run with no model call; case, spaces and a closing "." or "!" do not matter ("Approve." is approve, but
   "approve?" asks rather than decides). Replies to the short "study IDs" prompt after edit, and the Retriever's "change
-  scope: ..." reply, also go straight to the run. A message that only asks to list part of the catalog ("list all
-  traits") is a new question: code asks whether to drop or keep the current one.
+  scope: ..." reply, also go straight to the run. "list all traits" (or locations, seasons, programs; catalog_lists.py)
+  is answered by code from the waiting run's own catalog, and the run keeps waiting (app.py), unless the waiting question
+  is itself about listing: then the model decides. A message that only asks to list another part of the catalog ("list
+  all studies") is a new question: code asks whether to drop or keep the current one.
 * Every other message costs ONE bounded model call (the front door's kind: no tools, strict JSON, 20 s). It labels the
   message: answer_to_pending (it goes to the run as before), side_question (a short reply written by the model, then one
   line written by code repeating what the run waits for; nothing reaches the run), new_data_question (drop or keep), or
@@ -35,9 +37,9 @@ from retrieval_review import _cell as _escaped       # the same escaping the dat
 from run import (ANALYST_PROMPT, CATALOG_PROMPT, CLARIFY_PROMPT, DATA_REVIEW_PROMPT, RETRIEVER_PROMPT, SUPERVISOR_PROMPT,
                  is_approval_revision)
 
-__all__ = ["WaitingKind", "WaitingDecision", "waiting_kind", "control_word", "goes_straight_to_the_run", "is_list_request",
-           "drop_or_keep", "is_no", "sendable", "waiting_prompt", "ask_model", "parse_decision", "still_waiting_line", "side_reply",
-           "drop_or_keep_question", "confirm_question", "not_understood", "QUESTION_PROMPTS"]
+__all__ = ["WaitingKind", "WaitingDecision", "waiting_kind", "control_word", "goes_straight_to_the_run", "asks_about_listing",
+           "is_list_request", "drop_or_keep", "is_no", "sendable", "waiting_prompt", "ask_model", "parse_decision",
+           "still_waiting_line", "side_reply", "drop_or_keep_question", "confirm_question", "not_understood", "QUESTION_PROMPTS"]
 
 WaitingKind = Literal["question", "plan_approval", "catalog", "data_review", "acceptance", "pass_through"]
 QUESTION_PROMPTS = (CLARIFY_PROMPT, SUPERVISOR_PROMPT, RETRIEVER_PROMPT, ANALYST_PROMPT)   # planner, coordinator, Retriever, Analyst
@@ -94,10 +96,17 @@ def goes_straight_to_the_run(text: str, waiting_on: str) -> bool:
             or (waiting_on == RETRIEVER_PROMPT and text.strip().lower().startswith("change scope:")))
 
 
+def asks_about_listing(pending: list[str] | None) -> bool:
+    """The waiting question is itself about listing ('Should I list the seasons or only count them?'): a reply such as 'list
+    the seasons' may be its answer, so code does not take it as a list request; the model decides."""
+    return bool(pending) and bool(_ABOUT_LISTING.search(" ".join(pending).lower()))
+
+
 def is_list_request(text: str, pending: list[str] | None = None) -> bool:
     """The whole message asks to list part of the catalog ('list all traits', 'can you show me every study'): a new question,
-    never an answer. Not when the waiting question is itself about listing ('Should I list the trials?'): the model decides."""
-    if pending and _ABOUT_LISTING.search(" ".join(pending).lower()):
+    never an answer. Not when the waiting question is itself about listing (asks_about_listing): the model decides.
+    The app checks the four catalog lists first (catalog_lists.parse_request): with the run's catalog they are shown."""
+    if asks_about_listing(pending):
         return False
     return bool(_LIST_REQUEST.fullmatch(triage._words(text)))
 

@@ -1,0 +1,396 @@
+"""catalog_lists.py — "list all traits" (and locations, seasons, programs): a fixed list written by code from the cached catalog.
+
+Run 20261015T181947: "list all traits" went to the planner. For a large catalog the planner sees only the traits whose names
+share words with the question, and it has no plan for listing everything, so it asked a question back. Now code answers four
+commands itself, from the same checked catalog every run loads first (the cached study and trait exports):
+
+* "list (all) traits | locations | seasons | programs", also "show me ...", "can you list ...", "give me a list of ...". An
+  optional filter word keeps only the names that contain it, ignoring case: "list traits with yield". Anything longer ("list
+  traits for study 4501", "list traits with yield in Clinton") is not one of these commands and goes to the planner as before.
+* No planner and no other model call, no measurements, and no web request when the catalog is cached. A run is still
+  recorded (a fixed plan; the catalog table it read is its evidence); it asks no accept or reject.
+* The chat shows the first 30 names and the total; the run's report (Full report, answer.md) keeps the whole list. An
+  unfiltered list longer than 30 says how to narrow it.
+* Every list says where it came from and when that catalog was fetched.
+* While a run waits for a reply, the same command is answered from that run's own catalog and the run keeps waiting
+  (app._sort_waiting_message).
+
+Traits are the trait catalog's variables, one entry per variable. Locations, seasons and programs come from the study catalog:
+each is listed with the number of studies that name it, and only those named by at least one study are known.
+"""
+from __future__ import annotations
+
+import re
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Literal
+from urllib.parse import urlsplit
+
+from contracts import AnalysisReport, Claim, Denominator, Plan, PlanStep, ResolvedScope, RetrievalReport
+from retrieval_review import _cell as _escaped       # the same escaping the data review uses for database text
+
+__all__ = ["ListEntity", "ENTITIES", "SHOWN", "WORD_MAX_CHARS", "TRAIT_HINT", "ListRequest", "CatalogTable", "ListItem",
+           "CatalogList", "parse_request", "config_problems", "catalog_tables", "build", "chat_message", "report_lines",
+           "fixed_plan", "evidence", "run_note"]
+
+ListEntity = Literal["traits", "locations", "seasons", "programs"]
+ENTITIES: tuple[str, ...] = ("traits", "locations", "seasons", "programs")
+SHOWN = 30                    # names shown in the chat (as run.ANSWER_LIST_SHOWN); the report keeps all of them
+WORD_MAX_CHARS = 60           # a longer filter word is not one of these commands
+LABEL_MAX_CHARS = 200         # the most of one database name shown in the chat
+TRAIT_HINT = "To see the trait names, ask **list all traits**, or add a word: **list traits with yield**."
+
+_NOUNS = {"traits": ("trait", "traits"), "locations": ("location", "locations"), "seasons": ("season", "seasons"),
+          "programs": ("program", "programs")}
+_EXPORT = {"traits": "variables", "locations": "studies", "seasons": "studies", "programs": "studies"}   # the table each is read from
+_CATALOG_WORD = {"variables": "trait catalog", "studies": "study catalog"}
+_ORDER = {"traits": "A to Z", "locations": "A to Z", "seasons": "newest first", "programs": "A to Z"}
+_ALIASES = {"trait": "traits", "traits": "traits", "variable": "traits", "variables": "traits", "location": "locations",
+            "locations": "locations", "season": "seasons", "seasons": "seasons", "program": "programs", "programs": "programs",
+            "programme": "programs", "programmes": "programs"}
+
+# A word: letters and digits, with - _ . ' / : allowed inside ("dry-matter", "CO_331:0000217"). Quotes and a closing "?" or "."
+# are not part of it. The whole message must be one command, nothing more.
+_TOKEN = re.compile(r"[^\W_]+(?:[-_.'/:][^\W_]+)*")
+_REQUEST = re.compile(
+    r"(?:(?:please|can you|could you|would you)(?: please)? )?"
+    r"(?:(?:list|show|give)(?: me)?(?: (?:a|the) list of)?|(?:a|the) list of)(?: all| every)?(?: of)?(?: the)?(?: available)? "
+    r"(?P<entity>traits?|variables?|locations?|seasons?|programs?|programmes?)(?: names?)?"
+    r"(?: (?:in|from) (?:the )?catalogs?)?"
+    r"(?: (?:with|containing|that contains?|matching) (?P<word>\S+))?"
+    r"(?: please)?")
+_YEAR = re.compile(r"(?<!\d)(1[89]\d\d|2\d\d\d)(?!\d)")
+
+
+@dataclass(frozen=True)
+class ListRequest:
+    entity: str                     # one of ENTITIES
+    word: str | None = None         # keep only names containing it (ignoring case)
+
+
+@dataclass(frozen=True)
+class CatalogTable:
+    """One cached catalog export behind a run's metadata: which table, and when the server sent it."""
+
+    export: Literal["studies", "variables"]
+    artifact_id: str
+    sha256: str
+    rows: int
+    base_url: str
+    fetched_at: datetime | None      # the earliest server reply in this export (a cached reply keeps its first fetch time)
+    fetched_in_this_run: bool        # a live request in this run (the catalog setup), not a saved copy
+
+
+@dataclass(frozen=True)
+class ListItem:
+    label: str                       # as shown: the name, with the ID added when two entries share a name
+    key: str                         # the ID, or the name when the catalog gives no ID
+    studies: int | None = None       # studies that name it (locations, seasons, programs); None for traits
+    name: str = ""                   # the name alone, which a filter word is matched against ("" when there is none)
+
+
+@dataclass(frozen=True)
+class CatalogList:
+    request: ListRequest
+    items: tuple[ListItem, ...]      # the names that match, in the order shown
+    total: int                       # names in the whole list, before the filter
+    source: CatalogTable
+    unrecorded: int = 0              # studies that name no location / season / program
+
+
+# --------------------------------------------------------------------------
+# The command
+# --------------------------------------------------------------------------
+
+def _normal(text: str) -> str:
+    return " ".join(_TOKEN.findall(text.lower().replace("’", "'")))
+
+
+def parse_request(text: str) -> ListRequest | None:
+    """The whole message is one of the four list commands (with an optional filter word), or None."""
+    match = _REQUEST.fullmatch(_normal(text or ""))
+    if match is None:
+        return None
+    word = match.group("word")
+    if word is not None and len(word) > WORD_MAX_CHARS:
+        return None
+    return ListRequest(_ALIASES[match.group("entity")], word)
+
+
+def config_problems(entity: str | None, word: str | None) -> list[str]:
+    """RunConfig.validate: a list run names one of the four lists, and at most one filter word."""
+    if entity is None:
+        return ["catalog_list_word needs catalog_list"] if word is not None else []
+    problems = [] if entity in ENTITIES else [f"catalog_list must be one of {', '.join(ENTITIES)}"]
+    if word is not None and (not word or len(word) > WORD_MAX_CHARS or any(c.isspace() for c in word)):
+        problems.append(f"catalog_list_word must be one word of at most {WORD_MAX_CHARS} characters")
+    return problems
+
+
+# --------------------------------------------------------------------------
+# The list, built from the run's validated catalog (agents.coordinator.KnownMetadata)
+# --------------------------------------------------------------------------
+
+def catalog_tables(ctx: Any, *, studies: str, variables: str) -> dict[str, CatalogTable]:
+    """The two export tables a run's metadata was built from, with the fetch time of their own replies (Controller)."""
+    records = list(ctx.client.provenance())
+    tables: dict[str, CatalogTable] = {}
+    for export, artifact_id in (("studies", studies), ("variables", variables)):
+        manifest = ctx.registry.manifest(artifact_id)
+        own = set(manifest.source_request_ids)
+        replies = [r for r in records if r.request_id in own]
+        fetched = sorted(r.fetched_at_utc for r in replies if r.fetched_at_utc is not None)
+        tables[export] = CatalogTable(export=export, artifact_id=artifact_id, sha256=manifest.sha256, rows=manifest.row_count,
+                                      base_url=ctx.client.settings.base_url, fetched_at=fetched[0] if fetched else None,
+                                      fetched_in_this_run=any(r.origin == "live" for r in replies))
+    return tables
+
+
+def _clean(text: str | None) -> str:
+    return " ".join((text or "").split())
+
+
+def _distinct_labels(items: list[ListItem]) -> list[ListItem]:
+    """Two entries with the same name stay two entries; their IDs tell them apart."""
+    seen: dict[str, int] = {}
+    for item in items:
+        seen[item.label.casefold()] = seen.get(item.label.casefold(), 0) + 1
+    return [ListItem(f"{item.label} · {item.key}", item.key, item.studies, item.name)
+            if seen[item.label.casefold()] > 1 and item.key != item.label else item for item in items]
+
+
+def _traits(metadata: Any) -> tuple[list[ListItem], int]:
+    items = []
+    for v in metadata.variables:
+        name = _clean(v.name) or _clean(v.trait)
+        items.append(ListItem(name or f"(no name) · {v.variable_id}", v.variable_id, None, name))
+    return _distinct_labels(items), 0
+
+
+def _grouped(metadata: Any, field: str) -> tuple[list[ListItem], int]:
+    """Locations or programs, from the studies that name them: one entry per ID (or per name when there is no ID)."""
+    groups: dict[str, dict[str, Any]] = {}
+    unrecorded = 0
+    for study in metadata.studies:
+        identifier, name = getattr(study, f"{field}_id"), _clean(getattr(study, f"{field}_name"))
+        key = identifier or (f"name:{name}" if name else None)
+        if key is None:
+            unrecorded += 1
+            continue
+        group = groups.setdefault(key, {"id": identifier or name, "names": set(), "studies": set()})
+        group["studies"].add(study.study_id)
+        if name:
+            group["names"].add(name)
+    items = []
+    for g in groups.values():
+        name = " / ".join(sorted(g["names"]))
+        items.append(ListItem(name or f"(no name) · {g['id']}", g["id"], len(g["studies"]), name))
+    return _distinct_labels(items), unrecorded
+
+
+def _seasons(metadata: Any) -> tuple[list[ListItem], int]:
+    studies: dict[str, set[str]] = {}
+    unrecorded = 0
+    for study in metadata.studies:
+        names = [_clean(s) for s in study.seasons if _clean(s)]
+        if not names:
+            unrecorded += 1
+        for name in names:
+            studies.setdefault(name, set()).add(study.study_id)
+    return [ListItem(name, name, len(ids), name) for name, ids in studies.items()], unrecorded
+
+
+def _order(entity: str, items: list[ListItem]) -> list[ListItem]:
+    if entity == "seasons":                                      # newest first; a season without a year goes last, A to Z
+        def key(item: ListItem):
+            years = [int(y) for y in _YEAR.findall(item.label)]
+            return (0, -max(years), item.label.casefold()) if years else (1, 0, item.label.casefold())
+        return sorted(items, key=key)
+    return sorted(items, key=lambda item: (item.label.casefold(), item.key))
+
+
+def build(request: ListRequest, metadata: Any, tables: dict[str, CatalogTable]) -> CatalogList:
+    """The whole list from the catalog, then only the names containing the word (ignoring case; the name alone, not an ID)."""
+    make = {"traits": _traits, "seasons": _seasons, "locations": lambda m: _grouped(m, "location"),
+            "programs": lambda m: _grouped(m, "program")}[request.entity]
+    every, unrecorded = make(metadata)
+    every = _order(request.entity, every)
+    word = (request.word or "").casefold()
+    matching = [item for item in every if word in item.name.casefold()] if word else every
+    return CatalogList(request=request, items=tuple(matching), total=len(every), source=tables[_EXPORT[request.entity]],
+                       unrecorded=unrecorded)
+
+
+# --------------------------------------------------------------------------
+# What the person sees
+# --------------------------------------------------------------------------
+
+def _count(n: int, one: str, many: str) -> str:
+    return f"{n} {one if n == 1 else many}"
+
+
+def _host(url: str) -> str:
+    return urlsplit(url).hostname or url
+
+
+def _when(table: CatalogTable) -> str:
+    if table.fetched_at is None:
+        return "at a time that was not recorded"
+    return table.fetched_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _heading(listing: CatalogList, *, escape) -> str:
+    one, many = _NOUNS[listing.request.entity]
+    word, matches, total = listing.request.word, len(listing.items), listing.total
+    if word:                                     # "names": a filter word is not a data question ("locations with yield")
+        if not matches:
+            return (f"**{one.capitalize()} names containing “{escape(word)}”: none of {total}.** Only the names are searched; "
+                    f"try another word, or ask **list all {many}**.")
+        head = f"**{one.capitalize()} names containing “{escape(word)}”: {matches} of {total}.**"
+    elif not total:
+        return f"**{many.capitalize()} in the catalog: none.**"
+    else:
+        head = f"**{many.capitalize()} in the catalog: {total}.**"
+    order = _ORDER[listing.request.entity]
+    return head + (f" The first {SHOWN}, {order}:" if matches > SHOWN else f" {order[0].upper()}{order[1:]}:")
+
+
+def _item_line(item: ListItem, label: str) -> str:
+    return f"- {label}" + (f" — {_count(item.studies, 'study', 'studies')}" if item.studies is not None else "")
+
+
+def _example(listing: CatalogList, every: tuple[ListItem, ...]) -> str | None:
+    """A filter word that keeps some names but not all: 'yield' for traits when it does, else a word from the names of the
+    biggest entries. None when no word narrows the list."""
+    names = [item.name.casefold() for item in every]
+
+    def narrows(word: str) -> bool:
+        return 0 < sum(word in name for name in names) < len(names)
+
+    if listing.request.entity == "traits" and narrows("yield"):
+        return "yield"
+    for item in sorted(every, key=lambda item: -(item.studies or 0)):
+        for token in _TOKEN.findall(item.name.casefold()):
+            if len(token) >= 3 and narrows(token):
+                return token
+    return None
+
+
+def _study_notes(listing: CatalogList) -> list[str]:
+    """Locations, seasons and programs come from the study records: what that means, in plain sentences."""
+    one, many = _NOUNS[listing.request.entity]
+    notes = [f"Only {many} named by at least one study are listed."] if listing.total else []
+    if listing.unrecorded:
+        notes.append(f"{_count(listing.unrecorded, 'study names', 'studies name')} no {one}.")
+    if listing.request.entity == "programs" and not listing.total:      # SweetPotatoBase: the standard fields are empty
+        notes.append("Some servers keep the program only in each study's additional information (additionalInfo); "
+                     "this app does not use that field for programs.")
+    return notes
+
+
+def _source_line(listing: CatalogList) -> str:
+    table = listing.source
+    how = "fetched after you approved the catalog setup" if table.fetched_in_this_run else "a saved copy; nothing new was requested"
+    return (f"Source: {_host(table.base_url)}, {_CATALOG_WORD[table.export]} fetched {_when(table)} ({how}). "
+            "No measurements were used.")
+
+
+def chat_message(listing: CatalogList, *, in_report: bool) -> str:
+    """The chat's answer: the first 30 names, the total, how to narrow a long list, and the source with its fetch time.
+    in_report: the run's Full report has the whole list (a list run), not a list shown while another run waits."""
+    many = _NOUNS[listing.request.entity][1]
+    escape = lambda text: _escaped(text, LABEL_MAX_CHARS)          # database names and the person's word, as text
+    lines = [_heading(listing, escape=escape)]
+    if listing.items:
+        lines.append("")
+        lines += [_item_line(item, escape(item.label)) for item in listing.items[:SHOWN]]
+        if len(listing.items) > SHOWN:
+            lines.append(f"- … and {len(listing.items) - SHOWN} more" + (" in the Full report below." if in_report else "."))
+    if listing.request.entity != "traits":
+        lines += ["", " ".join(_study_notes(listing))]
+    if not listing.request.word and listing.total > SHOWN:          # a long list says how to narrow it
+        example = _example(listing, listing.items)
+        if example:
+            narrow = (f"To see fewer, add a word: **list {many} with {escape(example)}** shows only the names that contain "
+                      f"“{escape(example)}”.")
+        else:
+            narrow = f"To see fewer, add a word: **list {many} with** and a word from the names."
+        lines += ["", narrow]
+    lines += ["", _source_line(listing)]
+    return "\n".join(lines)
+
+
+def report_lines(listing: CatalogList) -> list[str]:
+    """answer.md (the Full report): every name with its ID, and the exact table it was read from. Plain text."""
+    one, many = _NOUNS[listing.request.entity]
+    table, word = listing.source, listing.request.word
+    head = (f'{one.capitalize()} names containing "{word}": {len(listing.items)} of {listing.total}' if word
+            else f"{many.capitalize()} in the catalog: {listing.total}")
+    lines = ["## Catalog list (written by code from the cached catalog)", "",
+             f"{head}, {_ORDER[listing.request.entity]}.",
+             f"Source: {table.base_url}, {_CATALOG_WORD[table.export]} (the {table.export} table {table.artifact_id}, {table.rows} rows, "
+             f"sha256 {table.sha256}), fetched {_when(table)}; "
+             + ("fetched after the catalog setup was approved in this run." if table.fetched_in_this_run
+                else "a saved copy, nothing new was requested.")
+             + " No planner, no model call, no measurements."]
+    if listing.request.entity != "traits":
+        lines.append(" ".join([f"{many.capitalize()} come from the study records.", *_study_notes(listing)]))
+    lines.append("")
+    for item in listing.items:
+        label = item.label if item.key in (item.label, "") or item.label.endswith(f" · {item.key}") else f"{item.label} · {item.key}"
+        lines.append(_item_line(item, label))
+    if not listing.items:
+        lines.append("(no matching names)")
+    return lines
+
+
+# --------------------------------------------------------------------------
+# The run's record: a fixed plan, and the catalog table as its evidence
+# --------------------------------------------------------------------------
+
+def fixed_plan(request: ListRequest, question: str, base_url: str, now: datetime) -> Plan:
+    """The plan for a list run, written by code (never by the planner): read the cached export, list its names."""
+    many = _NOUNS[request.entity][1]
+    export = _EXPORT[request.entity]
+    containing = f" that contain '{request.word}'" if request.word else ""
+    steps = [PlanStep(step_id="step_catalog", agent="retriever", action="export_metadata", inputs={"entity": export}, max_tool_calls=1),
+             PlanStep(step_id="step_list", agent="analyst", action="list_catalog_names",
+                      inputs={"entity": request.entity, **({"contains": request.word} if request.word else {})},
+                      depends_on=["step_catalog"], max_tool_calls=1)]
+    return Plan(plan_id=f"plan_catalog_list_{uuid.uuid4().hex[:6]}", question=question,
+                interpretation=(f"List the {many} in the cached {_CATALOG_WORD[export]}{containing}: a fixed list written by code "
+                                "(no planner, no model call, no measurements)."),
+                status="ready", scope=ResolvedScope(base_url=base_url), steps=steps, created_at_utc=now)
+
+
+def evidence(listing: CatalogList, registry: Any) -> tuple[RetrievalReport, AnalysisReport]:
+    """The catalog table the list was read from (hash-checked by the registry) and one count, made by code."""
+    many = _NOUNS[listing.request.entity][1]
+    manifest = registry.manifest(listing.source.artifact_id)
+    if manifest.sha256 != listing.source.sha256 or not manifest.complete:
+        raise ValueError("the catalog table behind this list changed or is incomplete")
+    word = listing.request.word
+    retrieval = RetrievalReport(status="completed", complete=True, artifacts=[manifest], request_ids=list(manifest.source_request_ids),
+                                warnings=["read from the cached catalog by controller code: no Retriever agent, no model call, "
+                                          "no measurements"])
+    claim = Claim(claim_id=f"clm_catalog_list_{listing.request.entity}", kind="count", value=len(listing.items),
+                  denominator=Denominator(name=f"{many} in the {_CATALOG_WORD[manifest.kind]}", n=listing.total),
+                  source_artifact_hashes=[manifest.sha256], filters={"name contains": word} if word else {},
+                  transformation=f"number of {many}" + (f" whose name contains '{word}' (ignoring case)" if word else ""))
+    caveats = [f"The list shows the catalog as fetched {_when(listing.source)}; records added later are not in it."]
+    if listing.request.entity != "traits":
+        caveats.append(f"{many.capitalize()} come from the study records: only those named by at least one study are listed.")
+    analysis = AnalysisReport(status="completed", claims=[claim], caveats=caveats,
+                              methods=[f"catalog list: {many} read by code from the hash-checked {manifest.kind} table "
+                                       f"{manifest.artifact_id}; names compared ignoring case; no model inference, no measurements"])
+    return retrieval, analysis
+
+
+def run_note(listing: CatalogList) -> str:
+    many = _NOUNS[listing.request.entity][1]
+    table, word = listing.source, listing.request.word
+    which = f"{len(listing.items)} of {listing.total} {many}" + (f" containing '{word}'" if word else "")
+    return (f"catalog list: {which}, read by code from the {_CATALOG_WORD[table.export]} of {table.base_url} "
+            f"({table.artifact_id}, {table.rows} rows), fetched {_when(table)}"
+            + (" in this run" if table.fetched_in_this_run else " (saved copy)") + "; no planner, no model call, no measurements")

@@ -26,16 +26,17 @@ def test_bad_chat_settings_explain_without_echoing_value(monkeypatch, key, value
         assert value not in problems[0]
 
 
-def test_location_hint_is_display_only_and_no_traits_hint_while_waiting():
+def test_location_and_trait_hints_are_display_only():
     metadata = KnownMetadata(base_url="https://synthetic.invalid/brapi/v2", complete=True,
                              studies=[KnownStudy(study_id="S1", location_id="L1", location_name="SYNTHETIC location one")])
     questions = ["Which location and trait do you mean?"]
     controller = SimpleNamespace(metadata=metadata, coordination=SimpleNamespace(questions=questions),
-                                 config=RunConfig(question="Describe a trial", max_clarification_rounds=3))
+                                 config=RunConfig(question="Describe a trial", max_clarification_rounds=3),
+                                 catalog_tables={"variables": "the run's trait table"})   # what the list needs (catalog_lists)
     job = SimpleNamespace(controller=controller)
     text, finished = app.render(job, ("prompt", CLARIFY_PROMPT))
     assert "L1 · SYNTHETIC location one — 1 study" in text
-    assert "list all traits" not in text and not finished          # a run waits here: a new question cannot start
+    assert "list all traits" in text and not finished             # code answers it while this question waits
     assert controller.config.question == "Describe a trial"
     assert questions == ["Which location and trait do you mean?"]
 

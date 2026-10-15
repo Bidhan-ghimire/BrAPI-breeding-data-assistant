@@ -7,15 +7,20 @@ What these tests prove, in plain words:
   written by code that repeats what the run waits for; NOTHING reaches the run.
 * The prompt's own words (approve, edit, cancel, continue, accept, reject) reach the run with no model call, also as
   "Approve." or " CANCEL "; the model's words never do, whatever label it gives and even when it writes "approve".
-* A new data question typed mid-run ("list all traits", caught by code, or one the model labels) asks drop or keep and
-  starts nothing until answered: keep shows the waiting question again; drop ends the waiting run and starts the new one.
+* "list all traits" (or locations, seasons, programs, with an optional word) typed mid-run is answered by code from the
+  waiting run's own catalog, then what the run waits for is repeated; nothing reaches the run and no model is asked, also
+  at the "study IDs" prompt after edit. Before the run has a catalog (its catalog setup), it is a new question. When the
+  waiting question is itself about listing ("Should I list the seasons?"), the reply may be its answer: the model decides. A new data question (one the model labels,
+  or a request to list another part of the catalog) asks drop or keep and starts nothing until answered: keep shows the
+  waiting question again; drop ends the waiting run and starts the new one.
 * Unsure asks "should I send it as your answer?": "yes" sends the person's own words, "no" drops them. Only what the run
   itself can take is ever sent: an answer to a question, or a described change at the plan approval ("yes", "ok" or
   "Uganda" alone would end it as a denial). Elsewhere the run's choices are repeated. No model, a failed call or an
   invalid reply: an answer still goes to the run as before; anything the run could not take gets its choices again.
 * A run that has ended meanwhile (15 minutes without a reply) gets nothing: the chat says so and shows how it ended.
-* The planner's location list is shown once per run; the hint "You can ask 'list all traits'" is shown nowhere (the
-  planner does not understand that command yet). The run's buttons are hidden while the tab asks its own question.
+* The planner's location list is shown once per run; the hint to ask "list all traits" is shown under a planner's question
+  about a trait, only where it works (the run has its catalog tables; the question is not about listing). The run's
+  buttons are hidden while the tab asks its own question.
 Fake runs and scripted models only: no thread, no model provider and no network (the conftest guard blocks sockets).
 """
 from __future__ import annotations
@@ -31,7 +36,8 @@ from app_help import faq_items
 from llm import FakeModelClient, LlmConfigError, ModelProviderError, reply_text, reply_tools
 from run import (ANALYST_PROMPT, CATALOG_PROMPT, CLARIFY_PROMPT, DATA_REVIEW_PROMPT, RETRIEVER_PROMPT, SUPERVISOR_PROMPT,
                  RunConfig)
-from agents.coordinator import KnownMetadata, KnownStudy
+from agents.coordinator import KnownMetadata, KnownStudy, KnownVariable
+import catalog_lists
 
 SOURCE = "https://waiting.invalid/brapi/v2"
 APPROVAL = "approve / edit / cancel: "
@@ -278,9 +284,57 @@ def test_at_the_plan_a_described_change_is_sent_or_offered(chat):
 # A new data question mid-run: drop or keep
 # --------------------------------------------------------------------------
 
+CATALOG = KnownMetadata(base_url=SOURCE, complete=True,
+                        studies=[KnownStudy(study_id="S1", location_id="L1", location_name="SYNTHETIC location one", seasons=["2026"])],
+                        variables=[KnownVariable(variable_id="V1", name="fresh root yield"), KnownVariable(variable_id="V2", name="dry matter")])
+FETCHED = "2026-06-01 00:00 UTC"
+
+
+def catalog_tables() -> dict[str, catalog_lists.CatalogTable]:
+    from datetime import datetime, timezone
+
+    return {export: catalog_lists.CatalogTable(export=export, artifact_id=f"art_abcdef_000{n}", sha256="b" * 64, rows=2, base_url=SOURCE,
+                                               fetched_at=datetime(2026, 6, 1, tzinfo=timezone.utc), fetched_in_this_run=False)
+            for n, export in enumerate(("studies", "variables"), 1)}
+
+
 @pytest.mark.parametrize("waiting_on", EVERY_PROMPT, ids=[IDS[p] for p in EVERY_PROMPT])
-def test_list_all_traits_mid_run_asks_drop_or_keep_without_a_model_call(chat, waiting_on):
-    job = WaitingJob(waiting_on)
+def test_a_list_mid_run_is_shown_from_the_runs_catalog_and_the_run_keeps_waiting(chat, waiting_on):
+    job = WaitingJob(waiting_on, waiting_controller(metadata=CATALOG, catalog_tables=catalog_tables()))
+    _, built, factory = scripted()
+    history, state = chat.turn("list traits with YIELD", job, triage_model=factory)
+    content = history[-1]["content"]
+    assert content.startswith("**Trait names containing “yield”: 1 of 2.** A to Z:\n\n- fresh root yield\n")
+    assert f"Source: waiting.invalid, trait catalog fetched {FETCHED} (a saved copy; nothing new was requested)." in content
+    assert content.rsplit("\n\n", 1)[1].startswith(STILL_WAITING[waiting_on])                # then what the run waits for
+    assert job.replies == [] and not job.closed and built == [] and state == {"job": job}     # nothing sent, no model, no new question
+    assert chat.requests == [] and not chat.out.exists()                                    # no request and no new run
+
+
+def test_a_list_at_the_study_ids_prompt_is_shown_and_never_taken_as_study_ids(chat):
+    job = WaitingJob(EDIT_IDS, waiting_controller(metadata=CATALOG, catalog_tables=catalog_tables()))
+    _, built, factory = scripted()
+    history, state = chat.turn("list all traits", job, triage_model=factory)
+    assert history[-1]["content"].startswith("**Traits in the catalog: 2.** A to Z:") and job.replies == [] and built == []
+    chat.turn("S1, S2", job, state, triage_model=factory)                       # the IDs themselves still go straight to it
+    assert job.replies == ["S1, S2"]
+
+
+@pytest.mark.parametrize("pending, typed", [("Should I list the seasons or only count them?", "list the seasons"),
+                                            ("Should I show all traits measured in study 4501, or only yield?", "show all traits")])
+def test_when_the_waiting_question_is_about_listing_a_list_reply_goes_to_the_model(chat, pending, typed):
+    """Review 2026-10-15: there the reply may be the answer; showing the catalog list would swallow it."""
+    controller = waiting_controller(metadata=CATALOG, catalog_tables=catalog_tables(),
+                                    analysis=SimpleNamespace(caveats=[f"clarification needed: {pending}"]))
+    job = WaitingJob(ANALYST_PROMPT, controller)
+    model, _, factory = scripted(reply_text(decision("answer_to_pending")))
+    history, _ = chat.turn(typed, job, triage_model=factory)
+    assert job.replies == [typed] and len(model.requests) == 1 and "in the catalog" not in history[-1]["content"]
+
+
+@pytest.mark.parametrize("waiting_on", EVERY_PROMPT, ids=[IDS[p] for p in EVERY_PROMPT])
+def test_a_list_before_the_run_has_a_catalog_asks_drop_or_keep_without_a_model_call(chat, waiting_on):
+    job = WaitingJob(waiting_on)                                    # no catalog yet: in a real run only during its catalog setup
     _, built, factory = scripted()
     history, state = chat.turn("list all traits", job, triage_model=factory)
     assert history[-1]["content"].startswith("That sounds like a new question: “list all traits”. Reply **drop**")
@@ -412,10 +466,11 @@ def test_where_only_typed_words_decide_the_choices_are_repeated(chat, waiting_on
 # What the waiting prompts show
 # --------------------------------------------------------------------------
 
-def location_controller(question: str) -> SimpleNamespace:
+def location_controller(question: str, **changes) -> SimpleNamespace:
     metadata = KnownMetadata(base_url=SOURCE, complete=True,
                              studies=[KnownStudy(study_id="S1", location_id="L1", location_name="SYNTHETIC location one")])
-    return waiting_controller(metadata=metadata, coordination=SimpleNamespace(questions=[question]))
+    return waiting_controller(**{"metadata": metadata, "coordination": SimpleNamespace(questions=[question]),
+                                 "catalog_tables": catalog_tables(), **changes})
 
 
 def test_the_location_list_is_shown_once_per_run():
@@ -428,15 +483,22 @@ def test_the_location_list_is_shown_once_per_run():
     assert app.LOCATION_LIST_LEAD in fresh                                                  # a new run lists them again
 
 
-def test_the_list_all_traits_hint_is_shown_nowhere():
-    """The planner does not understand "list all traits" yet (run 20261015T181947): no screen may suggest it."""
-    asked = location_controller("Which trait do you mean?")
-    waiting, _ = app.render(WaitingJob(CLARIFY_PROMPT, asked), ("prompt", CLARIFY_PROMPT))
-    ended = waiting_controller(coordination=SimpleNamespace(questions=["Which trait do you mean?"]), execution_status="needs_clarification",
-                               notes=["still not ready after 3 clarification rounds: Which trait do you mean?"], analysis=None, retrieval=None)
-    done, finished = app.render(WaitingJob(CLARIFY_PROMPT, ended), ("done", SimpleNamespace(execution_status="needs_clarification")))
-    assert finished and "list all traits" not in waiting and "list all traits" not in done
-    assert "list all traits" not in json.dumps(faq_items("synthetic source details")) and not hasattr(app, "TRAITS_HINT")
+def test_the_list_hint_is_shown_under_a_planners_trait_question_where_it_works():
+    """Run 20261015T181947: the hint promised a command the planner did not understand. Now code answers it while the
+    planner's question waits, so the hint is back there (and only where the run has its catalog)."""
+    waiting, _ = app.render(WaitingJob(CLARIFY_PROMPT, location_controller("Which trait do you mean?")), ("prompt", CLARIFY_PROMPT))
+    assert "\n\n" + catalog_lists.TRAIT_HINT in waiting and "**list traits with yield**" in waiting   # a paragraph of its own
+    elsewhere, _ = app.render(WaitingJob(CLARIFY_PROMPT, location_controller("Which location do you mean?")), ("prompt", CLARIFY_PROMPT))
+    no_catalog, _ = app.render(WaitingJob(CLARIFY_PROMPT, waiting_controller(coordination=SimpleNamespace(questions=["Which trait?"]))),
+                               ("prompt", CLARIFY_PROMPT))
+    analyst, _ = app.render(WaitingJob(ANALYST_PROMPT, location_controller("Which trait do you mean?")), ("prompt", ANALYST_PROMPT))
+    no_tables, _ = app.render(WaitingJob(CLARIFY_PROMPT, location_controller("Which trait do you mean?", catalog_tables={})),
+                              ("prompt", CLARIFY_PROMPT))                                  # the tables could not be read
+    about_listing, _ = app.render(WaitingJob(CLARIFY_PROMPT, location_controller("Should I list all traits of study 4501?")),
+                                  ("prompt", CLARIFY_PROMPT))                              # there "list all traits" may be the answer
+    assert all("list all traits**" not in text for text in (elsewhere, no_catalog, analyst, no_tables, about_listing))
+    faq = json.dumps(faq_items("synthetic source details"))
+    assert "**list all traits**" in faq and "**list traits with yield**" in faq and "shown right away once the catalog is ready" in faq
 
 
 def test_the_prompt_tells_the_model_it_never_decides():
