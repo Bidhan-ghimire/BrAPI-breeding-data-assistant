@@ -18,6 +18,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal
+from urllib.parse import urlsplit
 
 from agents.analyst import AnalysisInput, registry_prefix, run_analyst
 from agents.coordinator import (
@@ -63,6 +64,7 @@ __all__ = [
     "RunConfig", "Models", "Controller", "EXIT_CODES", "build_approval",
     "scope_mismatches", "CLARIFY_PROMPT", "ANALYST_PROMPT", "analyst_questions",
     "RETRIEVER_PROMPT", "DATA_REVIEW_PROMPT", "scope_needs_a_check", "readable_answer", "required_fetches", "plan_too_wide", "CATALOG_PROMPT",
+    "approval_lead", "source_host",
 ]
 
 EXIT_CODES = {"completed": 0, "incomplete": 1, "failed": 1, "limit_reached": 1, "blocked": 3, "needs_clarification": 3, "canceled": 130}
@@ -319,6 +321,42 @@ def required_fetches(plan: Plan, manifest: FetchManifest | None = None) -> tuple
             explicit = step.inputs.get("study_db_id")
             units.update(({explicit} & studies) if isinstance(explicit, str) else studies)
     return pairs, units
+
+
+_PLAIN_FAMILIES = {"serverinfo": "server details", "commoncropnames": "crop names", "studies": "studies",
+                   "observationvariables": "traits", "observations": "measurements", "observationunits": "plots",
+                   "locations": "locations", "programs": "programs", "seasons": "seasons"}
+
+
+def _how_many(count: int, one: str, many: str) -> str:
+    return f"{count} {one if count == 1 else many}"
+
+
+def _plain_list(words: list[str]) -> str:
+    return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " and " + words[-1]
+
+
+def source_host(url: str) -> str:
+    """'https://sweetpotatobase.org/brapi/v2' -> 'sweetpotatobase.org', for a plain sentence; the full URL stays in the details."""
+    return urlsplit(url).hostname or url
+
+
+def approval_lead(manifest: FetchManifest, plan: Plan) -> str:
+    """The plain first line of an approval screen, written by code from the manifest that the approval binds (never by a model)."""
+    host = source_host(manifest.base_url)
+    studies, traits = len(manifest.observation_study_ids), len(manifest.observation_variable_ids)
+    if not studies:
+        families = _plain_list([_PLAIN_FAMILIES.get(family, family) for family in manifest.endpoint_families])
+        return (f"This question needs only public catalog records of {families} from {host}, no measurements. "
+                "Nothing is requested until you approve.")
+    pairs, units = required_fetches(plan, manifest)
+    parts = []
+    if pairs:
+        parts.append(f"measurements of {_how_many(traits, 'trait', 'traits')} in {_how_many(studies, 'study', 'studies')}")
+    if units:
+        parts.append(f"the plot list{'' if len(units) == 1 else 's'} of {_how_many(len(units), 'study', 'studies')}")
+    what = " and ".join(parts) or f"data for {_how_many(studies, 'study', 'studies')}"
+    return f"I plan to fetch {what} from {host}. Nothing is fetched until you approve."
 
 
 def plan_too_wide(plan: Plan, max_fetches: int) -> str | None:
@@ -641,7 +679,9 @@ class Controller:
         return metadata
 
     def catalog_approval_screen(self) -> str:
-        return (f"CATALOG SETUP APPROVAL NEEDED — complete cached catalogs are missing.\n"
+        return (f"First I need the public list of studies and traits from {source_host(self._server())}. "
+                "No measurements are fetched in this step.\n\n"
+                f"CATALOG SETUP APPROVAL NEEDED — complete cached catalogs are missing.\n"
                 f"Source: {self._server()}\n"
                 f"Fetch only public studies and trait/variable catalogs, at most {CATALOG_MAX_HTTP_ATTEMPTS} HTTP attempts "
                 f"in total and {CATALOG_MAX_PAGES} pages per catalog. No observation data or model calls.\n"
@@ -798,6 +838,7 @@ class Controller:
                       ) if scope_ids else "no study (a catalog question)"
         pairs, unit_studies = required_fetches(self.plan, self.manifest)
         lines = [
+            approval_lead(self.manifest, self.plan), "",
             "=" * 72, "APPROVAL NEEDED - no observation data has been fetched yet", "=" * 72,
             f"question       : {self.config.question}",
             f"database access: {', '.join(self.manifest.endpoint_families)}",

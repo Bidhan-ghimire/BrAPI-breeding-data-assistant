@@ -3,6 +3,8 @@
 app_space.py selects agent-led coordination, the shared MCP service, and human
 review before retrieval and analysis. Each browser session has its own run;
 the Full report retains sources, calculations, answers and review decisions.
+A new message first passes the front door (triage.py): greetings and questions
+about the app are answered without starting a run.
 """
 from __future__ import annotations
 
@@ -15,16 +17,17 @@ import threading
 from typing import Any, Callable, Iterator, Mapping
 from urllib.parse import urlsplit
 
+import triage
 from app_style import CSS, HERO_HTML, build_theme
 from app_help import QUICK_START, QUESTION_GUIDE, faq_items
 from chat_presenter import answer_summary, approval_summary
 from agents.coordinator import clarifications_given
 from brapi_client import load_settings
 from run import (ANALYST_PROMPT, CLARIFY_PROMPT, CATALOG_PROMPT, DATA_REVIEW_PROMPT, RETRIEVER_PROMPT, SUPERVISOR_PROMPT,
-                 Controller, Models, RunConfig, analyst_questions)
+                 Controller, Models, RunConfig, analyst_questions, source_host)
 
 __all__ = ["Job", "live_config", "live_preflight", "respond", "render", "build_ui", "REPLY_TIMEOUT_S", "locked", "after_step",
-           "reply_buttons", "start_over"]
+           "reply_buttons", "start_over", "default_triage_model"]
 
 REPLY_TIMEOUT_S = 15 * 60          # how long a run waits for your reply in the chat before it cancels itself
 STEP_TIMEOUT_S = 15 * 60           # how long the page waits for the run's next step (model calls, fetches)
@@ -125,6 +128,13 @@ def default_models() -> Models:
     return Models(requested="configured model")
 
 
+def default_triage_model():
+    """The configured model for the front door's one sorting call. Built only when the rules cannot place a message."""
+    from llm import OpenAICompatibleClient, load_llm_settings
+
+    return OpenAICompatibleClient(load_llm_settings())
+
+
 def live_preflight(question: str, make_config: Callable[[str], RunConfig] = live_config) -> list[str]:
     """The command line's refusals, said in the chat before any model call or request."""
     try:
@@ -190,13 +200,13 @@ def render(job: Job, event: tuple[str, Any]) -> tuple[str, bool]:
                 "Continuing allows analysis; you will review and accept the final answer separately."), False
     if kind == "prompt" and payload == SUPERVISOR_PROMPT:
         asked = "\n".join("> " + _shorten(" ".join(q.split())) for q in controller.supervisor_questions)
-        return ("The coordinator needs a detail before choosing the next step:\n\n" + asked +
+        return ("I need one more detail before choosing the next step:\n\n" + asked +
                 "\n\nReply in the chat, or cancel. Any revised data request still needs your approval."), False
     if kind == "prompt" and payload == RETRIEVER_PROMPT:
         asked = [_shorten(" ".join(q.split())) for q in controller.retriever_questions if q and q.strip()]
         shown = "\n".join(f"> {q}" for q in asked) or "> (no question was given; reply cancel to stop)"
         number = controller.retriever_answers + 1
-        return (f"The retriever needs one more detail while preparing your data (answer {number} of "
+        return (f"I need one more detail while preparing your data (answer {number} of "
                 f"{controller.config.max_clarification_rounds}):\n\n{shown}\n\n"
                 "Your answer resumes retrieval within the approved scope. To change that scope, "
                 "reply **cancel** and start a new question."), False
@@ -208,15 +218,15 @@ def render(job: Job, event: tuple[str, Any]) -> tuple[str, bool]:
         number = (max(0, clarifications_given(controller.config.question) - getattr(controller, "approval_revisions", 0))
                   if planner else controller.analyst_answers) + 1
         if planner:
-            who = "The planner needs more detail before it can make a plan"
+            who = "I need one more detail before I can make a plan"
             hint = "Your answer is added to your question, so a few words are enough, for example **study 4501** or **all studies from 2026**."
             scope = getattr(getattr(controller, "plan", None), "scope", None)
             if not getattr(scope, "study_ids", []):
                 hint += (" Each new question starts a separate analysis. If you mean an earlier study or summary, "
                          "name its study and trait, or paste the relevant summary. Replies here clarify this question.")
         else:
-            who = "The analyst has the data and needs one more detail before it can answer"
-            hint = "Your answer goes to the analyst; nothing new is fetched."
+            who = "I have the data and need one more detail before I can answer"
+            hint = "Your answer is used with the data I already have; nothing new is fetched."
         if planner:
             shown += clarification_choices(questions, controller.metadata)
         return f"{who} (answer {number} of {controller.config.max_clarification_rounds}):\n\n{shown}\n\n{hint} Or reply **cancel**.", False
@@ -263,35 +273,90 @@ def _shorten(text: str) -> str:
     return text[:SHOWN_QUESTION_CHARS].rstrip() + " … (shortened here; the run's notes keep the whole question)"
 
 
+def _faq() -> list[tuple[str, str]]:
+    try:
+        return faq_items(source_markdown(), data_sharing_policy=hosted_notice())
+    except Exception:  # a settings problem must not break a help answer
+        return faq_items("The assistant reads public records from the configured breeding database.")
+
+
+def _source_name() -> str:
+    try:
+        return source_host(load_settings().base_url) or "the breeding database"
+    except Exception:
+        return "the breeding database"
+
+
+def _front_door_reply(sorted_message: triage.Triage, text: str) -> str:
+    """Written by code; at most the label came from the model."""
+    if sorted_message.label == "greeting_or_smalltalk":
+        return triage.greeting_reply(text)
+    if sorted_message.label == "app_question":
+        return triage.app_reply(sorted_message.topic, _faq())
+    return triage.unsure_reply(_source_name())
+
+
 def respond(message: str, history: list[Message], state: dict[str, Any], *, make_config: Callable[[str], RunConfig] = live_config,
             make_models: Callable[[], Models] = default_models,
-            preflight: Callable[[str], list[str]] | None = None) -> Iterator[tuple[list[Message], dict[str, Any], str]]:
-    """One chat turn. A new question starts a run; while a run waits, the text is its reply. Yields (history, state, box)."""
+            preflight: Callable[[str], list[str]] | None = None,
+            triage_model: Callable[[], Any] | None = None) -> Iterator[tuple[list[Message], dict[str, Any], str]]:
+    """One chat turn. While a run waits, the text is its reply. A new message first passes the front door (triage.py):
+    greetings and app questions get a code-written answer and start nothing; a data question starts a run. A message the
+    rules cannot place costs one triage_model call; without that model, or when the call fails, it starts a run as before.
+    Yields (history, state, box)."""
     text = (message or "").strip()
     if not text:
         yield history, state, ""
         return
     history = list(history) + [{"role": "user", "content": text}]
     job: Job | None = state.get("job")
+    working = False                          # the progress line is already shown (while the front door asked the model)
     if job is None:
+        pending = state.get("pending_question")
+        state = {k: v for k, v in state.items() if k != "pending_question"}      # this message answers it either way
+        question, by_rules, from_pending = text, None, False
+        if pending and triage.is_yes(text):
+            question, from_pending = pending, True                               # "yes" starts the earlier question as typed
+        else:
+            by_rules = triage.sort_by_rules(text)
+            if by_rules is not None and by_rules.label not in triage.PIPELINE_LABELS:
+                history.append({"role": "assistant", "content": _front_door_reply(by_rules, text)})
+                yield history, state, ""                                         # no run, no model call, no request
+                return
         try:
-            problems = (preflight or (lambda q: live_preflight(q, make_config)))(text)
+            problems = (preflight or (lambda q: live_preflight(q, make_config)))(question)
         except Exception:  # a bad setting must not leave the chat locked or echo its value
             problems = ["App configuration could not be checked. Ask the operator to review the app and model settings."]
         if problems:
             history.append({"role": "assistant", "content": "This question cannot run yet:\n" + "\n".join(f"- {p}" for p in problems)})
             yield history, state, ""
             return
+        if by_rules is None and not from_pending and triage_model is not None:  # the rules could not tell: one model call
+            history.append({"role": "assistant", "content": WORKING})
+            working = True
+            yield history, state, ""
+            decision = triage.ask_model(text, triage_model)                      # None: no decision, so the run starts
+            if decision is not None and decision.label not in triage.PIPELINE_LABELS:
+                if decision.label == "unsure":
+                    state = {**state, "pending_question": text}
+                history[-1] = {"role": "assistant", "content": _front_door_reply(triage.Triage(decision.label, "model"), text)}
+                yield history, state, ""
+                return
         try:
-            job = Job(text, make_config=make_config, make_models=make_models).start()
+            job = Job(question, make_config=make_config, make_models=make_models).start()
         except Exception:
-            history.append({"role": "assistant", "content": "This question could not start. Ask the operator to check the app settings and output-folder access."})
+            failed = {"role": "assistant", "content": "This question could not start. Ask the operator to check the app settings and output-folder access."}
+            if working:
+                history[-1] = failed
+            else:
+                history.append(failed)
             yield history, state, ""
             return
         state = {"job": job}                 # a new question also clears the preceding report
     else:
         job.reply(text)
-    history.append({"role": "assistant", "content": WORKING})
+    if not working:
+        history.append({"role": "assistant", "content": WORKING})
     yield history, state, ""
     content, finished = render(job, job.next_event())
     history[-1] = {"role": "assistant", "content": content}
@@ -385,7 +450,7 @@ def start_over(state: dict[str, Any] | None) -> tuple[list[Message], dict[str, A
 
 
 def build_ui(*, make_config: Callable[[str], RunConfig] = live_config, make_models: Callable[[], Models] = default_models,
-             preflight: Callable[[str], list[str]] | None = None):
+             preflight: Callable[[str], list[str]] | None = None, triage_model: Callable[[], Any] | None = default_triage_model):
     import gradio as gr
 
     with gr.Blocks(title="Breeding data assistant", fill_height=False) as demo:
@@ -421,7 +486,8 @@ def build_ui(*, make_config: Callable[[str], RunConfig] = live_config, make_mode
         controls = [box, new, approve, cancel, accept, reject]              # the order locked() and after_step() use
 
         def on_submit(message, history, current):
-            yield from respond(message, history or [], current or {}, make_config=make_config, make_models=make_models, preflight=preflight)
+            yield from respond(message, history or [], current or {}, make_config=make_config, make_models=make_models, preflight=preflight,
+                               triage_model=triage_model)
 
         def pressing(word: str):
             def on_press(history, current):                                # a button is the same as typing its word ...

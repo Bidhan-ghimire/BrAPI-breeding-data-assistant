@@ -59,6 +59,8 @@ Your questions and relevant database excerpts are sent to OpenAI, sometimes befo
 
 You can use and adapt this software's code as a starting point for your own breeding-data chat assistant. A new database connection needs appropriate access permission and compatibility checks, and the resulting answers should be checked against known records before use.
 
+To run the tests, install `requirements.txt` and `requirements-dev.txt`, then run `python -m pytest` in this folder. The tests run offline: they use scripted model replies and a fake database, and they block network access outside your computer.
+
 This software is available under the [MIT License](LICENSE). Database data and third-party libraries retain their own terms.
 
 ## Citing this project

@@ -25,7 +25,9 @@ def faq_items(source_details: str, *, data_sharing_policy: str = "") -> list[tup
         ("What can I use this assistant for?",
          "Find studies and locations, check available traits, and summarize recorded measurements. "
          "It provides descriptive results such as counts, means and missing-data summaries. "
-         "It does not make parental-selection or line-advancement recommendations."),
+         "It does not make parental-selection or line-advancement recommendations. "
+         "Greetings and questions about the app that it recognizes are answered right away, without a database request. "
+         "A question about breeding data starts a request, and nothing is fetched until you approve."),
         ("Where do the data come from?", source_details),
         ("What makes a good question?",
          "Ask about one clear task at a time. Use a study name or ID and the exact trait name when you know them. "

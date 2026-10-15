@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import json
 from typing import Any
+from urllib.parse import urlsplit
 
 from artifacts import ArtifactError
 from contracts import ArtifactManifest, Plan, RetrievalReport
@@ -64,7 +65,15 @@ def review_snapshot(ctx: Any, report: RetrievalReport, plan: Plan, requests: lis
     if warnings:
         lines += ["", "**Data limitations:**", *[f"- {_cell(warning, 500)}" for warning in warnings]]
     lines += ["", "Continuing approves these saved tables for analysis only. It does not accept an answer or authorize additional retrieval."]
-    return "\n".join(lines), fingerprints
+    return "\n".join([_review_lead(plan, fingerprints), "", *lines]), fingerprints
+
+
+def _review_lead(plan: Plan, fingerprints: list[dict[str, Any]]) -> str:
+    """The plain first line, counted by code from the hash-checked tables above (never by a model)."""
+    tables, rows = len(fingerprints), sum(f["row_count"] for f in fingerprints)
+    host = _cell(urlsplit(plan.scope.base_url).hostname or plan.scope.base_url, 500)
+    return (f"Your data are ready: {tables} table{'' if tables == 1 else 's'} with {rows} row{'' if rows == 1 else 's'}"
+            f"{' in total' if tables > 1 else ''} from {host}. Nothing is analyzed until you check {'it' if tables == 1 else 'them'}.")
 
 
 def verify_reviewed_tables(ctx: Any, report: RetrievalReport, expected: list[dict[str, Any]]) -> None:
