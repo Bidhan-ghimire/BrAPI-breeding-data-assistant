@@ -96,9 +96,16 @@ def place(tmp_path, monkeypatch):
 
 
 def scripted_front_door(*labels: str):
-    """The front door's model, scripted: one decision per label, in order."""
-    model = FakeModelClient([reply_text(json.dumps({"label": label, "reason": "scripted", "reply": ""}), model="mock-model")
-                             for label in labels], reported_model="mock-model")
+    """The front door's model, scripted: one decision per label, in order. "unsure>talk" is the label call's unsure decision
+    followed by the talk call's reply (Step 2c), which keeps the "Reply yes to look up" line."""
+    replies = []
+    for label in labels:
+        decided = label.split(">")[0]
+        replies.append(reply_text(json.dumps({"label": decided, "reason": "scripted", "reply": ""}), model="mock-model"))
+        if label.endswith(">talk"):
+            replies.append(reply_text(json.dumps({"label": decided, "reason": "scripted", "reply": "What would you like to know?",
+                                                  "offer_lookup": True}), model="mock-model"))
+    model = FakeModelClient(replies, reported_model="mock-model")
     return model, (lambda: model)
 
 
@@ -143,7 +150,7 @@ def test_without_confirm_nothing_runs(place, capsys):
 def test_end_to_end_with_scripted_models_on_a_copy_of_the_cache(place):
     place.seed(*FIXTURES)
     before = snapshot(place.source)
-    model, front_door = scripted_front_door("catalog_question", "data_question", "unsure")
+    model, front_door = scripted_front_door("catalog_question", "data_question", "unsure>talk")
     status = harness.main(["--cache", str(place.source), "--questions", str(write_questions(place.root, QUESTIONS)),
                            "--results", str(place.root / "results"), "--confirm"],
                           base_config=place.base_config, make_models=synthetic_models, triage_model=front_door,
@@ -177,11 +184,13 @@ def test_end_to_end_with_scripted_models_on_a_copy_of_the_cache(place):
 
     u1 = rows["u1"]                                       # "look it up?" is never answered yes
     assert u1["passed"] is False and u1["status"] == "no run: the app asked whether to look it up (the harness never says yes)"
+    assert u1["front_door_calls"] == 2                    # Step 2c: the label call, then the talk call (its reply, with the
+    assert u1["answer"].startswith("What would you like to know?") and "Reply **yes**" in u1["answer"]   # yes line by code)
 
     markdown = (folder / "results.md").read_text(encoding="utf-8")
     assert "| # | Question | Expected | Got | Pass | Model calls | Seconds | How it ended |" in markdown
     assert "Result: 2 passed, 1 failed, 1 skipped" in markdown and "| m1 |" in markdown and "| PASS |" in markdown
-    assert len(model.requests) == 3                       # one front-door call per question that ran
+    assert len(model.requests) == 4                       # one front-door call per question that ran, and u1's talk call
     assert snapshot(place.source) == before and (folder / "cache").is_dir()           # the source cache is never changed
     assert place.server.calls == [] and not (place.root / "never_out").exists()        # nothing requested; runs under results
 

@@ -7,7 +7,8 @@ What these tests prove, in plain words:
   Breeding words (yield, clone, variety, ...) are data words. "help" makes an app question only in a message of
   4 words or fewer, or in one that is nothing but a request for help.
 * Every message that starts nothing (greeting, app question, out of scope, unsure) costs exactly ONE scripted model call
-  with no tools. That call writes the reply, and for a message the rules cannot place it also picks the label.
+  with no tools. That call writes the reply, and for a message the rules cannot place it also picks the label. (With the
+  saved catalog or earlier questions in view, a second call writes the reply: Step 2c, tests/test_front_door_talk.py.)
 * Out of scope ("i hate you", "which country has the largest population?") gets the reply only: what the app covers and
   one example, with no lookup line, and a later "yes" starts nothing.
 * The model's text is escaped like database text and cut to 600 characters. When the call fails, or the model wrote
@@ -22,9 +23,9 @@ What these tests prove, in plain words:
   parents should I cross?" gets the out-of-scope reply and no run. Without a decision, data words start the run as before.
   Greetings and app questions keep the label the rules gave. A question about what the saved catalog holds ("tell me about
   Florida") is answered by code from the saved catalog and starts nothing: the model only chooses the label, and its words
-  are never shown there, in any language. When the saved catalog (or earlier questions) was in the prompt, the model's
-  reply is never shown under any label: the line written by code is. Without a saved catalog the label is not offered and
-  such a message asks first.
+  are never shown there, in any language. When the saved catalog (or earlier questions) was in the prompt, that call's
+  reply is never shown under any label: the talk call's reply, written without them in view, is (Step 2c), or else the
+  line written by code. Without a saved catalog the label is not offered and such a message asks first.
 The conftest network guard blocks every real socket; the models are scripted.
 """
 from __future__ import annotations
@@ -52,6 +53,12 @@ REFERENCE = triage.reference_text(faq_items("synthetic source details"))
 
 def decision(label: str, reply: str = "") -> str:
     return json.dumps({"label": label, "reason": "scripted for this test", "reply": reply})
+
+
+def talk(label: str, reply: str, offer_lookup: bool | None = None) -> str:
+    """A scripted reply of the talk call (Step 2c); offer_lookup left out when None."""
+    body = {"label": label, "reason": "scripted for this test", "reply": reply}
+    return json.dumps(body if offer_lookup is None else {**body, "offer_lookup": offer_lookup})
 
 
 def ask(message: str, factory, known_label: str | None = None):
@@ -692,7 +699,7 @@ def test_a_catalog_question_is_answered_by_code_from_the_saved_catalog_and_start
         assert fact in prompt
 
 
-@pytest.mark.parametrize("label, reply, expected", [
+NEVER_SHOWN = pytest.mark.parametrize("label, reply, expected", [
     ("unsure", "The catalog lists 9 studies at Kinston; do you mean those?", "Do you want me to look this up in front-door.invalid?"),
     ("unsure", "Kinston has nine studies.", "Do you want me to look this up in front-door.invalid?"),
     ("unsure", "Kinston tem doze estudos.", "Do you want me to look this up in front-door.invalid?"),
@@ -700,14 +707,35 @@ def test_a_catalog_question_is_answered_by_code_from_the_saved_catalog_and_start
     ("app_question", "The catalog holds three locations: Clinton, Kinston and Namulonge.", "### Your first question"),
     ("greeting_or_smalltalk", "Hi! Clinton has the most studies.", "I can help you explore public breeding data."),
 ], ids=["unsure-digits", "unsure-number-words", "unsure-portuguese", "out-of-scope-place", "app-question-places", "greeting"])
+TALK_REPLY = "Thanks for your message; I can look up public breeding records for you."     # no number, no place
+
+
+@NEVER_SHOWN
 def test_with_the_catalog_in_the_prompt_the_model_reply_is_never_shown(chat, no_runs, label, reply, expected):
     """Review finding (2026-10-16): a digit check let number words and claims about places through. With the saved catalog
-    (or earlier questions) in the prompt, the line written by code for the label is shown, under every label."""
+    (or earlier questions) in the prompt, that call's reply is never shown, under any label. Step 2c (honest change): the
+    talk call's reply is shown instead; it was written with no catalog in view (its prompt is checked here)."""
+    seed_catalog(chat.cache, SOURCE)
+    model, _, factory = model_factory(reply_text(decision(label, reply)), reply_text(talk(label, TALK_REPLY)))
+    history, state = chat.turn("tell me about Kinston", triage_model=factory)
+    assert history[-1]["content"].startswith(TALK_REPLY) and reply not in history[-1]["content"]
+    assert triage.REPLY_BY_APP_RULE in model.requests[0]["messages"][0]["content"] and no_runs == []
+    decide, second = (request["messages"][0]["content"] for request in model.requests)
+    assert "Saved catalog of front-door.invalid" in decide and "Kinston, NC" in decide            # the label call saw it ...
+    assert triage.REPLY_BY_APP_RULE not in second and "Saved catalog" not in second               # ... the talk call did not
+    assert "Kinston" not in second and "Clinton" not in second and f"already sorted this message as {label}" in second
+
+
+@NEVER_SHOWN
+def test_with_the_catalog_in_the_prompt_and_no_talk_reply_the_line_written_by_code_is_shown(chat, no_runs, label, reply,
+                                                                                            expected):
+    """The same messages when the talk call gives nothing (here: no scripted reply is left for it): the line written by code
+    for the label, as before Step 2c."""
     seed_catalog(chat.cache, SOURCE)
     model, _, factory = model_factory(reply_text(decision(label, reply)))
     history, state = chat.turn("tell me about Kinston", triage_model=factory)
     assert history[-1]["content"].startswith(expected) and reply not in history[-1]["content"]
-    assert triage.REPLY_BY_APP_RULE in model.requests[0]["messages"][0]["content"] and no_runs == []
+    assert len(model.requests) == 2 and no_runs == [] and chat.requests == []
 
 
 def test_without_the_catalog_or_earlier_questions_the_model_reply_is_shown(chat, no_runs):
