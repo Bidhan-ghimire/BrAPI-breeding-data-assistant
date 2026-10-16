@@ -1,0 +1,21 @@
+{
+  "about": "Breeder questions for eval/harness.py. Each names the KIND of answer it expects; the harness computes the answer by code from the cache copy it runs on, so this file holds no answers. The study and trait catalogs answer q01-q12; q13-q14 need the cached measurements of study 05DISE178HFLNO7 (SweetPotatoBase study 4501, variable 76736), which are in CassavaBase\\part2\\cache\\live.",
+  "questions": [
+    {"id": "q01", "question": "How many studies have a 2026 season?", "expect": {"kind": "studies_with_season", "season": "2026"}},
+    {"id": "q02", "question": "How many studies have a 2025 season?", "expect": {"kind": "studies_with_season", "season": "2025"}},
+    {"id": "q03", "question": "Which location has the most studies?", "expect": {"kind": "top_location"}},
+    {"id": "q04", "question": "How many trait names contain the word yield?", "expect": {"kind": "traits_containing", "word": "yield"}},
+    {"id": "q05", "question": "Which seasons are in the catalog?", "expect": {"kind": "seasons_present"}},
+    {"id": "q06", "question": "How many studies are there of each study type?", "expect": {"kind": "studies_per_type"}},
+    {"id": "q07", "question": "How many locations are in the catalog?", "expect": {"kind": "location_count"}},
+    {"id": "q08", "question": "How many studies are in the catalog?", "expect": {"kind": "study_count"}},
+    {"id": "q09", "question": "How many traits are in the catalog?", "expect": {"kind": "trait_count"}},
+    {"id": "q10", "question": "How many studies were run at Clinton?", "expect": {"kind": "studies_at_location", "word": "Clinton"}},
+    {"id": "q11", "question": "How many Advanced Yield Trial studies are there?", "expect": {"kind": "studies_of_type", "type": "Advanced Yield Trial"}},
+    {"id": "q12", "question": "Which study type has the most studies?", "expect": {"kind": "top_study_type"}},
+    {"id": "q13", "question": "In study 05DISE178HFLNO7, what is the pooled mean of the variable 'Reaction to Fusarium Wilt estimating 0-5'?",
+     "expect": {"kind": "pooled_mean", "study": "05DISE178HFLNO7", "variable": "Reaction to Fusarium Wilt estimating 0-5"}},
+    {"id": "q14", "question": "In study 05DISE178HFLNO7, how many valid values does 'Reaction to Fusarium Wilt estimating 0-5' have?",
+     "expect": {"kind": "valid_count", "study": "05DISE178HFLNO7", "variable": "Reaction to Fusarium Wilt estimating 0-5"}}
+  ]
+}
