@@ -32,7 +32,7 @@ from retrieval_review import _cell as _escaped       # the same escaping the dat
 
 __all__ = ["ListEntity", "ENTITIES", "SHOWN", "WORD_MAX_CHARS", "TRAIT_HINT", "ListRequest", "CatalogTable", "ListItem",
            "CatalogList", "parse_request", "config_problems", "catalog_tables", "build", "chat_message", "report_lines",
-           "fixed_plan", "evidence", "run_note"]
+           "fixed_plan", "evidence", "run_note", "setup_plan", "setup_evidence"]
 
 ListEntity = Literal["traits", "locations", "seasons", "programs"]
 ENTITIES: tuple[str, ...] = ("traits", "locations", "seasons", "programs")
@@ -80,6 +80,7 @@ class CatalogTable:
     base_url: str
     fetched_at: datetime | None      # the earliest server reply in this export (a cached reply keeps its first fetch time)
     fetched_in_this_run: bool        # a live request in this run (the catalog setup), not a saved copy
+    operator_approved: bool = False  # that catalog setup was approved by the operator's standing approval, not the visitor
 
 
 @dataclass(frozen=True)
@@ -132,8 +133,9 @@ def config_problems(entity: str | None, word: str | None) -> list[str]:
 # The list, built from the run's validated catalog (agents.coordinator.KnownMetadata)
 # --------------------------------------------------------------------------
 
-def catalog_tables(ctx: Any, *, studies: str, variables: str) -> dict[str, CatalogTable]:
-    """The two export tables a run's metadata was built from, with the fetch time of their own replies (Controller)."""
+def catalog_tables(ctx: Any, *, studies: str, variables: str, operator_approved: bool = False) -> dict[str, CatalogTable]:
+    """The two export tables a run's metadata was built from, with the fetch time of their own replies (Controller), and
+    whether this run's catalog setup was approved by the operator's standing approval."""
     records = list(ctx.client.provenance())
     tables: dict[str, CatalogTable] = {}
     for export, artifact_id in (("studies", studies), ("variables", variables)):
@@ -143,7 +145,8 @@ def catalog_tables(ctx: Any, *, studies: str, variables: str) -> dict[str, Catal
         fetched = sorted(r.fetched_at_utc for r in replies if r.fetched_at_utc is not None)
         tables[export] = CatalogTable(export=export, artifact_id=artifact_id, sha256=manifest.sha256, rows=manifest.row_count,
                                       base_url=ctx.client.settings.base_url, fetched_at=fetched[0] if fetched else None,
-                                      fetched_in_this_run=any(r.origin == "live" for r in replies))
+                                      fetched_in_this_run=any(r.origin == "live" for r in replies),
+                                      operator_approved=operator_approved)
     return tables
 
 
@@ -291,7 +294,9 @@ def _study_notes(listing: CatalogList) -> list[str]:
 
 def _source_line(listing: CatalogList) -> str:
     table = listing.source
-    how = "fetched after you approved the catalog setup" if table.fetched_in_this_run else "a saved copy; nothing new was requested"
+    how = ("a saved copy; nothing new was requested" if not table.fetched_in_this_run else
+           "fetched after the app's operator approved the catalog setup (standing approval)" if table.operator_approved else
+           "fetched after you approved the catalog setup")
     return (f"Source: {_host(table.base_url)}, {_CATALOG_WORD[table.export]} fetched {_when(table)} ({how}). "
             "No measurements were used.")
 
@@ -331,8 +336,9 @@ def report_lines(listing: CatalogList) -> list[str]:
              f"{head}, {_ORDER[listing.request.entity]}.",
              f"Source: {table.base_url}, {_CATALOG_WORD[table.export]} (the {table.export} table {table.artifact_id}, {table.rows} rows, "
              f"sha256 {table.sha256}), fetched {_when(table)}; "
-             + ("fetched after the catalog setup was approved in this run." if table.fetched_in_this_run
-                else "a saved copy, nothing new was requested.")
+             + (("fetched after the catalog setup was approved in this run"
+                 + (" by the operator's standing approval." if table.operator_approved else "."))
+                if table.fetched_in_this_run else "a saved copy, nothing new was requested.")
              + " No planner, no model call, no measurements."]
     if listing.request.entity != "traits":
         lines.append(" ".join([f"{many.capitalize()} come from the study records.", *_study_notes(listing)]))
@@ -394,3 +400,41 @@ def run_note(listing: CatalogList) -> str:
     return (f"catalog list: {which}, read by code from the {_CATALOG_WORD[table.export]} of {table.base_url} "
             f"({table.artifact_id}, {table.rows} rows), fetched {_when(table)}"
             + (" in this run" if table.fetched_in_this_run else " (saved copy)") + "; no planner, no model call, no measurements")
+
+
+# --------------------------------------------------------------------------
+# A catalog setup only (app startup with the operator's standing approval, run.Controller.catalog_setup_phase)
+# --------------------------------------------------------------------------
+
+def setup_plan(question: str, base_url: str, now: datetime) -> Plan:
+    """The plan of a run that only prepares the two catalogs, written by code (never by the planner)."""
+    steps = [PlanStep(step_id="step_studies", agent="retriever", action="export_metadata", inputs={"entity": "studies"}, max_tool_calls=1),
+             PlanStep(step_id="step_traits", agent="retriever", action="export_metadata", inputs={"entity": "variables"}, max_tool_calls=1),
+             PlanStep(step_id="step_rows", agent="analyst", action="count_catalog_rows", inputs={},
+                      depends_on=["step_studies", "step_traits"], max_tool_calls=1)]
+    return Plan(plan_id=f"plan_catalog_setup_{uuid.uuid4().hex[:6]}", question=question,
+                interpretation=("Prepare the public study and trait catalogs and count their rows: a fixed plan written by code "
+                                "(no planner, no model call, no measurements)."),
+                status="ready", scope=ResolvedScope(base_url=base_url), steps=steps, created_at_utc=now)
+
+
+def setup_evidence(tables: dict[str, CatalogTable], registry: Any) -> tuple[RetrievalReport, AnalysisReport]:
+    """The two catalog tables (hash-checked by the registry) and their row counts, made by code."""
+    manifests = []
+    for export in ("studies", "variables"):
+        manifest = registry.manifest(tables[export].artifact_id)
+        if manifest.sha256 != tables[export].sha256 or not manifest.complete:
+            raise ValueError("a catalog table changed or is incomplete")
+        manifests.append(manifest)
+    retrieval = RetrievalReport(status="completed", complete=True, artifacts=manifests,
+                                request_ids=[r for m in manifests for r in m.source_request_ids],
+                                warnings=["catalog setup only, by controller code: no Retriever agent, no model call, no measurements"])
+    claims = [Claim(claim_id=f"clm_catalog_setup_{m.kind}", kind="count", value=m.row_count,
+                    denominator=Denominator(name=f"rows of the {_CATALOG_WORD[m.kind]}", n=m.row_count),
+                    source_artifact_hashes=[m.sha256], transformation=f"number of rows in the {_CATALOG_WORD[m.kind]}")
+              for m in manifests]
+    analysis = AnalysisReport(status="completed", claims=claims,
+                              caveats=[f"The catalogs as fetched {_when(tables['studies'])}; records added later are not in them."],
+                              methods=["catalog setup: rows of the two hash-checked catalog tables counted by code; "
+                                       "no model inference, no measurements"])
+    return retrieval, analysis

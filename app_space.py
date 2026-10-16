@@ -2,6 +2,9 @@
 
 Imports build the queued Gradio demo for Spaces hot reload; only main launches
 a server. The hosted app is self-contained and uses the shared MCP service.
+With APP_CATALOG_STANDING_APPROVAL=true, main first prepares the two public
+catalogs under the operator's standing approval (app.prepare_catalogs), and
+refuses to start while the access notes carry no review date.
 """
 from __future__ import annotations
 
@@ -79,6 +82,7 @@ demo = build_demo()
 
 
 def main() -> None:
+    print(app.prepare_catalogs(space_config), flush=True)     # off: nothing; on: refuses without the review date
     demo.launch(**space_launch_options(), theme=app.build_theme(), css=app.CSS)
 
 

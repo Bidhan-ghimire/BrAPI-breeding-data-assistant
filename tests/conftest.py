@@ -22,6 +22,9 @@ What it does, in plain words:
    Tests marked @pytest.mark.live or @pytest.mark.model are NOT blocked
    (they are excluded by default in pytest.ini anyway).
 
+   The operator's standing approval (APP_CATALOG_STANDING_APPROVAL) is unset for every test, so a value exported in
+   the shell cannot make a test prepare catalogs; a test that needs it turns it on itself.
+
 3. Provides the `offline_env` fixture: an environment dict for tests that
    start a subprocess, with the offline settings forced.
 
@@ -156,6 +159,7 @@ def _offline_guard(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPat
     """
     for key, value in OFFLINE_SETTINGS.items():
         monkeypatch.setenv(key, value)
+    monkeypatch.delenv("APP_CATALOG_STANDING_APPROVAL", raising=False)   # off unless a test turns it on (no startup fetch)
     is_live = request.node.get_closest_marker("live") is not None
     is_model = request.node.get_closest_marker("model") is not None
     if not (is_live or is_model):

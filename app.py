@@ -35,11 +35,11 @@ from app_style import CSS, HERO_HTML, build_theme
 from app_help import QUICK_START, QUESTION_GUIDE, faq_items
 from chat_presenter import answer_summary, approval_summary
 from brapi_client import load_settings
-from run import (ANALYST_PROMPT, CLARIFY_PROMPT, CATALOG_PROMPT, DATA_REVIEW_PROMPT, RETRIEVER_PROMPT, SUPERVISOR_PROMPT,
-                 Controller, Models, RunConfig, analyst_questions, source_host)
+from run import (ANALYST_PROMPT, CLARIFY_PROMPT, CATALOG_PROMPT, CATALOG_SETUP_QUESTION, DATA_REVIEW_PROMPT, RETRIEVER_PROMPT, SUPERVISOR_PROMPT,
+                 Controller, Models, RunConfig, analyst_questions, source_host, standing_review_date)
 
 __all__ = ["Job", "live_config", "live_preflight", "respond", "render", "build_ui", "REPLY_TIMEOUT_S", "locked", "after_step",
-           "reply_buttons", "start_over", "default_triage_model"]
+           "reply_buttons", "start_over", "default_triage_model", "prepare_catalogs", "catalog_source_line"]
 
 REPLY_TIMEOUT_S = 15 * 60          # how long a run waits for your reply in the chat before it cancels itself
 STEP_TIMEOUT_S = 15 * 60           # how long the page waits for the run's next step (model calls, fetches)
@@ -129,12 +129,59 @@ def _app_number(name: str, default: str, low: float, high: float, *, integer: bo
     return value
 
 
+def _app_flag(name: str) -> bool:
+    """An on/off deployment setting: "true" or "false" (any case); unset or empty is off. Anything else is refused, and its
+    value is not echoed."""
+    value = os.environ.get(name, "").strip().lower()
+    if value in ("", "false"):
+        return False
+    if value == "true":
+        return True
+    raise ValueError(f"{name} must be true or false")
+
+
 def live_config(question: str) -> RunConfig:
     return RunConfig(question=question, offline=False, mock_model=False, direct=False, auto=False,
                      max_fetches=5, max_http_attempts=_app_number("APP_MAX_HTTP_ATTEMPTS", "10", 1, 100, integer=True),
                      max_clarification_rounds=CHAT_CLARIFICATION_ROUNDS,
                      read_timeout=_app_number("APP_READ_TIMEOUT", "90", 1, 600), max_elapsed_seconds=600,
-                     bootstrap_catalogs=True)
+                     bootstrap_catalogs=True, catalog_standing_approval=_app_flag("APP_CATALOG_STANDING_APPROVAL"))
+
+
+def _never_asked(prompt: str) -> str:
+    raise RuntimeError("a catalog setup at startup never asks a person")
+
+
+def prepare_catalogs(make_config: Callable[[str], RunConfig] = live_config, *,
+                     make_models: Callable[[], Models] | None = None) -> str:
+    """At app startup (app_space.main), with APP_CATALOG_STANDING_APPROVAL on (Part D): refuse to start while the access
+    notes carry no review date; when the two catalogs are not completely saved, prepare them now under the operator's
+    standing approval, as a recorded run with no planner, no model call and no measurements. With the setting off nothing
+    happens here: a visitor approves the catalog setup when a question needs it, as before. Returns one line for the log."""
+    off = "catalog standing approval: off (a visitor approves the catalog setup when a question needs it)"
+    try:
+        config = make_config(CATALOG_SETUP_QUESTION)
+    except ValueError as exc:                                   # a bad setting: say which, never its value
+        try:
+            standing = _app_flag("APP_CATALOG_STANDING_APPROVAL")
+        except ValueError:
+            standing = True                                     # the setting itself is bad
+        if standing:
+            raise SystemExit(f"refusing to start: {exc}") from None
+        return off + "; another app setting is invalid, so each question will say so, as before"
+    if not config.catalog_standing_approval:
+        return off
+    if standing_review_date(config.access_notes) is None:
+        raise SystemExit("refusing to start: APP_CATALOG_STANDING_APPROVAL is on, but the access notes have no valid "
+                         "'Reviewed by Bidhan on: YYYY-MM-DD' line (a real date, not in the future); review them first, "
+                         "or turn the setting off")
+    if catalog_summary.from_cache(config) is not None:
+        return "catalog standing approval: on; the study and trait catalogs are already saved, nothing was requested"
+    controller = Controller(dataclasses.replace(config, catalog_setup_only=True, bootstrap_catalogs=True),
+                            models=(make_models or default_models)(), answer_fn=_never_asked)
+    result = asyncio.run(controller.run())
+    catalog_summary.forget()                                     # the next summary reads the new catalogs
+    return f"catalog standing approval: on; catalog setup {result.execution_status} (run {controller.run_id})"
 
 
 def default_models() -> Models:
@@ -153,7 +200,8 @@ def live_preflight(question: str, make_config: Callable[[str], RunConfig] = live
     try:
         problems = make_config(question).validate()
     except (TypeError, ValueError, OverflowError):
-        return ["App settings are invalid. Check APP_MAX_HTTP_ATTEMPTS, APP_READ_TIMEOUT and the BrAPI settings."]
+        return ["App settings are invalid. Check APP_MAX_HTTP_ATTEMPTS, APP_READ_TIMEOUT, APP_CATALOG_STANDING_APPROVAL "
+                "and the BrAPI settings."]
     try:
         from llm import is_loopback, load_llm_settings
 
@@ -168,6 +216,7 @@ def live_preflight(question: str, make_config: Callable[[str], RunConfig] = live
 
 
 LOCATION_LIST_LEAD = "Locations with the most studies:"
+SOURCE_FAQ = "Where do the data come from?"          # the help answer that carries source_markdown
 
 
 def clarification_choices(questions: list[str], metadata: Any, *, list_locations: bool = True, lists_work: bool = False) -> str:
@@ -631,6 +680,31 @@ def source_markdown() -> str:
             f"Current data source: `{settings.base_url}`. Results depend on the records available there.")
 
 
+def source_details(make_config: Callable[[str], RunConfig]) -> str:
+    """The help page's answer about the data source: source_markdown, then when the saved catalogs were downloaded and who
+    approves a catalog download (catalog_source_line), with the page's own settings."""
+    line = catalog_source_line(make_config)
+    return source_markdown() + (f" {line}" if line else "")
+
+
+def catalog_source_line(make_config: Callable[[str], RunConfig]) -> str:
+    """With APP_CATALOG_STANDING_APPROVAL on: when the saved study and trait catalogs were downloaded (read from the cache,
+    nothing requested), and that the app's operator approves a new catalog download. With the setting off: nothing, so the
+    help page reads exactly as before."""
+    try:
+        config = make_config(CATALOG_SETUP_QUESTION)
+        if not config.catalog_standing_approval:
+            return ""
+        summary = catalog_summary.from_cache(config)
+    except Exception:  # a settings problem must not break the help page
+        return ""
+    when = (f"The saved study and trait catalogs were downloaded {summary.fetched_at:%Y-%m-%d %H:%M} UTC."
+            if summary is not None and summary.fetched_at is not None else
+            "The study and trait catalogs are saved." if summary is not None else "The study and trait catalogs are not saved yet.")
+    return (f"{when} When they need downloading, the app's operator approves it (a standing approval); measurements always "
+            "need your approval.")
+
+
 def hosted_notice(environ: Mapping[str, str] | None = None) -> str:
     """Data-sharing policy for hosted demos, without displaying credentials or endpoint URLs."""
     values = os.environ if environ is None else environ
@@ -727,9 +801,15 @@ def build_ui(*, make_config: Callable[[str], RunConfig] = live_config, make_mode
                         gr.Markdown(QUICK_START, elem_classes=["brapi-help-card"])
                     with gr.Column(scale=2, min_width=240):
                         gr.Markdown(QUESTION_GUIDE, elem_classes=["brapi-help-card"])
-                for question, answer in faq_items(source_markdown(), data_sharing_policy=hosted_notice()):
+                source_answer = None
+                for question, answer in faq_items(source_details(make_config), data_sharing_policy=hosted_notice()):
                     with gr.Accordion(question, open=False, elem_classes=["brapi-faq-item"]):
-                        gr.Markdown(answer)
+                        shown = gr.Markdown(answer)
+                    if question == SOURCE_FAQ:
+                        source_answer = shown
+                if source_answer is not None and catalog_source_line(make_config):   # setting on: the catalogs' date as it
+                    demo.load(lambda: source_details(make_config), None, source_answer,  # is when the page opens (off: no
+                              api_visibility="private", queue=False, show_progress="hidden")   # page-load event, as before)
         state = gr.State({}, time_to_live=REPLY_TIMEOUT_S + 60, delete_callback=_close_job)
         controls = [box, new, approve, cancel, accept, reject]              # the order locked() and after_step() use
 

@@ -522,6 +522,11 @@ class FetchApproval(StrictRecord):
     Everyday example: a signed hall pass that lists exactly which rooms
     (endpoint families), which lockers (study IDs), how many trips
     (max_http_attempts) and until what time (expires_at_utc).
+
+    issued_by "operator_config": the operator's standing approval for the two
+    public catalogs (APP_CATALOG_STANDING_APPROVAL), issued by controller code
+    from the deployment's configuration instead of a typed "approve catalog".
+    It can cover only the study and trait catalogs, never observations.
     """
 
     approval_id: ApprovalId
@@ -534,7 +539,7 @@ class FetchApproval(StrictRecord):
     max_observation_studies: Count
     issued_at_utc: UtcDatetime
     expires_at_utc: UtcDatetime
-    issued_by: Literal["human_controller"] = "human_controller"
+    issued_by: Literal["human_controller", "operator_config"] = "human_controller"
 
     @field_validator("endpoint_families")
     @classmethod
@@ -550,6 +555,10 @@ class FetchApproval(StrictRecord):
     def _consistent(self) -> "FetchApproval":
         if self.expires_at_utc <= self.issued_at_utc:
             raise ValueError("expires_at_utc must be after issued_at_utc")
+        if self.issued_by == "operator_config" and (sorted(self.endpoint_families) != ["observationvariables", "studies"]
+                                                    or self.observation_study_ids or self.observation_variable_ids
+                                                    or self.max_observation_studies != 0):
+            raise ValueError("an operator's standing approval covers only the study and trait catalogs, never observations")
         if len(self.observation_study_ids) > self.max_observation_studies:
             raise ValueError("more observation studies listed than max_observation_studies allows")
         wants_observations = any(f in ("observations", "observationunits") for f in self.endpoint_families)

@@ -28,7 +28,7 @@ def faq_items(source_details: str, *, data_sharing_policy: str = "") -> list[tup
          "It does not make parental-selection or line-advancement recommendations. "
          "Greetings and questions about the app that it recognizes are answered right away, without a database request. "
          "A question about what the saved catalog holds, such as 'tell me about Florida', may be answered from it right away. "
-         "A question about breeding data starts a request, and nothing is fetched until you approve. "
+         "A question about breeding data starts a request, and no measurement is fetched until you approve. "
          "A short follow-up such as 'and in 2025?' continues your last question: the approval screen says what was carried "
          "over, and the follow-up needs its own approval. **New question** clears what the chat remembers."),
         ("Where do the data come from?", source_details),
@@ -39,7 +39,7 @@ def faq_items(source_details: str, *, data_sharing_policy: str = "") -> list[tup
          "for example **list traits with yield**. These lists come from the saved catalog; no measurements are fetched."),
         ("What do Approve, Continue and Accept mean?",
          "**Approve** allows the specific database request shown in the chat. The first question may also ask "
-         "for permission to prepare study and trait catalogs.\n\n"
+         "for permission to prepare study and trait catalogs, unless the app's operator has approved catalog downloads.\n\n"
          "**Continue to analysis**, when offered, confirms that you have reviewed the retrieved-data preview.\n\n"
          "**Accept** records that you reviewed the final answer and found it useful. It does not prove scientific correctness. "
          "Choose **Cancel** to stop a pending request or **Reject** if the answer does not meet your needs."),

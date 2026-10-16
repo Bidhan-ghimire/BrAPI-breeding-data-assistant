@@ -15,7 +15,7 @@ import time
 import uuid
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal
 from urllib.parse import urlsplit
@@ -66,7 +66,8 @@ __all__ = [
     "RunConfig", "Models", "Controller", "EXIT_CODES", "build_approval",
     "scope_mismatches", "CLARIFY_PROMPT", "ANALYST_PROMPT", "analyst_questions",
     "RETRIEVER_PROMPT", "DATA_REVIEW_PROMPT", "scope_needs_a_check", "readable_answer", "required_fetches", "plan_too_wide", "CATALOG_PROMPT",
-    "approval_lead", "source_host", "carried_over_line",
+    "approval_lead", "source_host", "carried_over_line", "OPERATOR_ISSUER", "PERSON_ISSUER", "CATALOG_SETUP_QUESTION",
+    "standing_review_date",
 ]
 
 EXIT_CODES = {"completed": 0, "incomplete": 1, "failed": 1, "limit_reached": 1, "blocked": 3, "needs_clarification": 3, "canceled": 130}
@@ -74,13 +75,35 @@ CLARIFY_PROMPT = "Answer the question above; your answer is added to your questi
 CATALOG_PROMPT = "approve catalog / cancel: "
 CATALOG_MAX_HTTP_ATTEMPTS = 20  # separate metadata-only budget, never observation permission
 CATALOG_MAX_PAGES = 20
+STANDING_REVIEW_PROBLEM = ("APP_CATALOG_STANDING_APPROVAL needs the access notes reviewed first ('Reviewed by Bidhan on: "
+                           "YYYY-MM-DD' in {notes}, with a real date that is not in the future)")
+
+
+def standing_review_date(notes: Path, *, today: date | None = None) -> date | None:
+    """The access notes' review date when the operator's standing approval may rely on it: a real calendar date, not after
+    today (UTC). None otherwise: "2099-12-31", "2026-13-45" or "0000-00-00" do not count. (The visitor's own approvals keep
+    access_notes_review_date's check, unchanged.)"""
+    text = access_notes_review_date(Path(notes))
+    if text is None:
+        return None
+    try:
+        reviewed = date.fromisoformat(text)
+    except ValueError:
+        return None
+    return reviewed if reviewed <= (today or datetime.now(timezone.utc).date()) else None
+
+
+# Who approved a catalog setup (catalog_setup["issued_by"] in the run's manifest.json).
+OPERATOR_ISSUER = "operator (APP_CATALOG_STANDING_APPROVAL)"
+PERSON_ISSUER = "person (typed approve catalog)"
+CATALOG_SETUP_QUESTION = "Prepare the public study and trait catalogs (catalog setup only; no question, no measurements)."
 ANALYST_PROMPT = "Answer the analyst's question above; the data already fetched is used again (empty = cancel): "
 RETRIEVER_PROMPT = "Answer the retriever's question within the approved scope (empty = cancel): "
 DATA_REVIEW_PROMPT = "continue to analysis / cancel: "
 _ASKED = "clarification needed: "            # how agents.analyst records the Analyst's question in the report's caveats
 _clock = time.monotonic                      # the clock the budget uses (llm.run_agent_loop's default); tests replace it
 MAX_CLARIFICATION_ROUNDS = 5       # an upper bound for any caller; the command line uses 1, the chat 3
-STATES = ("supervise", "config", "plan", "clarify", "metadata", "catalog_list", "resolve", "approve", "retrieve", "review_data", "analyze",
+STATES = ("supervise", "config", "plan", "clarify", "metadata", "catalog_list", "catalog_setup", "resolve", "approve", "retrieve", "review_data", "analyze",
           "render", "accept", "record")
 AnswerFn = Callable[[str], str]
 
@@ -115,6 +138,8 @@ class RunConfig:
     follow_up_of: str | None = None        # a follow-up (chat memory, Step 2b): the earlier run it continues (or the app's
                                            # note for a catalog answer, which had no run), for the record
     carried_over: str | None = None        # ... and that run's question, which this question starts with (carried_over_line)
+    catalog_standing_approval: bool = False   # APP_CATALOG_STANDING_APPROVAL: the operator approves the catalog setup (Part D)
+    catalog_setup_only: bool = False       # a run that only prepares the two catalogs (at app startup): no planner, no question
 
     @property
     def uses_memory_mcp(self) -> bool:
@@ -153,6 +178,12 @@ class RunConfig:
             problems.append("follow_up_of and carried_over are set together")
         elif self.carried_over is not None and not self.question.startswith(self.carried_over + FOLLOW_UP_LABEL):
             problems.append("a follow-up question must start with the question it carries over")
+        if self.catalog_setup_only and (self.catalog_list or self.carried_over is not None):
+            problems.append("a catalog setup run lists nothing and continues no question")
+        if self.catalog_setup_only and not self.bootstrap_catalogs:
+            problems.append("a catalog setup run needs bootstrap_catalogs")
+        if self.catalog_standing_approval and standing_review_date(self.access_notes) is None:
+            problems.append(STANDING_REVIEW_PROBLEM.format(notes=Path(self.access_notes).name))
         return problems
 
     def _live_problems(self) -> list[str]:
@@ -447,14 +478,18 @@ def narrowed_plan(plan: Plan, study_ids: list[str]) -> Plan:
     return Plan.model_validate(data)
 
 
-def build_approval(manifest: FetchManifest, *, issued_by_human: bool, now: datetime | None = None) -> FetchApproval:
-    """The immutable approval for exactly this manifest. Code builds it; a model never can."""
+def build_approval(manifest: FetchManifest, *, issued_by_human: bool, now: datetime | None = None,
+                   operator: bool = False) -> FetchApproval:
+    """The immutable approval for exactly this manifest. Code builds it; a model never can. operator: the operator's standing
+    approval for the catalog setup (APP_CATALOG_STANDING_APPROVAL); the contract lets it cover only the two catalogs."""
     now = now or datetime.now(timezone.utc)
+    kind = "operator" if operator else ("human" if issued_by_human else "harness")
     return FetchApproval(
-        approval_id=f"appr_{manifest.run_id}_{'human' if issued_by_human else 'harness'}_{uuid.uuid4().hex[:6]}", run_id=manifest.run_id,
+        approval_id=f"appr_{manifest.run_id}_{kind}_{uuid.uuid4().hex[:6]}", run_id=manifest.run_id,
         base_url=manifest.base_url, endpoint_families=list(manifest.endpoint_families), observation_study_ids=list(manifest.observation_study_ids),
         observation_variable_ids=list(manifest.observation_variable_ids), max_http_attempts=manifest.max_http_attempts,
         max_observation_studies=manifest.max_observation_studies, issued_at_utc=now - timedelta(seconds=1), expires_at_utc=now + timedelta(hours=1),
+        issued_by="operator_config" if operator else "human_controller",
     )
 
 
@@ -687,6 +722,8 @@ class Controller:
             self.notes.append(f"live run stopped before any model call: the complete study and variable catalogs of {self.base_url} are not "
                               "cached; start a new question and approve the app's catalog setup request")
             return False
+        if self.config.catalog_setup_only:
+            return self.catalog_setup_phase()
         if self.config.catalog_list:
             return self.catalog_list_phase()
         return await run_agent_led(self)
@@ -719,7 +756,9 @@ class Controller:
         """The exact tables behind self.metadata, kept for catalog lists: their source and when they were fetched. Only lists
         need them: if they cannot be read, a list says so and every other question runs as before."""
         try:
-            self.catalog_tables = catalog_lists.catalog_tables(ctx, studies=studies_artifact, variables=variables_artifact)
+            self.catalog_tables = catalog_lists.catalog_tables(
+                ctx, studies=studies_artifact, variables=variables_artifact,
+                operator_approved=(self.catalog_setup or {}).get("issued_by") == OPERATOR_ISSUER)
             self.catalog_ctx = ctx
         except Exception as exc:  # noqa: BLE001
             self.catalog_tables, self.catalog_ctx = {}, None
@@ -737,27 +776,43 @@ class Controller:
 
 
     async def _bootstrap_metadata_mcp(self) -> bool:
-        """An opt-in cold-start path. A distinct approval grants metadata families only."""
+        """An opt-in cold-start path. A distinct approval grants metadata families only. Who approves: the person, who types
+        "approve catalog" at the catalog screen; or, with APP_CATALOG_STANDING_APPROVAL on, the operator's standing approval,
+        issued by code from the deployment's configuration with no screen (the same manifest: the two catalogs, no
+        observations, the same budgets), and only while the access notes carry their review date."""
         catalog_run_id = self.run_id + "_catalog"
         manifest = FetchManifest(run_id=catalog_run_id, base_url=self._server(), origin="live",
                                  endpoint_families=["studies", "observationvariables"],
                                  max_http_attempts=CATALOG_MAX_HTTP_ATTEMPTS, max_observation_studies=0)
+        operator = self.config.catalog_standing_approval
         self.catalog_setup = {"manifest": manifest.model_dump(mode="json"), "manifest_sha256": manifest.sha256(),
-                              "approval": None, "status": "pending", "requests": []}
+                              "approval": None, "status": "pending", "requests": [], "issued_by": None}
         if self.config.auto or self.config.offline:
             self.catalog_setup["status"] = "blocked"
             self.execution_status = "blocked"
             self.notes.append("catalog setup needs a separate live human approval")
             return False
-        print(self.catalog_approval_screen())
-        answer = self._ask(CATALOG_PROMPT)
-        if answer is None or answer.lower() != "approve catalog":
-            self.catalog_setup["status"] = "canceled"
-            self.execution_status = "canceled"
-            self.notes.append("catalog setup canceled before any model call or live request")
-            return False
-        approval = build_approval(manifest, issued_by_human=True, now=self.now())
-        self.catalog_setup.update(approval=approval.model_dump(mode="json"), status="fetching")
+        if operator:
+            if standing_review_date(self.config.access_notes) is None:          # checked again here, at the moment it is used
+                self.catalog_setup["status"] = "blocked"
+                self.execution_status = "blocked"
+                self.notes.append("the operator's standing approval was refused: the access notes have no valid review date; "
+                                  "nothing was requested")
+                return False
+            approval = build_approval(manifest, issued_by_human=False, now=self.now(), operator=True)
+            self.notes.append("catalog setup approved by the operator's standing approval (APP_CATALOG_STANDING_APPROVAL): "
+                              "no catalog screen was shown; the catalogs only, never measurements")
+        else:
+            print(self.catalog_approval_screen())
+            answer = self._ask(CATALOG_PROMPT)
+            if answer is None or answer.lower() != "approve catalog":
+                self.catalog_setup["status"] = "canceled"
+                self.execution_status = "canceled"
+                self.notes.append("catalog setup canceled before any model call or live request")
+                return False
+            approval = build_approval(manifest, issued_by_human=True, now=self.now())
+        self.catalog_setup.update(approval=approval.model_dump(mode="json"), status="fetching",
+                                  issued_by=OPERATOR_ISSUER if operator else PERSON_ISSUER)   # recorded with the approval itself
         meta_ctx = None
         try:
             self.budget.start(_clock)
@@ -782,7 +837,8 @@ class Controller:
                              if record.fetched_at_utc is not None)
             self.catalog_fetched_at = fetched[0] if fetched else None
             self.catalog_setup["status"] = "completed"
-            self.notes.append("complete study and variable catalogs prepared under a separate metadata-only human approval")
+            self.notes.append("complete study and variable catalogs prepared under a separate metadata-only "
+                              + ("standing approval of the operator" if operator else "human approval"))
             return True
         finally:
             self.catalog_requests = [record.model_dump(mode="json") for record in meta_ctx.client.provenance()] if meta_ctx is not None else []
@@ -812,6 +868,28 @@ class Controller:
         self.execution_status = "completed"
         self.notes.append(catalog_lists.run_note(listing))
         self.notes.append("acceptance is not asked for a catalog list; it stays pending")
+        return True
+
+    # -- a catalog setup only (app startup with the standing approval) -------------------------
+
+    def catalog_setup_phase(self) -> bool:
+        """A run that only prepares the two catalogs (app.prepare_catalogs at startup): no planner, no model call, no
+        measurements. Its evidence is the two catalog tables and their row counts, made by code."""
+        self._enter("catalog_setup")
+        if self.metadata is None or self.catalog_ctx is None or not self.catalog_tables:
+            self.execution_status = "failed"
+            self.notes.append("catalog setup: the catalog tables behind the metadata are unknown")
+            return False
+        self.plan = catalog_lists.setup_plan(self.config.question, self.base_url, self.now())
+        self.ctx = self.catalog_ctx
+        self.retrieval, self.analysis = catalog_lists.setup_evidence(self.catalog_tables, self.ctx.registry)
+        if not self.catalog_requests:          # a saved copy: its cache reads are this run's request records (counted once)
+            self.requests = [record.model_dump(mode="json") for record in self.catalog_ctx.client.provenance()]
+            self.meta_requests = 0
+        self.execution_status = "completed"
+        self.notes.append("catalog setup only: " + ("the catalogs were fetched in this run" if self.catalog_requests
+                                                    else "the catalogs were already saved; nothing was requested"))
+        self.notes.append("acceptance is not asked for a catalog setup; it stays pending")
         return True
 
     # -- plan and clarify -----------------------------------------------------------------
