@@ -6,8 +6,13 @@ What these tests prove, in plain words:
 * The expected answers are computed by code from the raw catalog records and the cached measurements (seasons as words,
   "Fall 2025" counts for 2025; trait names without their ontology suffix; ties; a study or trait the catalog does not have
   gives no expected answer, so that question is skipped, never run).
-* compare(): a whole number in the answer or a typed claim; "2018" is not 18; "2,039" is 2039; names ignore case and
-  markdown escapes; a mean rounds within the decimals shown, and an integer alone never passes for a mean.
+* compare() scores only the answer the person sees: the chat's last message, without what the app marks as model text
+  ("Additional model notes (unverified)", "Unverified model note: ..."). Numbers recorded inside the run no longer count
+  (the baseline's q04 passed on a recorded 22 while the chat said "Question blocked"). A whole number in the answer; "2018"
+  is not 18; "2,039" is 2039; names ignore case and markdown escapes; a mean is the number right after "Mean", within the
+  decimals shown, and a whole number counts only as the exact value. Dates and times (the catalog's fetch time "22:49")
+  are not numbers. A run that stopped ("Question blocked." ...), a question of the app, a lookup offer or a model's reply
+  shows no answer, so it fails whatever numbers it holds (review, 2026-10-16).
 * End to end, with scripted models and the app's own pipeline: a catalog question answered by code passes; a measurement
   question passes through "approve" (data request) and "continue" (data review) only, and its run is left pending, never
   accepted; an "unsure" message fails (the harness never says yes); results.json and results.md are written; runs are
@@ -167,7 +172,8 @@ def test_end_to_end_with_scripted_models_on_a_copy_of_the_cache(place):
     assert c1["typed"] == [] and c1["run_ids"] == [] and c1["model_calls"] == c1["front_door_calls"] == 1
 
     m1 = rows["m1"]                                       # a run: approve, continue, then left pending
-    assert m1["passed"] and m1["expected"] == pytest.approx(18.0) and m1["why"] == "an ungrouped mean claim of the run has the expected value"
+    assert m1["passed"] and m1["expected"] == pytest.approx(18.0)
+    assert m1["why"] == "the mean given, 18, is the expected value"      # from the answer's "| Mean | 18 t/ha |", not a claim
     assert m1["typed"] == ["approve", "continue"] and m1["acceptance"] == ["pending"]
     assert m1["status"] == "final review reached; the answer was left pending"
     assert m1["run_model_calls"] > 0 and m1["model_calls"] == m1["run_model_calls"] + 1
@@ -339,44 +345,142 @@ def test_a_measurement_answer_needs_exactly_one_study_and_trait_with_cached_valu
         "Reaction to Fusarium Wilt estimating 0-5")
 
 
-@pytest.mark.parametrize("kind, expected, shown, claims, passed", [
-    ("study_count", 18, "There are 18 studies.", [], True),
-    ("study_count", 18, "Seasons: 2018 (4 studies).", [], False),                 # 2018 is not 18
-    ("study_count", 18, "Study S18 has 4 plots; version 1.18.", [], False),       # nor S18 or 1.18
-    ("study_count", 2039, "It has 2,039 studies.", [], True),
-    ("study_count", 18, "Seasons: 64,18 studies", [], True),                      # a list written without spaces
-    ("valid_count", 140, "There are 140.0 valid values.", [], True),
-    ("study_count", 7, "No number here.", [{"kind": "count", "value": 7}], True),
-    ("valid_count", 140, "No number here.", [{"kind": "median", "value": 140}], False),   # only a count claim counts
-    ("valid_count", 0, "No study names a season with 2025.", [], False),          # zero said in words is not counted
-    ("top_location", {"Clinton - Horticultural": 426}, "Most: Clinton \\- Horticultural (426 studies)", [], True),
-    ("top_location", {"Gurue": 144}, "Most: Clinton.", [], False),
-    ("top_study_type", {"Advanced Yield Trial": 454},                             # named, but not with its own count
-     "Preliminary Yield Trial has the most (454). Advanced Yield Trial is second (403).", [], False),
+# Shaped like the eval baseline's answers (results 20261016T150241Z): q13's code-written mean with model notes under it, and
+# q04's blocked run with a model note (its number here is invented for the test: only the model note has it).
+Q13_ANSWER = ("**Mean: 2.37857142857 \\(unit not stated\\)**\n\nn = 140 (valid numeric values, one per observation unit).\n\n"
+              "**Additional model notes (unverified)**\n\n- Fetched 140 observations. The pooled mean was not calculated.\n\n"
+              "Other calculated statistics remain in Full report, together with the complete methods and evidence.")
+Q04_SHAPED = ("**Question blocked.**\n\nCounts describe the retrieved catalog; its records may change after retrieval.\n\n"
+              "Unverified model note: 22 trait names contain yield.\n\nSee Full report for the complete reason and evidence.")
+NOTES_ONLY = "**Additional model notes (unverified)**\n\n- 7 rows were read\n\nn = 140 (valid numeric values)."
+CATALOG_SUMMARY = ("**From the saved catalog** (no records were looked up):\n\n- It has 2029 studies, 486 traits and 101 locations "
+                   "named by studies, with seasons from 2003 to 2026.\n\n*From the saved catalog of sweetpotatobase.org, "
+                   "fetched 2026-09-28 22:49 UTC. Nothing new was requested; ask a data question to look up records.*")
+YIELD_LIST = ("**Trait names containing “yield”: 22 of 486.** A to Z:\n\n- Biomass yield\n\nSource: sweetpotatobase.org, trait "
+              "catalog fetched 2026-09-28 22:49 UTC (a saved copy; nothing new was requested). No measurements were used.")
+
+
+@pytest.mark.parametrize("kind, expected, shown, passed", [
+    ("study_count", 18, "There are 18 studies.", True),
+    ("study_count", 18, "Seasons: 2018 (4 studies).", False),                 # 2018 is not 18
+    ("study_count", 18, "Study S18 has 4 plots; version 1.18.", False),       # nor S18 or 1.18
+    ("study_count", 2039, "It has 2,039 studies.", True),
+    ("study_count", 18, "Seasons: 64,18 studies", True),                      # a list written without spaces
+    ("valid_count", 140, "There are 140.0 valid values.", True),
+    ("valid_count", 0, "No study names a season with 2025.", False),          # zero said in words is not counted
+    ("top_location", {"Clinton - Horticultural": 426}, "Most: Clinton \\- Horticultural (426 studies)", True),
+    ("top_location", {"Gurue": 144}, "Most: Clinton.", False),
+    ("top_study_type", {"Advanced Yield Trial": 454},                         # named, but not with its own count
+     "Preliminary Yield Trial has the most (454). Advanced Yield Trial is second (403).", False),
     ("top_study_type", {"Advanced Yield Trial": 454}, "Advanced Yield Trial (454 studies); Preliminary Yield Trial (403 studies)",
-     [], True),
-    ("seasons_present", ["2024", "2025"], "Seasons: 2025; 2024.", [], True),
-    ("seasons_present", ["2024", "2025"], "Seasons: 20245.", [], False),
-    ("studies_per_type", {"Clonal Evaluation": 2}, "- Clonal Evaluation (2 studies)", [], True),
-    ("studies_per_type", {"Clonal Evaluation": 2}, "- Clonal Evaluation (3 studies), 2 more", [], False),   # its own count only
-    ("studies_per_type", {"Advanced Yield Trial": 454}, "Advanced Yield Trial (450), Preliminary Yield Trial (454)", [], False),
-    ("studies_per_type", {"Specialty trial": 68, "Specialty Trial": 61}, "Specialty trial (68); Specialty Trial (61)", [], True),
-    ("studies_per_type", {"Clonal Evaluation": 2, "Advanced Yield Trial": 9}, "- Clonal Evaluation (2 studies)", [], False),
-    ("pooled_mean", 2.3785714, "The pooled mean is 2.38 (n = 140).", [], True),
-    ("pooled_mean", 2.3785714, "The pooled mean is 2.37.", [], False),
-    ("pooled_mean", 2.3785714, "The pooled mean is 2.", [], False),                 # an integer alone never passes for a mean
-    ("pooled_mean", 2.3785714, "Pooled mean 2.95; clone A mean 2.4.", [], False),  # another mean that happens to round
-    ("pooled_mean", 2.3785714, "Mean 2.75, SD 2.38.", [], False),                  # the SD is not the mean
-    ("pooled_mean", 18.0, "", [{"kind": "mean", "value": 18.0}], True),
-    ("pooled_mean", 18.0, "", [{"kind": "mean", "value": 18.0, "grouping": ["germplasmDbId"]}], False),   # a clone's mean
-    ("pooled_mean", 18.0, "", [{"kind": "median", "value": 18.0}], False),
+     True),
+    ("seasons_present", ["2024", "2025"], "Seasons: 2025; 2024.", True),
+    ("seasons_present", ["2024", "2025"], "Seasons: 20245.", False),
+    ("studies_per_type", {"Clonal Evaluation": 2}, "- Clonal Evaluation (2 studies)", True),
+    ("studies_per_type", {"Clonal Evaluation": 2}, "- Clonal Evaluation (3 studies), 2 more", False),   # its own count only
+    ("studies_per_type", {"Advanced Yield Trial": 454}, "Advanced Yield Trial (450), Preliminary Yield Trial (454)", False),
+    ("studies_per_type", {"Specialty trial": 68, "Specialty Trial": 61}, "Specialty trial (68); Specialty Trial (61)", True),
+    ("studies_per_type", {"Clonal Evaluation": 2, "Advanced Yield Trial": 9}, "- Clonal Evaluation (2 studies)", False),
+    ("studies_per_type", {"Advanced Yield Trial": 454, "Clonal Evaluation": 299},                       # the list run's lines
+     "- Advanced Yield Trial — 454 studies\n- Clonal Evaluation — 299 studies", True),
+    ("pooled_mean", 2.3785714, "**Mean: 2.38 (unit not stated)**", True),
+    ("pooled_mean", 2.3785714, "| Statistic | Result |\n| --- | --- |\n| Mean | 2.3786 t/ha |", True),  # a table row
+    ("pooled_mean", 2.3785714, "The pooled mean is 2.38 (n = 140).", False),  # not right after "Mean"
+    ("pooled_mean", 2.3785714, "Mean: 2.37.", False),
+    ("pooled_mean", 2.3785714, "Mean: 2.", False),                            # a whole number is not a rounding ...
+    ("pooled_mean", 18.0, "| Mean | 18 t/ha |", True),                        # ... but the exact value counts
+    ("pooled_mean", 2.3785714, "Pooled mean 2.95; clone A mean 2.4.", False), # another mean that happens to round
+    ("pooled_mean", 2.3785714, "Mean 2.75, SD 2.38.", False),                 # the SD is not the mean
+    ("pooled_mean", 2.3785714285714286, Q13_ANSWER, True),                    # the baseline's q13 still passes
+    ("study_count", 22, Q04_SHAPED, False),                                   # a number only in a model note
+    ("pooled_mean", 2.3785714, "**Summary**\n\nNo mean was calculated.\n\n**Additional model notes (unverified)**\n\n- Mean: 2.38",
+     False),                                                                  # a mean only in the model notes
+    ("valid_count", 140, NOTES_ONLY, True),                                   # code text after the notes still counts
+    ("valid_count", 7, NOTES_ONLY, False),                                    # a number only in the notes does not
+    ("traits_containing", 22, CATALOG_SUMMARY, False),                        # the fetch time 22:49 is not 22 (review)
+    ("traits_containing", 22, YIELD_LIST, True),                              # the list's own count
+    ("study_count", 22, "**Question blocked.**\n\ncoordinator stopped the run: 22 trait names were counted.\n\nSee Full "
+     "report for the complete reason and evidence.", False),                 # a run that stopped shows no answer
+    ("valid_count", 7, "**Additional model notes (unverified)**\n\n- 7 rows\u2028were read\n\nn = 140.", False),   # U+2028
+    ("seasons_present", ["2024", "2025", "2026"], "Seasons: 2025; 2024.\n\n*fetched 2026-09-28 22:49 UTC*", False),   # not 2026
+    ("study_count", 22, "This question had already ended, so your message was not sent to it.\n\n**Question canceled.**\n\n"
+     "coordinator stopped the run: 22 trait names.", False),                 # the run's own message after that line
 ], ids=["whole-number", "not-inside-a-year", "not-inside-a-name", "thousands", "list-without-spaces", "count-with-zero-decimal",
-        "count-claim", "median-claim-is-not-a-count", "zero-in-words", "name-with-its-count", "wrong-name", "name-without-its-count",
-        "top-with-its-count", "seasons", "seasons-inside-a-number", "type-count", "type-count-is-its-own", "type-count-of-the-next-type",
-        "types-differing-in-case", "a-type-missing", "mean-rounded", "mean-off", "mean-integer", "another-mean", "sd-is-not-mean",
-        "mean-claim", "grouped-mean-claim", "median-is-not-mean"])
-def test_compare(kind, expected, shown, claims, passed):
-    assert harness.compare(kind, expected, shown, claims)[0] is passed
+        "zero-in-words", "name-with-its-count", "wrong-name", "name-without-its-count", "top-with-its-count", "seasons",
+        "seasons-inside-a-number", "type-count", "type-count-is-its-own", "type-count-of-the-next-type", "types-differing-in-case",
+        "a-type-missing", "type-list-lines", "mean-label", "mean-table-row", "mean-not-right-after", "mean-off", "mean-integer",
+        "mean-exact-whole-number", "another-mean", "sd-is-not-mean", "baseline-q13", "number-only-in-a-model-note",
+        "mean-only-in-the-model-notes", "code-text-after-the-notes", "number-only-in-the-notes", "a-fetch-time-is-no-number",
+        "the-list-count", "a-stopped-run-is-no-answer", "a-line-separator-in-a-model-note", "a-fetch-date-is-no-season",
+        "already-ended-then-stopped"])
+def test_compare(kind, expected, shown, passed):
+    assert harness.compare(kind, expected, shown)[0] is passed
+
+
+def test_numbers_recorded_inside_the_run_no_longer_count(place, monkeypatch):
+    """Eval baseline 20261016T150241Z, q04: the run recorded a count claim of 22, but the person saw "Question blocked", and
+    the harness scored a pass. Now only the answer the person sees counts; the claims stay in results.json for reading."""
+    from types import SimpleNamespace
+    import shutil
+    from contracts import Claim, Denominator
+
+    place.seed(*FIXTURES)
+    copy = place.root / "copy"
+    shutil.copytree(place.source, copy)
+
+    def claim(kind, value):
+        return Claim(claim_id=f"clm_recorded_{kind}", kind=kind, value=value, denominator=Denominator(name="valid values", n=4),
+                     source_artifact_hashes=["a" * 64], transformation=f"{kind} of valid values")
+    recorded = SimpleNamespace(analysis=SimpleNamespace(claims=[claim("count", 1), claim("mean", 18.0)]), run_id="run_recorded",
+                               counts=SimpleNamespace(model_calls=3, live_attempts=0), human_acceptance="pending",
+                               model_reported="mock-model")
+    shown = "**Summary**\n\nThe Full report keeps the methods and evidence."      # an answer, but without the values
+    monkeypatch.setattr(harness, "ask", lambda question, chat, wait=120.0: harness.Outcome(shown=shown, status="run ended",
+                                                                                           results=[recorded]))
+    report = harness.run_questions(QUESTIONS[:2], cache_copy=copy, out_dir=place.root / "runs", base_config=place.base_config,
+                                   make_models=synthetic_models, triage_model=None, preflight=None, allow_live=False)
+    rows = {r["id"]: r for r in report["questions"]}
+    assert rows["c1"]["expected"] == 1 and rows["m1"]["expected"] == pytest.approx(18.0)        # the claims hold both values
+    assert (rows["c1"]["passed"], rows["m1"]["passed"], report["passed"], report["failed"]) == (False, False, 0, 2)
+    assert rows["c1"]["why"] == "1 does not appear in the answer"
+    assert rows["m1"]["why"] == 'the answer gives no number right after "Mean"'
+    assert [c["value"] for c in rows["c1"]["claims"]] == [1, 18.0]                                # recorded, for reading
+
+
+@pytest.mark.parametrize("status", ["incomplete", "failed", "blocked", "canceled", "needs_clarification", "limit_reached",
+                                    "unknown"])
+def test_every_answer_of_a_run_that_did_not_complete_is_no_answer(status):
+    """chat_presenter.answer_summary for a run that did not complete: its reasons can carry a model's words without a mark
+    ("coordinator stopped the run: ..."; review, 2026-10-16), so nothing in it is scored."""
+    from types import SimpleNamespace
+    from chat_presenter import answer_summary
+
+    shown = answer_summary(SimpleNamespace(execution_status=status, analysis=None, retrieval=None,
+                                           notes=["coordinator stopped the run: the total is 22 trait names"]))
+    assert "22" in shown and harness.no_answer(shown) is not None
+    assert harness.compare("traits_containing", 22, shown)[:2] == (False, f"no answer was shown: {harness.no_answer(shown)}")
+
+
+@pytest.mark.parametrize("status, shown", [
+    ("stopped: the app asked a question (the harness never answers one)",
+     "I need one more detail before I can make a plan (answer 1 of 3):\n\n> Do you mean the 1 study in 2026?"),
+    ("no run: the app asked whether to look it up (the harness never says yes)",
+     "Is that 1 study?\n\nReply **yes** to look up “How many studies have a 2026 season?” in eval.invalid as you typed it."),
+    ("no run: the app answered without starting one", "I can count 1 study for you."),
+], ids=["a-question-of-the-app", "a-lookup-offer", "a-model-reply"])
+def test_a_question_that_ended_without_an_answer_written_by_code_is_not_scored(place, monkeypatch, status, shown):
+    """Review (2026-10-16): the app's own question, a lookup offer and a model's reply were scored like an answer."""
+    import shutil
+
+    place.seed(*FIXTURES)
+    copy = place.root / "copy"
+    shutil.copytree(place.source, copy)
+    monkeypatch.setattr(harness, "ask", lambda question, chat, wait=120.0: harness.Outcome(shown=shown, status=status))
+    report = harness.run_questions(QUESTIONS[:1], cache_copy=copy, out_dir=place.root / "runs", base_config=place.base_config,
+                                   make_models=synthetic_models, triage_model=None, preflight=None, allow_live=False)
+    [row] = report["questions"]
+    assert row["expected"] == 1 and row["passed"] is False and row["why"] == "no answer was shown to score"
+    assert harness.compare("studies_with_season", 1, shown)[0] is True       # read as an answer, it would have passed
 
 
 def test_the_question_file_is_checked_and_the_real_one_loads():

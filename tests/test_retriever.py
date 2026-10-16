@@ -19,9 +19,9 @@ import pytest
 import agents.retriever as rt
 import brapi_mcp_server as srv
 from cache_store import CacheIdentity, CacheStore
-from contracts import FetchApproval, RetrievalReport, ToolResult
+from contracts import FetchApproval, RetrievalReport, ToolError, ToolResult
 from part2_support import FIXTURE_FETCHED_AT, MALFORMED_FIXTURES, SYNTHETIC_BASE, seed_fixture
-from llm import Budget, FakeModelClient, reply_text, reply_tools
+from llm import Budget, FakeModelClient, reply_text, reply_tools, run_agent_loop
 from part2_support import synthetic_approval, synthetic_context
 
 PART2 = Path(__file__).resolve().parents[1]
@@ -361,6 +361,139 @@ def test_agent_failures_and_limits_carry_through_to_the_report(tmp_path):
     empty = FakeModelClient([reply_text("")], reported_model="mock-model")
     report, agent, _, _ = run_script(tmp_path, "valid_request.json", model=empty, request="Nothing.")
     assert agent.status == "failed" and report.status == "failed" and any("empty_reply" in w for w in report.warnings)
+
+
+# --- an exact repeat of a complete table (eval baseline 20261016T150241Z, q14) --------------
+# run_20261016T150345_d86d8c: the Retriever had the complete 140-row table and asked for exactly the same table five more
+# times (a request_log between each), until the fetch limit stopped the run: "A request limit was reached".
+
+OBSERVATIONS = ("get_observations", json.dumps({"study_db_id": "S1", "variable_db_id": "V1"}))
+REQUEST_LOG = ("request_log", json.dumps({"run_id": "run_retr"}))
+FINISHED = {"status": "completed", "payload": {"resolved": [{"kind": "study", "id": "S1"}], "studies": ["S1"], "notes": []}}
+
+
+def scripted_model(*calls, final: dict | None = None) -> FakeModelClient:
+    replies = [reply_tools([call], model="mock-model") for call in calls]
+    if final is not None:
+        replies.append(reply_text(json.dumps(final), model="mock-model"))
+    return FakeModelClient(replies, reported_model="mock-model")
+
+
+def loop_events(tmp_path, event: str, run_id: str = "run_retr") -> list[dict]:
+    lines = (tmp_path / "out" / run_id / "llm_retriever.jsonl").read_text(encoding="utf-8").splitlines()
+    return [record for record in map(json.loads, lines) if record["event"] == event]
+
+
+def test_a_first_exact_repeat_of_a_complete_table_is_not_sent_and_uses_no_fetch(tmp_path):
+    budget = Budget(max_fetches=1)                     # before: the repeat reached this limit and the run ended
+    model = scripted_model(OBSERVATIONS, REQUEST_LOG, OBSERVATIONS, final=FINISHED)
+    report, agent, ctx, _ = run_script(tmp_path, "valid_request.json", model=model, budget=budget)
+    assert endpoints_requested(ctx).count("/observations") == 1 and budget.fetches == 1
+    first, _, repeat = tool_messages(agent)
+    assert repeat["ok"] and repeat["complete"] and repeat["artifact_ids"] == first["artifact_ids"] and repeat["request_ids"] == []
+    assert repeat["data"] == {"not_sent_again": True, "note": rt.REPEAT_NOTE}       # the model is told the table is saved
+    assert agent.status == "completed" and agent.errors == [] and report.status == "completed" and report.complete
+    assert [a.kind for a in report.artifacts] == ["observations"]                    # one table, not two copies
+    assert [e["repeat"] for e in loop_events(tmp_path, "repeat_not_sent")] == [1]
+
+
+def test_the_second_exact_repeat_ends_the_fetching_step_with_an_answer_written_from_tool_results(tmp_path):
+    never_read = {"status": "completed", "payload": {"resolved": [{"kind": "study", "id": "S999"}], "studies": ["S999"],
+                                                     "notes": ["never read"]}}
+    budget = Budget(max_fetches=1)
+    model = scripted_model(OBSERVATIONS, REQUEST_LOG, OBSERVATIONS, REQUEST_LOG, OBSERVATIONS, final=never_read)
+    report, agent, ctx, _ = run_script(tmp_path, "valid_request.json", model=model, budget=budget)
+    assert len(model.requests) == 5                     # the model's own final answer was never asked for
+    assert agent.status == "completed" and [e.code for e in agent.errors] == ["repeated_request"]
+    assert agent.payload == {"resolved": [{"kind": "study", "id": "S1"}, {"kind": "variable", "id": "V1"}], "studies": ["S1"],
+                             "notes": []}               # IDs from the approval as confirmed by tool results
+    assert endpoints_requested(ctx).count("/observations") == 1 and budget.fetches == 1
+    assert report.status == "completed" and report.complete and [a.kind for a in report.artifacts] == ["observations"]
+    assert not any(w.startswith("model note:") for w in report.warnings)
+    assert [e["repeat"] for e in loop_events(tmp_path, "repeat_not_sent")] == [1, 2]
+
+
+@pytest.mark.parametrize("call, endpoint", [
+    (("get_observation_units", json.dumps({"study_db_id": "S1"})), "/observationunits"),
+    (("export_metadata", json.dumps({"entity": "variables"})), "/variables"),
+], ids=["observation-units", "catalog-export"])
+def test_the_same_rule_holds_for_the_other_tools_that_save_a_table(tmp_path, call, endpoint):
+    model = scripted_model(call, call, call, final=FINISHED)
+    report, agent, ctx, _ = run_script(tmp_path, "valid_request.json", model=model)
+    assert len(model.requests) == 3 and [e.code for e in agent.errors] == ["repeated_request"]
+    assert endpoints_requested(ctx).count(endpoint) == 1 and len(report.artifacts) == 1 and report.status == "completed"
+    assert agent.payload["studies"] == []               # no observations were fetched: the report names no study as fetched
+
+
+class AnswersWith:
+    """A stand-in for the tool bridge that answers every call with one result, and counts the calls that reach it."""
+
+    def __init__(self, result: ToolResult) -> None:
+        self.result, self.calls = result, 0
+
+    async def schemas(self):
+        return srv.tool_schemas()
+
+    async def call(self, name, args):
+        self.calls += 1
+        return self.result
+
+
+@pytest.mark.parametrize("result", [
+    ToolResult(ok=True, complete=False),
+    ToolResult(ok=False, error=ToolError(code="upstream_error", message="synthetic failure"), complete=False),
+    ToolResult(ok=True, complete=True, artifact_ids=["art_never_saved_0001"]),      # no saved table behind it
+], ids=["incomplete", "failed", "not-saved"])
+def test_a_repeat_of_an_attempt_that_saved_no_complete_table_is_sent_again(tmp_path, result):
+    inner, budget = AnswersWith(result), Budget()
+    tools = rt.ApprovedTools(inner, make_ctx(tmp_path), synthetic_approval(run_id="run_retr"))
+    model = scripted_model(OBSERVATIONS, OBSERVATIONS, final=FINISHED)
+
+    async def go():
+        return await run_agent_loop(model, tools, agent_name="retriever", system_prompt=rt.RETRIEVER_SYSTEM_PROMPT,
+                                    user_message="Fetch S1 / V1.", budget=budget, allowed_tools=set(rt.RETRIEVER_TOOLS),
+                                    log_dir=tmp_path / "out", run_id="run_retr", model_requested="mock-model",
+                                    repeat_guard=tools)
+
+    agent = anyio.run(go)
+    assert inner.calls == 2 and budget.fetches == 2 and agent.status == "completed"     # both sent, each used a fetch
+    assert loop_events(tmp_path, "repeat_not_sent") == []
+    assert tools.saved_result("search_studies", {}) is None                         # only the tools that save a table
+
+
+UNITS = ("get_observation_units", json.dumps({"study_db_id": "S1"}))
+
+
+def test_repeats_are_counted_per_table_so_one_repeat_of_each_does_not_end_the_step(tmp_path):
+    """Review (2026-10-16): one counter for all tables ended the step at a first repeat of a second, different table."""
+    model = scripted_model(OBSERVATIONS, UNITS, OBSERVATIONS, UNITS, final=FINISHED)
+    report, agent, ctx, _ = run_script(tmp_path, "valid_request.json", model=model)
+    assert len(model.requests) == 5 and agent.status == "completed" and agent.errors == []    # the model's own answer
+    assert [(e["name"], e["repeat"]) for e in loop_events(tmp_path, "repeat_not_sent")] == [
+        ("get_observations", 1), ("get_observation_units", 1)]
+    assert endpoints_requested(ctx).count("/observations") == 1 and endpoints_requested(ctx).count("/observationunits") == 1
+
+
+def test_the_other_calls_of_the_turn_with_the_second_repeat_still_run(tmp_path):
+    """Review (2026-10-16): the step ended inside the model's turn, so a new call later in that turn was dropped."""
+    model = FakeModelClient([reply_tools([OBSERVATIONS], model="mock-model"), reply_tools([OBSERVATIONS], model="mock-model"),
+                             reply_tools([OBSERVATIONS, UNITS], model="mock-model"),     # the second repeat, then a new fetch
+                             reply_text(json.dumps(FINISHED), model="mock-model")], reported_model="mock-model")
+    report, agent, ctx, _ = run_script(tmp_path, "valid_request.json", model=model)
+    assert len(model.requests) == 3 and [e.code for e in agent.errors] == ["repeated_request"]
+    assert endpoints_requested(ctx).count("/observationunits") == 1 and report.status == "completed"
+    assert sorted(a.kind for a in report.artifacts) == ["observation_units", "observations"]
+
+
+def test_other_arguments_and_a_repeated_blocked_attempt_work_as_before(tmp_path):
+    other = ("get_observations", json.dumps({"study_db_id": "S2", "variable_db_id": "V1"}))     # S2 is not approved
+    budget = Budget()
+    model = scripted_model(OBSERVATIONS, other, other, final=FINISHED)
+    report, agent, ctx, _ = run_script(tmp_path, "valid_request.json", model=model, budget=budget)
+    _, first_try, second_try = tool_messages(agent)
+    assert first_try["error"]["code"] == second_try["error"]["code"] == "not_authorized"      # the gate checks each one
+    assert budget.fetches == 3 and agent.errors == [] and report.status == "blocked"          # as before this change
+    assert loop_events(tmp_path, "repeat_not_sent") == []
 
 
 # --- 9. the harness CLI ------------------------------------------------------------------------

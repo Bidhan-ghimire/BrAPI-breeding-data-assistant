@@ -1,8 +1,9 @@
 """
-tests/test_catalog_lists.py — "list all traits" (and locations, seasons, programs), answered by code from the cached catalog.
+tests/test_catalog_lists.py — "list all traits" (and locations, seasons, programs, study types), answered by code from the
+cached catalog.
 
 What these tests prove, in plain words:
-* The four commands are found by code, with an optional filter word ("list traits with yield"); longer requests ("list traits
+* The five commands are found by code, with an optional filter word ("list traits with yield"); longer requests ("list traits
   for study 4501") are not commands and go to the planner as before.
 * At the front door a command starts a short run: no front-door model call, no planner or other model call, no web request
   when the catalog is cached, no measurements. The chat shows the first 30 names and the total; the Full report and the
@@ -17,6 +18,10 @@ What these tests prove, in plain words:
 * While a run waits at the planner's question, the same command is answered from that run's catalog: nothing reaches the
   run, it keeps waiting, and the hint under a trait question now names the command. A saved copy's cache reads are kept
   as the list run's request records, so the fetch time shown is backed by the record.
+* A fifth list, study types, each with its number of studies, most first ("list all study types"; the help tab names it).
+* The front door's catalog_list label (eval baseline 20261016T150241Z, q04-q06) starts the same list run for a question in
+  other words: one label call, no planner, no talk call, no model-written answer. A label whose list or word fails the
+  code check (the word must be one word of the person's own message) carries on as without a decision: the planner runs.
 Fake server and scripted models only; the conftest guard would stop any real socket.
 """
 from __future__ import annotations
@@ -32,7 +37,9 @@ import pytest
 import app
 import catalog_lists
 import run as ctl
+import triage
 from agents.coordinator import KnownMetadata, KnownStudy, KnownVariable
+from app_help import faq_items
 from brapi_client import TransportResponse
 from cache_store import CacheStore
 from llm import FakeModelClient, reply_text
@@ -135,10 +142,11 @@ def lists(tmp_path, monkeypatch):
         for name in ("list_studies.json", "list_variables.json"):
             seed_fixture(cache, LIVE, name, fixtures)
 
-    def turn(message, history=(), state=None, *, bootstrap=False, models_=None):
+    def turn(message, history=(), state=None, *, bootstrap=False, models_=None, triage_model=None):
         config = lambda q: make_config(q, bootstrap=bootstrap)
         out = list(app.respond(message, list(history), dict(state or {}), make_config=config, make_models=models_ or models,
-                               preflight=lambda q: config(q).validate(), triage_model=lambda: front_door.append(1)))
+                               preflight=lambda q: config(q).validate(),
+                               triage_model=triage_model or (lambda: front_door.append(1))))
         assert out[-1][2] == ""
         return out[-1][0], out[-1][1]
 
@@ -166,9 +174,10 @@ def shown_items(content: str) -> list[str]:
     ("list locations that contain n.c.", "locations", "n.c"), ("list seasons with 2025", "seasons", "2025"),
     ("list the available traits in the catalog", "traits", None), ("show me a list of all traits", "traits", None),
     ("give me a list of traits with yield", "traits", "yield"), ("a list of all locations", "locations", None),
-    ("can you give me the list of seasons?", "seasons", None),
+    ("can you give me the list of seasons?", "seasons", None), ("list all study types", "study_types", None),
+    ("show me the study types with yield", "study_types", "yield"), ("list study type names", "study_types", None),
 ])
-def test_the_four_commands_and_the_filter_word_are_found_by_code(typed, entity, word):
+def test_the_five_commands_and_the_filter_word_are_found_by_code(typed, entity, word):
     assert catalog_lists.parse_request(typed) == catalog_lists.ListRequest(entity, word)
 
 
@@ -181,7 +190,7 @@ def test_anything_else_is_not_a_list_command(typed):
 
 
 @pytest.mark.parametrize("entity, word, problem", [
-    ("studies", None, "catalog_list must be one of traits, locations, seasons, programs"),
+    ("studies", None, "catalog_list must be one of traits, locations, seasons, programs, study_types"),
     ("traits", "two words", "catalog_list_word must be one word"), ("traits", "", "catalog_list_word must be one word"),
     (None, "yield", "catalog_list_word needs catalog_list")])
 def test_a_list_run_names_one_list_and_at_most_one_word(tmp_path, entity, word, problem):
@@ -465,3 +474,103 @@ def test_the_suggested_narrowing_word_always_narrows_the_list():
     alike = KnownMetadata(base_url=LIVE, complete=True, studies=studies[:35])                 # no word keeps fewer than all
     plain = catalog_lists.chat_message(catalog_lists.build(catalog_lists.ListRequest("locations"), alike, TABLES), in_report=True)
     assert "To see fewer, add a word: **list locations with** and a word from the names." in plain
+
+
+# --------------------------------------------------------------------------
+# Study types: a fifth list (eval baseline 20261016T150241Z, q06: "How many studies are there of each study type?")
+# --------------------------------------------------------------------------
+
+TYPED = KnownMetadata(base_url=LIVE, complete=True, studies=[
+    *[KnownStudy(study_id=f"A{i}", study_type="Advanced Yield Trial") for i in range(3)],
+    *[KnownStudy(study_id=f"C{i}", study_type="Clonal Evaluation") for i in range(2)],
+    *[KnownStudy(study_id=f"T{i}", study_type="Specialty Trial") for i in range(2)],
+    KnownStudy(study_id="t1", study_type="Specialty trial"), KnownStudy(study_id="N1")])
+
+
+def test_study_types_are_listed_most_studies_first_each_name_as_the_catalog_writes_it():
+    listing = catalog_lists.build(catalog_lists.ListRequest("study_types"), TYPED, TABLES)
+    assert [(i.label, i.studies) for i in listing.items] == [("Advanced Yield Trial", 3), ("Clonal Evaluation", 2),
+                                                             ("Specialty Trial", 2), ("Specialty trial", 1)]
+    assert listing.total == 4 and listing.unrecorded == 1
+    message = catalog_lists.chat_message(listing, in_report=True)
+    assert message.startswith("**Study types in the catalog: 4.** Most studies first:\n\n- Advanced Yield Trial — 3 studies\n"
+                              "- Clonal Evaluation — 2 studies\n- Specialty Trial — 2 studies\n- Specialty trial — 1 study\n")
+    assert "Only study types named by at least one study are listed. 1 study names no study type." in message
+    assert message.endswith("Source: lists.invalid, study catalog fetched 2026-06-01 00:00 UTC (a saved copy; nothing new was "
+                            "requested). No measurements were used.")
+    trial = catalog_lists.build(catalog_lists.ListRequest("study_types", "trial"), TYPED, TABLES)
+    assert [i.label for i in trial.items] == ["Advanced Yield Trial", "Specialty Trial", "Specialty trial"]
+    assert catalog_lists.chat_message(trial, in_report=True).startswith("**Study type names containing “trial”: 3 of 4.**")
+    report = "\n".join(catalog_lists.report_lines(listing))
+    assert "Study types in the catalog: 4, most studies first." in report and "- Specialty trial — 1 study" in report
+    assert "Study types come from the study records." in report
+    assert "study types" in dict(faq_items("x"))["What makes a good question?"]          # the help tab names the list
+
+
+def test_list_all_study_types_typed_at_the_front_door_is_a_short_run_with_no_model(lists):
+    lists.cache_the_catalog()
+    history, state = lists.turn("list all study types")
+    content = history[-1]["content"]
+    assert content.startswith("**Study types in the catalog: 1.** Most studies first:\n\n- Synthetic Yield Trial — 40 studies")
+    assert lists.front_door == [] and lists.models.asked() == 0 and lists.server.calls == [] and "job" not in state
+    [result] = lists.runs()
+    assert result.execution_status == "completed" and result.analysis.claims[0].value == 1
+    assert result.plan.steps[1].inputs == {"entity": "study_types"}
+
+
+# --------------------------------------------------------------------------
+# The front door's catalog_list label: the same list run for a question in other words
+# --------------------------------------------------------------------------
+
+def list_label(entity, word="") -> dict:
+    return {"label": "catalog_list", "reason": "scripted for this test", "reply": "", "list": entity, "word": word}
+
+
+def front_door_model(*decisions: dict):
+    """The front door's model, scripted: one JSON reply per call, and every request it was sent."""
+    model = FakeModelClient([reply_text(json.dumps(d), model="mock-model") for d in decisions], reported_model="mock-model")
+    return model, (lambda: model)
+
+
+@pytest.mark.parametrize("question, decision, heading, catalog", [
+    ("Which seasons are in the catalog?", list_label("seasons"),
+     "**Seasons in the catalog: 37.** The first 30, newest first:\n\n- 2026 — 1 study", "study catalog"),
+    ("How many studies are there of each study type?", list_label("study types"),
+     "**Study types in the catalog: 1.** Most studies first:\n\n- Synthetic Yield Trial — 40 studies", "study catalog"),
+    ("How many trait names contain the word yield?", list_label("traits", "yield"),
+     "**Trait names containing “yield”: 12 of 46.** A to Z:", "trait catalog"),
+], ids=["q05-seasons", "q06-study-types", "q04-trait-names-with-yield"])
+def test_the_three_baseline_questions_reach_the_lists_written_by_code(lists, question, decision, heading, catalog):
+    lists.cache_the_catalog()
+    model, factory = front_door_model(decision)
+    history, state = lists.turn(question, triage_model=factory)
+    content = history[-1]["content"]
+    assert content.startswith(heading) and f"Source: lists.invalid, {catalog} fetched 2026-06-01 00:00 UTC (a saved copy" in content
+    assert len(model.requests) == 1 and lists.models.asked() == 0 and lists.server.calls == []    # one label call, nothing else
+    assert "job" not in state and [m["role"] for m in history] == ["user", "assistant"]
+    [result] = lists.runs()
+    assert result.execution_status == "completed" and result.plan.question == question and result.counts.model_calls == 0
+    assert [(s.agent, s.action) for s in result.plan.steps] == [("retriever", "export_metadata"), ("analyst", "list_catalog_names")]
+    prompt = model.requests[0]["messages"][0]["content"]
+    assert triage.CATALOG_LIST_LABEL in prompt and "Saved catalog of lists.invalid" in prompt
+
+
+@pytest.mark.parametrize("decision", [
+    list_label("studies"),                              # not one of the five lists
+    list_label("traits", "potato"),                     # a word the person did not write (coach, 2026-10-16)
+    list_label("traits", "yields"),                     # not as a whole word: the message says "yield"
+    list_label("traits", "trait names"),                # two words
+    list_label("traits", "yield?"),                     # not one word as the typed command reads one
+    {**list_label("traits", "yield"), "list": None},    # no list named
+], ids=["not-a-list", "word-not-in-the-message", "not-a-whole-word", "two-words", "not-one-word", "no-list"])
+def test_a_list_label_whose_fields_fail_the_check_carries_on_as_without_a_decision(lists, decision):
+    lists.cache_the_catalog()
+    models = Models(({"status": "needs_clarification", "question": "Which trait is meant?"},))
+    model, factory = front_door_model(decision)
+    history, state = lists.turn("How many trait names contain the word yield?", models_=models, triage_model=factory)
+    job = state["job"]                                  # the run started as before: its planner asks a question
+    assert job.waiting_on == ctl.CLARIFY_PROMPT and "Which trait is meant?" in history[-1]["content"]
+    assert job.controller.config.catalog_list is None and len(models.planner.requests) == 1 and len(model.requests) == 1
+    lists.turn("cancel", history, state, models_=models)
+    job.thread.join(timeout=60)
+    assert [r.execution_status for r in lists.runs()] == ["canceled"] and lists.server.calls == []

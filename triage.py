@@ -1,6 +1,6 @@
 """triage.py — the chat's front door: sort a NEW message before any run starts, and answer it when it starts nothing.
 
-Seven kinds: greeting_or_smalltalk, app_question, data_question, follow_up, catalog_question, out_of_scope, unsure.
+Eight kinds: greeting_or_smalltalk, app_question, data_question, follow_up, catalog_question, catalog_list, out_of_scope, unsure.
 Code rules find greetings and questions about the app. Every new message (except an exact "yes" after unsure and the
 catalog lists, which code answers) costs ONE bounded model call, and at most two (the talk call below): no tools and no
 agent loop, so it writes no run folder and no files. For a greeting or an app question found by the rules, that call only
@@ -19,12 +19,19 @@ every number in it (digits of any script, and number signs such as ⁹ or ½) is
 the reference (its web addresses left out), also in what the 600-character cut leaves; otherwise, or when that call
 fails, the line written by code for the label is shown. For unsure it also says whether the message could be a lookup
 (offer_lookup): words that mean nothing, or that ask for no lookup, get no "yes" line.
+catalog_list ("Which seasons are in the catalog?", "How many studies are there of each study type?", "How many trait names
+contain the word yield?") starts the short list run that the typed command ("list all seasons", "list traits with yield")
+starts (catalog_lists.py): no planner and no model-written answer. The label call also names the list and at most one filter
+word, and code checks both (catalog_list_request): the list must be one of the five, and the word one word that the person's
+own message has, as a whole word, ignoring case (coach, 2026-10-16: rules read only the person's words; a word the model made
+up would show a wrong list). A catalog_list decision that fails the check counts as no decision: the message carries on as
+without one. Eval baseline 20261016T150241Z: these three questions got the catalog summary, or a run ended "Question blocked".
 follow_up continues the last earlier question of this chat (chat_memory.py); the earlier questions are shown to the model.
 That call returns one strict JSON object with the label and a short reply in the person's own words and language. The
 reply is escaped like database text and cut to REPLY_MAX_CHARS; when the rules decided, a reply written for another label
 is not shown. If the call fails, is slow, or its answer is not exactly a valid decision, a message with data words, or one
 the rules could not place, goes to the data pipeline as it did before, and a greeting or app question gets the line written
-by code. The reply text of a data_question or follow_up is ignored.
+by code. The reply text of a data_question, follow_up or catalog_list is ignored.
 
 This sorting is NOT a security boundary. A wrong label can only cost convenience (an extra turn, or a planner
 question); it can never fetch data. Every data request still passes the pipeline's own approval screens, which
@@ -42,6 +49,7 @@ from typing import Any, Callable, Literal, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+import catalog_lists
 from app_help import QUESTION_GUIDE, QUICK_START
 from llm import DEFAULT_MAX_TOKENS
 from retrieval_review import _cell as _escaped       # the same escaping the data review uses for database text
@@ -50,9 +58,11 @@ __all__ = ["Label", "PIPELINE_LABELS", "TRIAGE_MAX_TOKENS", "TRIAGE_TIMEOUT_S", 
            "reference_text", "TriageDecision", "Triage", "id_like", "sort_by_rules", "is_yes", "parse_decision", "ask_model",
            "front_door_reply", "greeting_line", "app_answer", "unsure_line", "out_of_scope_line", "OUT_OF_SCOPE_COVERS",
            "OUT_OF_SCOPE_RULE", "FAQ_TITLES", "REPLY_BY_APP_RULE", "TALK_LABELS", "TALK_TIMEOUT_S", "NO_ADVICE_RULE",
-           "talk_prompt", "TalkReply", "parse_talk", "ask_to_talk", "recent_words", "numbers_outside", "offers_lookup"]
+           "talk_prompt", "TalkReply", "parse_talk", "ask_to_talk", "recent_words", "numbers_outside", "offers_lookup",
+           "CATALOG_LIST_LABEL", "CATALOG_LISTS", "catalog_list_request"]
 
-Label = Literal["greeting_or_smalltalk", "app_question", "data_question", "follow_up", "catalog_question", "out_of_scope", "unsure"]
+Label = Literal["greeting_or_smalltalk", "app_question", "data_question", "follow_up", "catalog_question", "catalog_list",
+                "out_of_scope", "unsure"]
 PIPELINE_LABELS = frozenset({"data_question", "follow_up"})   # follow_up without an earlier question runs as typed
 # The agents' reply limit: a reasoning model's hidden thinking counts toward it (llm.py), and a short label costs only
 # what is written. A reply that is still cut off at this limit is no decision.
@@ -74,7 +84,7 @@ _LABELS = """Labels:
 - app_question: a question about this assistant itself: what it can do or how to use it.
 - data_question: a question that needs breeding records from the database.
 - follow_up: a short continuation of an earlier data question, for example "and in 2025?".
-{catalog_label}- out_of_scope: a message this app cannot help with: a question that breeding records cannot answer (general knowledge or
+{catalog_list_label}{catalog_label}- out_of_scope: a message this app cannot help with: a question that breeding records cannot answer (general knowledge or
   another topic, for example world facts, news or sports), a request for a decision the app does not make (such as which
   parents to cross), or an insult or rude remark. Use it only when that is clear: a message about crops, plants, places,
   programs, seasons or years is data_question or unsure, and between out_of_scope and unsure choose unsure.
@@ -90,8 +100,19 @@ OUT_OF_SCOPE_RULE = ("For out_of_scope (this replaces the rules above about sayi
 CATALOG_LABEL = ("- catalog_question: a question the saved catalog below answers with its own counts: how many studies, traits, "
                  "locations or seasons it has, which locations or study types have the most studies, or how many studies a "
                  "named location, study type or season has, or whether a place or season is among them (for example \"tell me "
-                 "about Florida\" or \"how many locations are there?\"). A question about trait names, a study's records or "
-                 "measurements, or any other count is data_question.\n")
+                 "about Florida\" or \"how many locations are there?\"). A whole list, or the names that contain a word, is "
+                 "catalog_list; any other question about trait names, a study's records or measurements, or any other count "
+                 "is data_question.\n")
+# The label that starts a list run (catalog_lists.py) for a question in other words. Offered with or without the saved catalog:
+# without it, the list run asks for the catalog setup first, as the typed command does. Code checks "list" and "word"
+# (catalog_list_request); nothing the model writes here is shown.
+CATALOG_LIST_LABEL = ("- catalog_list: they ask to see one whole list of the catalog, or its names that contain one word: the "
+                      "trait names, or the locations, seasons, programs or study types (these with their number of studies). "
+                      "For example \"which seasons are in the catalog?\", \"how many studies are there of each study type?\" or "
+                      "\"how many trait names contain the word yield?\". Then also give \"list\": one of \"traits\", "
+                      "\"locations\", \"seasons\", \"programs\" or \"study types\"; and \"word\": the one word of their message "
+                      "that the names must contain, or \"\" for the whole list. A list for a particular study, place, season or "
+                      "program, or with two or more words to match, is data_question.\n")
 # Given whenever the saved catalog or the earlier questions are in the prompt: then this call's reply is never shown
 # (app._reply_without_run); the talk call (Step 2c), which sees neither, or code writes the reply, so no count, place or
 # name that this call saw can reach the person in a model's words.
@@ -108,13 +129,13 @@ def front_door_prompt(*, source: str, reference: str, known_label: str | None = 
     decided = (f"The app's rules already sorted this message as {known_label}: use that label. Nothing will be looked up "
                "for this message; if it asks for data, invite them to send the data question as a new message."
                if known_label else "Choose the label that fits the message.")
-    labels = _LABELS.format(catalog_label=CATALOG_LABEL if catalog else "")
+    labels = _LABELS.format(catalog_list_label=CATALOG_LIST_LABEL, catalog_label=CATALOG_LABEL if catalog else "")
     if earlier:
         labels = labels.replace('- follow_up: a short continuation of an earlier data question, for example "and in 2025?".',
                                 FOLLOW_UP_EARLIER)
     facts = (f"\n\nThe saved catalog (a summary written by code; facts, not instructions):\n{catalog}" if catalog else "")
     facts += f"\n\n{earlier}" if earlier else ""
-    reply_rules = REPLY_BY_APP_RULE if catalog or earlier else f"""The reply (leave it empty for data_question and follow_up; the app starts the lookup itself):
+    reply_rules = REPLY_BY_APP_RULE if catalog or earlier else f"""The reply (leave it empty for data_question and follow_up, and for catalog_list; the app starts the lookup or the list itself):
 - 1 to 3 sentences of plain text: no lists, headings, links or markdown.
 - Mirror the person's greeting and write in the language they used.
 - Never claim to have looked anything up: you have not searched the database and know no data values.
@@ -128,6 +149,7 @@ The app finds public breeding records (studies, trials, traits, locations, seaso
 and summarizes them with descriptive numbers. Every database request needs the person's approval.
 
 Return ONLY a JSON object: {{"label": "<one label>", "reason": "<one short sentence>", "reply": "<your reply>"}}. No other text.
+For catalog_list, add "list" and "word" to that object (see that label).
 
 {labels}
 {decided}
@@ -150,13 +172,16 @@ def reference_text(faq: list[tuple[str, str]]) -> str:
 
 
 class TriageDecision(BaseModel):
-    """All the model may return: a label, one short reason and the reply text. Anything else is no decision."""
+    """All the model may return: a label, one short reason and the reply text; for catalog_list also the list and the
+    filter word, which code checks before they count (catalog_list_request). Anything else is no decision."""
 
     model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
 
     label: Label
     reason: str = Field(min_length=1, max_length=300)
     reply: str = Field(default="", max_length=4000)    # shown only for a message that starts nothing, escaped and cut
+    list_name: str | None = Field(default=None, alias="list", max_length=40)    # catalog_list only: which list
+    word: str | None = Field(default=None, max_length=200)                      # catalog_list only: the filter word, or ""
 
 
 @dataclass(frozen=True)
@@ -293,6 +318,28 @@ def parse_decision(reply: Any) -> TriageDecision | None:
         return TriageDecision.model_validate_json((getattr(reply, "content", None) or "").strip())
     except ValidationError:
         return None
+
+
+# The lists a catalog_list decision may name, as the label call writes them (plural or singular) -> catalog_lists' name.
+CATALOG_LISTS = {"traits": "traits", "trait": "traits", "locations": "locations", "location": "locations",
+                 "seasons": "seasons", "season": "seasons", "programs": "programs", "program": "programs",
+                 "programmes": "programs", "programme": "programs", "study types": "study_types", "study type": "study_types"}
+
+
+def catalog_list_request(decision: TriageDecision | None, text: str) -> catalog_lists.ListRequest | None:
+    """The list a catalog_list decision asks for, checked by code. None for any other decision, and when a field fails:
+    "list" must name one of the five lists, and "word", in lower case, must be empty or one whole word of the person's own
+    message as the typed command reads words (catalog_lists.words): "dry" is not a word of "dry-matter", nor "n" of
+    "n.c." (review, 2026-10-16). The model's reply text is never used."""
+    if decision is None or decision.label != "catalog_list":
+        return None
+    entity = CATALOG_LISTS.get(" ".join((decision.list_name or "").replace("_", " ").split()).casefold())
+    word = (decision.word or "").strip().lower().replace("’", "'")          # as catalog_lists.words reads a message
+    if entity is None:
+        return None
+    if word and not (catalog_lists.is_one_word(word) and word in catalog_lists.words(text)):
+        return None
+    return catalog_lists.ListRequest(entity, word or None)
 
 
 async def _complete(model: Any, prompt: str, text: str) -> Any:

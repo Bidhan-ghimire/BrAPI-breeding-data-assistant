@@ -7,10 +7,10 @@ question five times (run 20261015T165633). Now each message is sorted first:
 * Code first. The exact control words of the prompt the run is waiting on (approve, edit, cancel, continue, accept, reject)
   go to the run with no model call; case, spaces and a closing "." or "!" do not matter ("Approve." is approve, but
   "approve?" asks rather than decides). Replies to the short "study IDs" prompt after edit, and the Retriever's "change
-  scope: ..." reply, also go straight to the run. "list all traits" (or locations, seasons, programs; catalog_lists.py)
-  is answered by code from the waiting run's own catalog, and the run keeps waiting (app.py), unless the waiting question
-  is itself about listing: then the model decides. A message that only asks to list another part of the catalog ("list
-  all studies") is a new question: code asks whether to drop or keep the current one.
+  scope: ..." reply, also go straight to the run. "list all traits" (or locations, seasons, programs, study types;
+  catalog_lists.py) is answered by code from the waiting run's own catalog, and the run keeps waiting (app.py), unless the
+  waiting question is itself about listing: then the model decides. A message that only asks to list another part of the
+  catalog ("list all studies") is a new question: code asks whether to drop or keep the current one.
 * Every other message costs ONE bounded model call (the front door's kind: no tools, strict JSON, 20 s). It labels the
   message: answer_to_pending (it goes to the run as before), side_question (a short reply written by the model, then one
   line written by code repeating what the run waits for; nothing reaches the run), out_of_scope (a question that is not
@@ -109,7 +109,7 @@ def asks_about_listing(pending: list[str] | None) -> bool:
 def is_list_request(text: str, pending: list[str] | None = None) -> bool:
     """The whole message asks to list part of the catalog ('list all traits', 'can you show me every study'): a new question,
     never an answer. Not when the waiting question is itself about listing (asks_about_listing): the model decides.
-    The app checks the four catalog lists first (catalog_lists.parse_request): with the run's catalog they are shown."""
+    The app checks the five catalog lists first (catalog_lists.parse_request): with the run's catalog they are shown."""
     if asks_about_listing(pending):
         return False
     return bool(_LIST_REQUEST.fullmatch(triage._words(text)))

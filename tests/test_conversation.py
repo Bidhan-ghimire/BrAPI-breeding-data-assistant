@@ -10,7 +10,7 @@ What these tests prove, in plain words:
   question is what should be answered.
 * The prompt's own words (approve, edit, cancel, continue, accept, reject) reach the run with no model call, also as
   "Approve." or " CANCEL "; the model's words never do, whatever label it gives and even when it writes "approve".
-* "list all traits" (or locations, seasons, programs, with an optional word) typed mid-run is answered by code from the
+* "list all traits" (or locations, seasons, programs, study types, with an optional word) typed mid-run is answered by code from the
   waiting run's own catalog, then what the run waits for is repeated; nothing reaches the run and no model is asked, also
   at the "study IDs" prompt after edit. Before the run has a catalog (its catalog setup), it is a new question. When the
   waiting question is itself about listing ("Should I list the seasons?"), the reply may be its answer: the model decides. A new data question (one the model labels,

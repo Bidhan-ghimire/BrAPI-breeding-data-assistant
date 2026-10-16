@@ -1,10 +1,11 @@
-"""catalog_lists.py — "list all traits" (and locations, seasons, programs): a fixed list written by code from the cached catalog.
+"""catalog_lists.py — "list all traits" (and locations, seasons, programs, study types): a fixed list written by code from the cached
+catalog.
 
 Run 20261015T181947: "list all traits" went to the planner. For a large catalog the planner sees only the traits whose names
-share words with the question, and it has no plan for listing everything, so it asked a question back. Now code answers four
+share words with the question, and it has no plan for listing everything, so it asked a question back. Now code answers five
 commands itself, from the same checked catalog every run loads first (the cached study and trait exports):
 
-* "list (all) traits | locations | seasons | programs", also "show me ...", "can you list ...", "give me a list of ...". An
+* "list (all) traits | locations | seasons | programs | study types", also "show me ...", "can you list ...", "give me a list of ...". An
   optional filter word keeps only the names that contain it, ignoring case: "list traits with yield". Anything longer ("list
   traits for study 4501", "list traits with yield in Clinton") is not one of these commands and goes to the planner as before.
 * No planner and no other model call, no measurements, and no web request when the catalog is cached. A run is still
@@ -14,9 +15,14 @@ commands itself, from the same checked catalog every run loads first (the cached
 * Every list says where it came from and when that catalog was fetched.
 * While a run waits for a reply, the same command is answered from that run's own catalog and the run keeps waiting
   (app._sort_waiting_message).
+* At the front door the label call can start the same list run for a question in other words (triage.py, catalog_list):
+  "Which seasons are in the catalog?", "How many studies are there of each study type?", "How many trait names contain the
+  word yield?" (eval baseline 20261016T150241Z: they got the catalog summary, or a run that ended "Question blocked"). The
+  list and the word are checked by code (triage.catalog_list_request); the list run itself is the same.
 
-Traits are the trait catalog's variables, one entry per variable. Locations, seasons and programs come from the study catalog:
-each is listed with the number of studies that name it, and only those named by at least one study are known.
+Traits are the trait catalog's variables, one entry per variable. Locations, seasons, programs and study types come from the
+study catalog: each is listed with the number of studies that name it, and only those named by at least one study are known.
+Study types are listed most studies first, each name as the catalog writes it ("Specialty trial" and "Specialty Trial" stay two).
 """
 from __future__ import annotations
 
@@ -31,24 +37,26 @@ from contracts import AnalysisReport, Claim, Denominator, Plan, PlanStep, Resolv
 from retrieval_review import _cell as _escaped       # the same escaping the data review uses for database text
 
 __all__ = ["ListEntity", "ENTITIES", "SHOWN", "WORD_MAX_CHARS", "TRAIT_HINT", "ListRequest", "CatalogTable", "ListItem",
-           "CatalogList", "parse_request", "config_problems", "catalog_tables", "build", "chat_message", "report_lines",
+           "CatalogList", "parse_request", "words", "is_one_word", "config_problems", "catalog_tables", "build", "chat_message", "report_lines",
            "fixed_plan", "evidence", "run_note", "setup_plan", "setup_evidence", "is_refresh_request", "setup_message"]
 
-ListEntity = Literal["traits", "locations", "seasons", "programs"]
-ENTITIES: tuple[str, ...] = ("traits", "locations", "seasons", "programs")
+ListEntity = Literal["traits", "locations", "seasons", "programs", "study_types"]
+ENTITIES: tuple[str, ...] = ("traits", "locations", "seasons", "programs", "study_types")
 SHOWN = 30                    # names shown in the chat (as run.ANSWER_LIST_SHOWN); the report keeps all of them
 WORD_MAX_CHARS = 60           # a longer filter word is not one of these commands
 LABEL_MAX_CHARS = 200         # the most of one database name shown in the chat
 TRAIT_HINT = "To see the trait names, ask **list all traits**, or add a word: **list traits with yield**."
 
 _NOUNS = {"traits": ("trait", "traits"), "locations": ("location", "locations"), "seasons": ("season", "seasons"),
-          "programs": ("program", "programs")}
-_EXPORT = {"traits": "variables", "locations": "studies", "seasons": "studies", "programs": "studies"}   # the table each is read from
+          "programs": ("program", "programs"), "study_types": ("study type", "study types")}
+_EXPORT = {"traits": "variables", "locations": "studies", "seasons": "studies", "programs": "studies",
+           "study_types": "studies"}                                                       # the table each is read from
 _CATALOG_WORD = {"variables": "trait catalog", "studies": "study catalog"}
-_ORDER = {"traits": "A to Z", "locations": "A to Z", "seasons": "newest first", "programs": "A to Z"}
+_ORDER = {"traits": "A to Z", "locations": "A to Z", "seasons": "newest first", "programs": "A to Z",
+          "study_types": "most studies first"}
 _ALIASES = {"trait": "traits", "traits": "traits", "variable": "traits", "variables": "traits", "location": "locations",
             "locations": "locations", "season": "seasons", "seasons": "seasons", "program": "programs", "programs": "programs",
-            "programme": "programs", "programmes": "programs"}
+            "programme": "programs", "programmes": "programs", "study type": "study_types", "study types": "study_types"}
 
 # A word: letters and digits, with - _ . ' / : allowed inside ("dry-matter", "CO_331:0000217"). Quotes and a closing "?" or "."
 # are not part of it. The whole message must be one command, nothing more.
@@ -56,7 +64,7 @@ _TOKEN = re.compile(r"[^\W_]+(?:[-_.'/:][^\W_]+)*")
 _REQUEST = re.compile(
     r"(?:(?:please|can you|could you|would you)(?: please)? )?"
     r"(?:(?:list|show|give)(?: me)?(?: (?:a|the) list of)?|(?:a|the) list of)(?: all| every)?(?: of)?(?: the)?(?: available)? "
-    r"(?P<entity>traits?|variables?|locations?|seasons?|programs?|programmes?)(?: names?)?"
+    r"(?P<entity>traits?|variables?|locations?|seasons?|programs?|programmes?|study types?)(?: names?)?"
     r"(?: (?:in|from) (?:the )?catalogs?)?"
     r"(?: (?:with|containing|that contains?|matching) (?P<word>\S+))?"
     r"(?: please)?")
@@ -107,12 +115,17 @@ class CatalogList:
 # The command
 # --------------------------------------------------------------------------
 
+def words(text: str) -> list[str]:
+    """A message's words as the list commands read them: lower case; letters and digits, with - _ . ' / : inside."""
+    return _TOKEN.findall((text or "").lower().replace("’", "'"))
+
+
 def _normal(text: str) -> str:
-    return " ".join(_TOKEN.findall(text.lower().replace("’", "'")))
+    return " ".join(words(text))
 
 
 def parse_request(text: str) -> ListRequest | None:
-    """The whole message is one of the four list commands (with an optional filter word), or None."""
+    """The whole message is one of the five list commands (with an optional filter word), or None."""
     match = _REQUEST.fullmatch(_normal(text or ""))
     if match is None:
         return None
@@ -122,8 +135,15 @@ def parse_request(text: str) -> ListRequest | None:
     return ListRequest(_ALIASES[match.group("entity")], word)
 
 
+def is_one_word(word: str) -> bool:
+    """One filter word as the typed command reads it: letters and digits, with - _ . ' / : allowed inside, at most
+    WORD_MAX_CHARS long ("yield", "dry-matter"; not "yield?" or "root yield"). The front door's catalog_list label is
+    checked with it (triage.catalog_list_request)."""
+    return len(word) <= WORD_MAX_CHARS and _TOKEN.fullmatch(word) is not None
+
+
 def config_problems(entity: str | None, word: str | None) -> list[str]:
-    """RunConfig.validate: a list run names one of the four lists, and at most one filter word."""
+    """RunConfig.validate: a list run names one of the five lists, and at most one filter word."""
     if entity is None:
         return ["catalog_list_word needs catalog_list"] if word is not None else []
     problems = [] if entity in ENTITIES else [f"catalog_list must be one of {', '.join(ENTITIES)}"]
@@ -207,7 +227,22 @@ def _seasons(metadata: Any) -> tuple[list[ListItem], int]:
     return [ListItem(name, name, len(ids), name) for name, ids in studies.items()], unrecorded
 
 
+def _study_types(metadata: Any) -> tuple[list[ListItem], int]:
+    """Study types, from the studies that name one: one entry per name as the catalog writes it, with its number of studies."""
+    studies: dict[str, set[str]] = {}
+    unrecorded = 0
+    for study in metadata.studies:
+        name = _clean(study.study_type)
+        if not name:
+            unrecorded += 1
+            continue
+        studies.setdefault(name, set()).add(study.study_id)
+    return [ListItem(name, name, len(ids), name) for name, ids in studies.items()], unrecorded
+
+
 def _order(entity: str, items: list[ListItem]) -> list[ListItem]:
+    if entity == "study_types":                                  # most studies first; the same number, A to Z
+        return sorted(items, key=lambda item: (-(item.studies or 0), item.label.casefold(), item.label))
     if entity == "seasons":                                      # newest first; a season without a year goes last, A to Z
         def key(item: ListItem):
             years = [int(y) for y in _YEAR.findall(item.label)]
@@ -219,7 +254,7 @@ def _order(entity: str, items: list[ListItem]) -> list[ListItem]:
 def build(request: ListRequest, metadata: Any, tables: dict[str, CatalogTable]) -> CatalogList:
     """The whole list from the catalog, then only the names containing the word (ignoring case; the name alone, not an ID)."""
     make = {"traits": _traits, "seasons": _seasons, "locations": lambda m: _grouped(m, "location"),
-            "programs": lambda m: _grouped(m, "program")}[request.entity]
+            "programs": lambda m: _grouped(m, "program"), "study_types": _study_types}[request.entity]
     every, unrecorded = make(metadata)
     every = _order(request.entity, every)
     word = (request.word or "").casefold()
@@ -284,7 +319,7 @@ def _example(listing: CatalogList, every: tuple[ListItem, ...]) -> str | None:
 
 
 def _study_notes(listing: CatalogList) -> list[str]:
-    """Locations, seasons and programs come from the study records: what that means, in plain sentences."""
+    """Locations, seasons, programs and study types come from the study records: what that means, in plain sentences."""
     one, many = _NOUNS[listing.request.entity]
     notes = [f"Only {many} named by at least one study are listed."] if listing.total else []
     if listing.unrecorded:

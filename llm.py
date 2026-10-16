@@ -27,6 +27,14 @@ What is here:
 * compact_tool_result — the summary a tool result becomes for the model: always
   valid JSON, with explicit "..._omitted" counts and the artifact/request
   handles kept. JSON text is never sliced at a character limit.
+* Repeats (repeat_guard; the Retriever's ApprovedTools is one): an exact repeat
+  of a fetch or catalog export that already saved a complete table is not sent
+  again and uses no fetch; the model is told the table is saved. The second
+  repeat for the same table ends the loop, once the other calls of that model
+  turn have run, as completed, with the final answer written by code from tool
+  results (never from the model's words); the caller's own checks still decide
+  whether the retrieval is complete. Run 20261016T150345 asked for
+  the same 140-row table six times, until the fetch budget stopped the run.
 * --smoke --mock-model: a fake model asks add(2,3), receives 5, answers.
   --smoke --local: the same round trip with the configured local model (never
   BrAPI). Not run automatically.
@@ -75,9 +83,12 @@ __all__ = [
     "ToolCallRequest", "ModelReply", "ModelProviderError", "ModelClient", "OpenAICompatibleClient", "FakeModelClient",
     "reply_text", "reply_tools", "normalize_openai_response",
     "Budget", "compact_tool_result", "run_agent_loop", "FETCH_TOOLS", "DEFAULT_MAX_TOKENS", "SmokeTools", "mock_smoke_model", "smoke", "main",
+    "RepeatGuard", "MAX_REPEATS", "REPEAT_ENDED",
 ]
 
 FETCH_TOOLS = frozenset({"get_observations", "get_observation_units"})   # the expensive, approval-guarded tools
+MAX_REPEATS = 2                  # exact repeats for one saved table: the first is answered "already saved", the second ends the loop
+REPEAT_ENDED = "repeated_request"    # the error code recorded when the second repeat ends the loop
 # The most tokens ONE reply may use, thinking included. A reasoning model writes its thinking as tokens that count here although
 # nobody sees them: on 2026-09-28, at 2048, a planner reply was cut off before its first visible word. This is a limit on what the
 # model may WRITE; how much it can READ is the context window, a setting of the model server (16384 for the evaluation model).
@@ -467,6 +478,16 @@ class ToolInterface(Protocol):
     async def call(self, name: str, args: Mapping[str, Any] | None) -> ToolResult: ...
 
 
+class RepeatGuard(Protocol):
+    """Knows which calls already saved a complete table in this run (agents.retriever.ApprovedTools).
+
+    saved_result: for an exact repeat of such a call, the result the model is shown instead of sending it again; None
+    for anything else. payload_from_evidence: the final answer code writes when the second repeat ends the loop."""
+
+    def saved_result(self, name: str, args: Mapping[str, Any]) -> ToolResult | None: ...
+    def payload_from_evidence(self) -> dict[str, Any]: ...
+
+
 FINAL_ANSWER_INSTRUCTIONS = (
     'When you are done, reply with ONLY a JSON object: {"status": "completed", "payload": {...}} or '
     '{"status": "needs_clarification", "question": "..."}. No prose around it.'
@@ -507,6 +528,7 @@ async def run_agent_loop(
     max_output_chars: int = 20000,
     sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
     jitter: Callable[[], float] = random.random,
+    repeat_guard: RepeatGuard | None = None,
 ) -> AgentResult:
     """Drive one agent to a terminal AgentResult. See the module docstring for the rules."""
     budget.start(clock)
@@ -540,6 +562,7 @@ async def run_agent_loop(
     schemas = await tools.schemas()
     schema_by_name = {s["name"]: s["inputSchema"] for s in schemas}
     model_tools = _to_model_tools([s for s in schemas if allowed_tools is None or s["name"] in allowed_tools])
+    repeats: dict[tuple[str, ...], int] = {}                         # exact repeats per saved table (repeat_guard)
     emit("start", run_id=run_id, tools=[t["function"]["name"] for t in model_tools], budget=dataclass_public(budget),
          max_tokens=max_tokens,                                      # the reply limit this run used, so a log says what actually ran
          reply_limit_param=getattr(getattr(model, "settings", None), "reply_limit_param", "max_tokens"),   # and the field that carried it
@@ -622,6 +645,7 @@ async def run_agent_loop(
                                        "tool_calls": [{"id": c.id, "type": "function",
                                                        "function": {"name": c.name, "arguments": c.arguments_json}}
                                                       for c in reply.tool_calls]})
+                ended = False                                      # a second repeat for one table: ends after this turn
                 for call in reply.tool_calls:                      # sequential: no parallel fetching
                     budget.tool_calls += 1
                     tcorr = f"t{budget.tool_calls}"
@@ -641,6 +665,15 @@ async def run_agent_loop(
                         _append_tool_message(state, call, outcome, tcorr, emit)
                         continue
                     args = outcome
+                    saved = repeat_guard.saved_result(call.name, args) if repeat_guard is not None else None
+                    if saved is not None:                          # an exact repeat of a complete table: not sent again,
+                        key = (call.name, *saved.artifact_ids)     # and no fetch is used
+                        repeats[key] = repeats.get(key, 0) + 1
+                        ended = ended or repeats[key] >= MAX_REPEATS
+                        emit("repeat_not_sent", correlation_id=tcorr, name=call.name, repeat=repeats[key],
+                             artifact_ids=list(saved.artifact_ids))
+                        _append_tool_message(state, call, saved, tcorr, emit)
+                        continue
                     if call.name in FETCH_TOOLS:
                         if budget.fetches >= budget.max_fetches:
                             add_error("budget_exhausted", f"fetch budget ({budget.max_fetches}) reached at {call.name!r}")
@@ -660,6 +693,10 @@ async def run_agent_loop(
                         add_error("tool_transport", str(exc))
                         return finish("failed", None)
                     _append_tool_message(state, call, result, tcorr, emit)
+                if ended:                                          # the second repeat for one table: code ends this step;
+                    add_error(REPEAT_ENDED, f"a complete table this run already saved was asked for again ({max(repeats.values())} "
+                                            "exact repeats of one request, none sent); the fetching step was ended by code")
+                    return finish("completed", repeat_guard.payload_from_evidence())   # the caller's checks decide
                 continue
 
             # no tool calls: this must be the final JSON answer

@@ -8,13 +8,15 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 import json
+from types import SimpleNamespace
 
 import pytest
 from mcp import ClientSession
 
 from synthetic_support import hosted_config, synthetic_models
+import coordination_runtime
 import run as ctl
-from contracts import RunResult
+from contracts import AnalysisReport, Claim, Denominator, RunResult
 from llm import FakeModelClient, reply_text
 
 
@@ -80,6 +82,22 @@ def assert_no_analysis(controller, result, manifest):
     assert manifest["coordination"]["analysis_passes"] == 0
     assert "numeric_summary" not in successful_calls(manifest)
     assert "group_stats" not in successful_calls(manifest)
+
+
+def test_the_coordinators_view_lists_overall_totals_before_per_item_counts():
+    """run_20261016T150253_016a3c (eval baseline q04): 22 per-trait counts, then the total of 22 last. The view keeps 20
+    claims, so the coordinator never saw the total and stopped the run ("Question blocked"). Totals now come first."""
+    def count(number, value, filters):
+        return Claim(claim_id=f"clm_view_{number:02d}", kind="count", value=value, denominator=Denominator(name="variables", n=486),
+                     source_artifact_hashes=["a" * 64], filters=filters, grouping=["observationVariableDbId"],
+                     transformation="frequency of exact text values" if filters else "number of distinct non-empty exact text values")
+    per_trait = [count(n, 1, {"observationVariableDbId": f"7{n:04d}"}) for n in range(22)]
+    controller = SimpleNamespace(plan=None, retrieval=None, data_review={"status": "approved"},
+                                 analysis=AnalysisReport(status="completed", claims=[*per_trait, count(99, 22, {})]),
+                                 supervision={"decisions": [], "plan_revisions": 0, "analysis_passes": 1})
+    view = coordination_runtime._state(controller, "analyzed")["analysis"]
+    assert view["claims"][0]["value"] == 22 and view["claims"][0]["filters"] == {} and view["claims_omitted"] == 3
+    assert [c["claim_id"] for c in view["claims"][1:]] == [c.claim_id for c in per_trait[:19]]   # the rest in their order
 
 
 def test_hosted_entrypoint_opts_into_supervision_and_shared_service_only(tmp_path):

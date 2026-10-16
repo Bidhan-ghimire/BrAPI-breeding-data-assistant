@@ -38,12 +38,19 @@ app's `cache\space_mcp` holds only the catalogs).
 
 ## Reading the results
 
-- **PASS** means the expected value appears in the answer as shown, or as a typed claim of the run:
-  - a count: the number in the answer, or a count claim with that value;
+- **PASS** means the expected value appears in the answer the person sees: the chat's last message for the question, and
+  only its code-written part. What the app marks as model text ("Additional model notes (unverified)" with its bullets,
+  and "Unverified model note: ...") is left out, and numbers recorded inside the run (its typed claims) do not count; they
+  stay in `results.json` for reading. (Eval baseline 20261016T150241Z: q04 passed on a recorded 22 while the person saw
+  "Question blocked"; scored this way, that baseline is 10 of 14.) Only an answer written by code is scored: a run's answer,
+  a list, or a catalog answer. A question that ended with the app asking something, offering a lookup, replying in a
+  model's words, or showing that a run stopped ("Question blocked.", "Incomplete result." ...) showed no answer and fails.
+  Dates and times, such as the catalog's fetch time, are not read as numbers.
+  - a count: the number in the answer;
   - a top location or study type: its name followed by its number of studies;
   - studies per study type: every type with its own count (the first number after its name);
-  - a mean: the number the answer gives right after "pooled mean" (or the first "mean"), rounded at the decimals shown
-    (an integer alone never passes), or an ungrouped mean claim (a clone's mean does not count).
+  - a mean: the number right after "Mean" (as in "Mean: 2.37857"), rounded at the decimals shown; a whole number counts
+    only as the exact value (2 never passes for 2.38).
   Read the "got" column before trusting a pass: a number can still appear for another reason (for example "1 study" in the
   totals line).
 - **FAIL** shows why: the value is missing, the app asked a question, or the run stopped at a step the harness never takes.

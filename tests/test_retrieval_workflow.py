@@ -178,6 +178,39 @@ def retrieval_session(manifest):
     return events
 
 
+def test_repeated_requests_are_not_sent_and_the_run_reaches_the_data_review_with_each_table_once(chat):
+    """Eval baseline q14 (run_20261016T150345_d86d8c): the same complete table was asked for five more times, until the
+    fetch limit stopped the run. Now a repeat is not sent; at the second, code ends the fetching step, and the existing
+    checks accept it because every planned fetch is complete."""
+    observations, log = tool("get_observations", study_db_id="S1", variable_db_id="V1"), tool("request_log", run_id="run_x")
+    chat.retriever = FakeModelClient([observations, tool("get_observation_units", study_db_id="S1"), log, observations, log,
+                                      observations, completed(["S9"])], reported_model="mock-model")
+    history, state, job = start_approved(chat)
+    assert_review_wait(chat, history, state, job)
+    controller = job.controller
+    assert [endpoint for endpoint, _ in chat.server.calls].count("/observations") == 1
+    assert sorted(a.kind for a in controller.retrieval.artifacts) == ["observation_units", "observations"]
+    assert controller.retrieval.status == "completed" and len(chat.retriever.requests) == 6   # its final answer: never asked
+    assert any(note.startswith("retriever: the same complete table was asked for again") for note in controller.notes)
+    history, state = turn(chat, "cancel", history, state)
+    assert "same complete table" not in history[-1]["content"]          # a run note, never a reason shown in the chat
+    result, _ = saved(job)
+    assert result.execution_status == "canceled" and chat.analysis_entries == []
+
+
+def test_after_repeats_the_retrieval_is_accepted_only_if_every_planned_fetch_is_complete(chat):
+    observations = tool("get_observations", study_db_id="S1", variable_db_id="V1")
+    chat.retriever = FakeModelClient([observations, observations, observations], reported_model="mock-model")
+    history, state = turn(chat, QUESTION)
+    job = state["job"]
+    history, state = turn(chat, "approve", history, state)
+    assert "job" not in state and history[-1]["content"].startswith("**Incomplete result.**"), history[-1]
+    result, _ = saved(job)
+    assert result.execution_status == "incomplete" and chat.analysis_entries == []         # the units were never fetched
+    assert any("planned fetches lack complete evidence" in w and "observation units study='S1'" in w
+               for w in result.retrieval.warnings)
+
+
 def test_approve_button_at_review_means_continue_and_does_not_reapprove_fetches(chat):
     history, state, job = start_approved(chat)
     assert_review_wait(chat, history, state, job)

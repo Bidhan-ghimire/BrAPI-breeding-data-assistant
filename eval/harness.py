@@ -13,15 +13,23 @@ What it does, in plain words:
   the data request's approval screen and "continue" at the data review. It never approves a catalog setup, never answers
   a question the app asks, never says "yes" to "look it up?", and never accepts or rejects: at the final review it ends
   the run the way the app ends a waiting run, so the review stays "pending".
-* Compares what the chat showed (and the run's typed claims) with the expected answer, and writes results.json and
-  results.md: question, expected, got, pass or fail, model calls, seconds.
+* Compares the answer the person sees (the chat's last message for the question, its code-written part only) with the
+  expected answer, and writes results.json and results.md: question, expected, got, pass or fail, model calls, seconds.
 * Requests: by default nothing goes to the database. A request for anything not in the cache copy is refused and counted
   (--allow-live lets the app fetch after the scripted approval, as it would in the chat). Models: the app's configured
   model, so a real run is Bidhan's own command with --confirm. Without --confirm the harness only prints what it would
   do. The tests inject scripted models and run it end to end offline.
 
-"pass" means the expected value appears in the answer as shown (a name with its count; a mean as the number given for it),
-or as a typed claim of the run. Read the "got" column before trusting a pass: a number can appear for another reason.
+"pass" means the expected value appears in the answer as the person sees it (a name with its count; a mean as the number
+right after "Mean"). Only the chat's last message for the question counts, and only its code-written part: what the app
+marks as model text ("Additional model notes (unverified)" and its bullets, "Unverified model note: ...") is left out, and
+numbers recorded inside the run (its typed claims) do not count; they stay in results.json for reading. Eval baseline
+20261016T150241Z: q04 passed on a recorded 22 while the person saw "Question blocked". Only an answer written by code is
+scored (a run's answer, a list, a catalog answer): a question that ended with the app asking something, offering a lookup,
+replying in a model's words, or showing that a run stopped ("Question blocked.", "Incomplete result." ...) showed no answer
+and fails. Dates and times, such as the catalog's fetch time "2026-09-28 22:49", are not read as numbers (review,
+2026-10-16: its 22 was q04's expected 22). Read the "got" column before trusting a pass: a number can appear for another
+reason.
 """
 from __future__ import annotations
 
@@ -60,6 +68,19 @@ MISSING = frozenset({"", "NA", "N/A", "NULL", "null", "None", "."})
 _PLAIN_NUMBER = re.compile(r"^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$")
 _NUMBER_IN_TEXT = re.compile(r"(?<![\w.])[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![\w])|(?<![\w.])[+-]?\d+(?:\.\d+)?(?![\w])")
 _MARKDOWN_ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!|>~<])")
+_MODEL_NOTES_HEADING = "Additional model notes (unverified)"    # chat_presenter._limit_blocks: model text, as bullets under it
+_MODEL_NOTE = "Unverified model note:"                         # chat_presenter._caveats: one model note per paragraph
+_MEAN_LABEL = re.compile(r"\bmean\b[ \t:=|]*", re.IGNORECASE)    # "Mean: 2.38", or a table row "| Mean | 2.38 ..."
+_DATE_TIME = re.compile(r"\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?|(?<![\w.:])\d{1,2}:\d{2}(?::\d{2})?(?![\w:])")
+# The first line of an app message that gives no answer (chat_presenter.answer_summary for a run that did not complete;
+# app.render and app.respond when a run stops or cannot start): whatever numbers it carries, it answers nothing.
+NO_ANSWER = ("Incomplete result.", "Could not complete this question", "Question blocked.", "Question canceled.",
+             "More detail is needed.", "A request limit was reached.", "No verified answer is available.", "The run stopped:",
+             "This question cannot run yet:", "This question could not start.")
+# How a question ended when the chat's last message was written by code for it: an answer to score. Anything else (the app
+# asked a question, offered a lookup or replied in a model's words; the run stopped at a step the harness never takes)
+# showed no answer.
+SCORED_ENDINGS = ("final review reached", "run ended", "no run: answered by code from the saved catalog")
 INTEGER_KINDS = ("study_count", "trait_count", "location_count", "studies_with_season", "studies_at_location",
                  "traits_containing", "studies_of_type", "valid_count")
 NAME_KINDS = ("top_location", "top_study_type")
@@ -234,10 +255,47 @@ def plain(markdown: str) -> str:
     return _MARKDOWN_ESCAPE.sub(r"\1", html.unescape(markdown or "")).replace("**", "")
 
 
+def code_written(markdown: str) -> str:
+    """The answer as a reader sees it (plain), without what the app marks as model text: the "Additional model notes
+    (unverified)" heading with the bullet lines under it, and every paragraph that starts "Unverified model note:"."""
+    kept: list[str] = []
+    in_notes = False
+    for line in plain(markdown).split("\n"):        # as chat_presenter writes lines (not splitlines: U+2028 is no new line)
+        text = line.strip()
+        if text == _MODEL_NOTES_HEADING:
+            in_notes = True
+            continue
+        if in_notes and (not text or text.startswith("- ")):
+            continue
+        in_notes = False
+        if not text.startswith(_MODEL_NOTE):
+            kept.append(line)
+    return "\n".join(kept)
+
+
+def no_answer(markdown: str) -> str | None:
+    """The first line of a message that gives no answer (NO_ANSWER), or None. The line app.respond puts first when the run
+    had already ended ("This question had already ended, ...") is passed over: the run's own message follows it."""
+    lines = [line.strip() for line in plain(markdown).split("\n") if line.strip()]
+    if lines and lines[0].startswith("This question had already ended"):
+        lines = lines[1:]
+    first = lines[0] if lines else ""
+    return first if first.startswith(NO_ANSWER) else None
+
+
+def _without_dates(text: str) -> str:
+    """The text with every date and time blanked out (same length): "fetched 2026-09-28" names no season 2026."""
+    return _DATE_TIME.sub(lambda match: " " * len(match.group()), text)
+
+
 def numbers_in(text: str) -> list[tuple[float, int, int, int]]:
-    """Every number in the text: (value, decimals, start, end). "2,039" is 2039; "2.38" has 2 decimals."""
+    """Every number in the text: (value, decimals, start, end). "2,039" is 2039; "2.38" has 2 decimals. A date or a time
+    ("2026-09-28 22:49") is not a number here."""
     found = []
+    dates = [match.span() for match in _DATE_TIME.finditer(text)]
     for match in _NUMBER_IN_TEXT.finditer(text):
+        if any(start <= match.start() and match.end() <= end for start, end in dates):
+            continue
         token = match.group(0).replace(",", "")
         found.append((float(token), len(token.split(".")[1]) if "." in token else 0, match.start(), match.end()))
     return found
@@ -249,12 +307,6 @@ def _around(text: str, start: int, end: int, width: int = 90) -> str:
     return ("…" if left else "") + " ".join(text[left:right].split()) + ("…" if right < len(text) else "")
 
 
-def _claim_values(claims: list[dict[str, Any]], kinds: tuple[str, ...], *, ungrouped: bool = False) -> list[float]:
-    """The values of the run's typed claims of these kinds (ungrouped: not a per-group value such as a clone's mean)."""
-    return [float(c["value"]) for c in claims if c.get("value") is not None and c.get("kind") in kinds
-            and not (ungrouped and c.get("grouping"))]
-
-
 def _first_number_after(text: str, start: int) -> tuple[float, int, int, int] | None:
     """The first number after a position, on the same line."""
     end = text.find("\n", start)
@@ -262,17 +314,20 @@ def _first_number_after(text: str, start: int) -> tuple[float, int, int, int] | 
     return (found[0][0], found[0][1], start + found[0][2], start + found[0][3]) if found else None
 
 
-def compare(kind: str, expected: Any, shown: str, claims: list[dict[str, Any]]) -> tuple[bool, str, str]:
-    """(pass?, why, the part of the answer that shows it) for one answer."""
-    text = plain(shown)
+def compare(kind: str, expected: Any, shown: str) -> tuple[bool, str, str]:
+    """(pass?, why, the part of the answer that shows it) for the answer the person sees: the code-written part of the
+    chat's last message (code_written). Numbers recorded inside the run do not count, nor anything in a message that gives
+    no answer (no_answer)."""
+    stopped = no_answer(shown)
+    if stopped is not None:
+        return False, f"no answer was shown: {stopped}", _around(plain(shown), 0, 0, 200)
+    text = code_written(shown)
     start_of_answer = _around(text, 0, 0, 200)
     if kind in INTEGER_KINDS:
-        if any(v == expected for v in _claim_values(claims, ("count",))):
-            return True, f"a count claim of the run has the value {expected}", start_of_answer
         hits = [(s, e) for v, d, s, e in numbers_in(text) if v == expected]
         if hits:
             return True, f"{expected} appears in the answer", _around(text, *hits[0])
-        return False, f"{expected} appears neither in the answer nor in a claim", start_of_answer
+        return False, f"{expected} does not appear in the answer", start_of_answer
     if kind in NAME_KINDS:                    # the name, with its number of studies as the first number after it
         for name, count in expected.items():
             for at in re.finditer(re.escape(" ".join(name.split())), text, re.IGNORECASE):
@@ -282,7 +337,7 @@ def compare(kind: str, expected: Any, shown: str, claims: list[dict[str, Any]]) 
         return False, "the answer gives none of these with its count: " + "; ".join(f"{n} ({c})" for n, c in expected.items()), \
             start_of_answer
     if kind == "seasons_present":
-        missing = [s for s in expected if not _whole_word(s).search(text)]
+        missing = [s for s in expected if not _whole_word(s).search(_without_dates(text))]
         return (not missing, "every season appears" if not missing
                 else f"{len(missing)} seasons do not appear: " + ", ".join(missing[:10]), start_of_answer)
     if kind == "studies_per_type":
@@ -295,15 +350,19 @@ def compare(kind: str, expected: Any, shown: str, claims: list[dict[str, Any]]) 
         return (not missing, "every study type appears with its count" if not missing
                 else f"{len(missing)} of {len(expected)} study types do not appear with their count: " + ", ".join(missing[:8]),
                 start_of_answer)
-    if kind == "pooled_mean":
-        if any(math.isclose(v, expected, rel_tol=1e-9, abs_tol=1e-9) for v in _claim_values(claims, ("mean",), ungrouped=True)):
-            return True, "an ungrouped mean claim of the run has the expected value", start_of_answer
-        word = re.search(r"\bpooled mean\b", text, re.IGNORECASE) or re.search(r"\bmean\b", text, re.IGNORECASE)
-        after = _first_number_after(text, word.end()) if word else None   # the number the answer gives as that mean
-        if after is not None and after[1] >= 1 and abs(after[0] - expected) <= 0.5 * 10 ** -after[1] + 1e-12:
-            return True, f"the mean given, {after[0]:g}, is the expected value rounded to {after[1]} decimals", \
-                _around(text, word.start(), after[3])
-        return False, f"no ungrouped mean claim, and the mean the answer gives does not round from {expected:.4f}", start_of_answer
+    if kind == "pooled_mean":                 # the number right after "Mean": the first "Mean" that a number follows
+        for label in _MEAN_LABEL.finditer(text):
+            after = _first_number_after(text, label.end())
+            if after is None or after[2] != label.end():
+                continue
+            exact = abs(after[0] - expected) <= 1e-12
+            rounded = after[1] >= 1 and abs(after[0] - expected) <= 0.5 * 10 ** -after[1] + 1e-12
+            where = _around(text, label.start(), after[3])
+            if exact or rounded:              # a whole number counts only as the exact value: 2 is not 2.38 rounded
+                return True, f"the mean given, {after[0]:g}, is the expected value" + (
+                    "" if exact else f" rounded to {after[1]} decimals"), where
+            return False, f"the mean given, {after[0]:g}, does not round from {expected:.4f}", where
+        return False, "the answer gives no number right after \"Mean\"", start_of_answer
     raise ValueError(f"unknown expectation kind {kind!r}")
 
 
@@ -494,7 +553,10 @@ def run_questions(questions: list[dict[str, Any]], *, cache_copy: Path, out_dir:
             seconds = time.monotonic() - started
             threads += outcome.threads
             claims = [c.model_dump(mode="json") for r in outcome.results if r.analysis for c in r.analysis.claims]
-            passed, why, where = compare(q["expect"]["kind"], expected, outcome.shown, claims)
+            if outcome.status.startswith(SCORED_ENDINGS):                                  # the claims are kept, not scored
+                passed, why, where = compare(q["expect"]["kind"], expected, outcome.shown)
+            else:                                     # a question, a lookup offer or a model's reply: no answer to score
+                passed, why, where = False, "no answer was shown to score", _around(plain(outcome.shown), 0, 0, 200)
             run_calls = sum(r.counts.model_calls for r in outcome.results)
             rows.append({**row, "expected": expected, "expected_text": expected_text, "passed": passed, "why": why,
                          "status": outcome.status, "got": where, "answer": outcome.shown[:GOT_CHARS], "typed": outcome.typed,
@@ -531,9 +593,10 @@ def results_markdown(report: dict[str, Any], *, started: str, models: str) -> st
              f"- Models: {models}", f"- Cache copy: `{report['cache_copy']}` (server {report['base_url']}; catalogs fetched "
              f"{', '.join(report['catalog_fetched']) or 'unknown'})", f"- Database requests: {report['requests']}",
              f"- Result: {report['passed']} passed, {report['failed']} failed, {report['skipped']} skipped",
-             "- A pass means the expected value appears in the answer as shown, or as a typed claim of the run; read "
-             "\"got\" before trusting it. The scripted approver typed only \"approve\" (data request) and \"continue\" "
-             "(data review); no answer was accepted.", "",
+             "- A pass means the expected value appears in the answer the person sees (the chat's last message, without "
+             "what the app marks as model notes); numbers recorded inside the run do not count. Read \"got\" before "
+             "trusting it. The scripted approver typed only \"approve\" (data request) and \"continue\" (data review); no "
+             "answer was accepted.", "",
              "| # | Question | Expected | Got | Pass | Model calls | Seconds | How it ended |",
              "|---|---|---|---|---|---|---|---|"]
     for r in report["questions"]:

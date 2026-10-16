@@ -20,6 +20,13 @@ MAX_ANALYSIS_PASSES = 2
 SUPERVISOR_PROMPT = "Answer the coordinator's question before delegation (empty = cancel): "
 
 
+def _overall_first(claims: list[Any]) -> list[Any]:
+    """The claims with overall totals before per-item counts: the fewest filters first, otherwise in their own order. The
+    view below keeps 20 claims; run_20261016T150253_016a3c counted 22 trait names, one count per name and the total last,
+    so the coordinator never saw the total and stopped the run."""
+    return sorted(claims, key=lambda claim: len(claim.filters))
+
+
 def _state(c: Any, stage: str) -> dict[str, Any]:
     """Only bounded evidence summaries; never authority supplied by model text."""
     retrieval = c.retrieval
@@ -36,7 +43,7 @@ def _state(c: Any, stage: str) -> dict[str, Any]:
         "data_review": c.data_review["status"],
         "analysis": None if analysis is None else {
             "status": analysis.status,
-            "claims": [claim.model_dump(mode="json") for claim in analysis.claims[:20]],
+            "claims": [claim.model_dump(mode="json") for claim in _overall_first(analysis.claims)[:20]],
             "claims_omitted": max(0, len(analysis.claims) - 20),
             "caveats": [v[:400] for v in analysis.caveats[:10]],
         },

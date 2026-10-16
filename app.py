@@ -9,12 +9,14 @@ whether any other message starts one; a message that starts nothing is answered
 by a model call that never sees the saved catalog (Step 2c), or by code. A
 message typed while a run waits is
 sorted by conversation.py before anything reaches the run. "list all traits" (and
-locations, seasons, programs) is answered by code from the cached catalog
-(catalog_lists.py): as a short run of its own, or, while a run waits, from that
-run's catalog. The tab remembers its earlier questions (chat_memory.py), so a
-follow-up such as "and in 2025?" continues the last one with its own approval,
-and a question about what the catalog holds is answered from the saved catalog's
-summary (catalog_summary.py) without a run.
+locations, seasons, programs, study types) is answered by code from the cached
+catalog (catalog_lists.py): as a short run of its own, or, while a run waits, from
+that run's catalog; the front door's catalog_list label starts the same short run
+for a question in other words ("Which seasons are in the catalog?"). The tab
+remembers its earlier questions (chat_memory.py), so a follow-up such as "and in
+2025?" continues the last one with its own approval, and a question about what
+the catalog holds is answered from the saved catalog's summary
+(catalog_summary.py) without a run.
 """
 from __future__ import annotations
 
@@ -421,6 +423,12 @@ def _saved_catalog(config_for: Callable[[str], RunConfig], text: str) -> catalog
     return summary
 
 
+def _list_config(make_config: Callable[[str], RunConfig], listing: catalog_lists.ListRequest) -> Callable[[str], RunConfig]:
+    """A list run's settings: the app's own, plus the fixed list (catalog_lists.py). The typed command ("list all seasons")
+    and the front door's catalog_list label (triage.catalog_list_request) start the same run."""
+    return lambda q: dataclasses.replace(make_config(q), catalog_list=listing.entity, catalog_list_word=listing.word)
+
+
 def _memory(state: dict[str, Any]) -> chat_memory.ConversationMemory:
     memory = state.get("memory")
     return memory if isinstance(memory, chat_memory.ConversationMemory) else chat_memory.ConversationMemory()
@@ -597,7 +605,8 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
     get one triage_model call that writes the reply (the line written by code when there is no model or the call fails).
     Every other message, with data words or not, gets that one call with the saved catalog's summary and the tab's earlier
     questions in view, and its label decides (Step 2b): a data question starts a run; a follow-up starts a run that
-    continues the last question; a catalog question, an out-of-scope or an unsure message starts nothing. When the saved
+    continues the last question; a catalog list starts the short list run, once code accepts its list and word (a refused
+    one counts as no decision); a catalog question, an out-of-scope or an unsure message starts nothing. When the saved
     catalog or the earlier questions were in view, the reply to a message that starts nothing (except a catalog question,
     which code answers) comes from a second call that sees neither (Step 2c), or else from code. Without a decision, the
     message starts a run as before. A question that ends is added to the tab's memory. Yields (history, state, box)."""
@@ -665,8 +674,7 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
                 history.append({"role": "assistant", "content": content})
                 yield history, state, ""                                         # no run and no database request
                 return
-        config_for = make_config if listing is None else (           # a list run: the same settings plus the fixed list
-            lambda q: dataclasses.replace(make_config(q), catalog_list=listing.entity, catalog_list_word=listing.word))
+        config_for = make_config if listing is None else _list_config(make_config, listing)   # a list run: plus the list
         if refresh:                                                   # a refresh: a catalog setup run, with its own approval
             config_for = lambda q: dataclasses.replace(make_config(q), catalog_setup_only=True, catalog_refresh=True,
                                                        bootstrap_catalogs=True)
@@ -686,7 +694,12 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
             catalog = _saved_catalog(config_for, text)
             earlier_text = chat_memory.for_model(memory)
             decision = _ask_front_door(text, triage_model, catalog=catalog, earlier=earlier_text)
-            if decision is not None and decision.label not in triage.PIPELINE_LABELS:   # None: no decision, so the run starts
+            listed = triage.catalog_list_request(decision, text)                  # a whole list or one word, checked by code
+            if listed is None and decision is not None and decision.label == "catalog_list":
+                decision = None                                                     # refused fields: as without a decision
+            if listed is not None:                                                  # the list run the typed command starts:
+                config_for = _list_config(make_config, listed)                      # no planner, no model-written answer
+            elif decision is not None and decision.label not in triage.PIPELINE_LABELS:   # None: no decision, so the run starts
                 context = catalog is not None or bool(earlier_text)
                 talk = (_ask_to_talk(text, triage_model, decision.label, history)      # Step 2c: a second call writes the
                         if context and decision.label in triage.TALK_LABELS else None)  # reply without those facts in view

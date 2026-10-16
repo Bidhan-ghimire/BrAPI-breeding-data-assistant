@@ -766,3 +766,65 @@ def test_greetings_and_app_questions_keep_the_rules_label_and_never_read_the_cat
         assert f"already sorted this message as {label}" in prompt and "Saved catalog" not in prompt
         assert "- catalog_question:" not in prompt and "Earlier questions in this chat" not in prompt
     assert no_runs == [] and chat.requests == []
+
+
+# --------------------------------------------------------------------------
+# catalog_list: a whole list, or the names with one word (eval baseline 20261016T150241Z: q04, q05, q06)
+# --------------------------------------------------------------------------
+
+def list_decision(entity, word="") -> str:
+    return json.dumps({"label": "catalog_list", "reason": "scripted for this test", "reply": "", "list": entity, "word": word})
+
+
+@pytest.mark.parametrize("catalog", ["", "Saved catalog of front-door.invalid (a synthetic summary)."], ids=["without", "with"])
+def test_the_catalog_list_label_is_offered_with_or_without_the_saved_catalog(catalog):
+    prompt = " ".join(triage.front_door_prompt(source="front-door.invalid", reference=REFERENCE, catalog=catalog).split())
+    for words in (" ".join(triage.CATALOG_LIST_LABEL.split()), 'For catalog_list, add "list" and "word" to that object',
+                  '"which seasons are in the catalog?"', '"how many studies are there of each study type?"',
+                  '"how many trait names contain the word yield?"',
+                  'one of "traits", "locations", "seasons", "programs" or "study types"',
+                  "A list for a particular study, place, season or program, or with two or more words to match, is data_question"):
+        assert words in prompt
+    if catalog:                                         # the catalog label sends whole lists to catalog_list
+        assert "A whole list, or the names that contain a word, is catalog_list" in prompt
+    else:                                               # its reply is never shown: the app writes the list
+        assert "leave it empty for data_question and follow_up, and for catalog_list" in prompt
+
+
+@pytest.mark.parametrize("message, entity, word, expected", [
+    ("Which seasons are in the catalog?", "seasons", "", ("seasons", None)),
+    ("How many studies are there of each study type?", "study types", "", ("study_types", None)),
+    ("How many trait names contain the word yield?", "traits", "yield", ("traits", "yield")),
+    ("How many trait names contain the word YIELD?", " Traits ", "Yield", ("traits", "yield")),     # case and spaces ignored
+    ("Which locations have dry-matter in the name?", "locations", "dry-matter", ("locations", "dry-matter")),
+    ("How many trait names contain the word yield?", "traits", "potato", None),     # not in the person's words (coach)
+    ("How many trait names contain the word yield?", "traits", "yiel", None),       # only part of a word
+    ("How many traits mention yields?", "traits", "yield", None),                   # the message says "yields"
+    ("How many trait names contain root yield?", "traits", "root yield", None),     # two words
+    ("How many trait names contain the word yield?", "traits", "yield?", None),     # not one word as a typed command reads one
+    ("Which studies are in the catalog?", "studies", "", None),                     # not one of the five lists
+    ("Which seasons are in the catalog?", "", "", None),                            # no list named
+    ("Which study types are there?", "study_type", "", ("study_types", None)),       # singular, underscore
+    ("How many traits contain dry-matter?", "traits", "dry", None),                 # a part of the person's word (review)
+    ("Which locations contain n.c. in the name?", "locations", "n", None),          # ... nor a letter of "n.c."
+    ("Which locations contain n.c. in the name?", "locations", "n.c", ("locations", "n.c")),   # as the typed command reads it
+    ("How many traits mention yıeld?", "traits", "yield", None),                    # a dotless ı is not an i
+    ("How many trait names contain " + "İ" * 31 + "?", "traits", "İ" * 31, None),   # 62 characters once in lower case
+    ("Which locations contain O’Brien?", "locations", "O’Brien", ("locations", "o'brien")),   # a curly apostrophe, as typed
+], ids=["seasons", "study-types", "trait-names-with-yield", "case-and-spaces", "a-word-with-a-hyphen", "word-not-in-the-message",
+        "part-of-a-word", "plural-in-the-message", "two-words", "not-one-word", "not-a-list", "no-list", "singular-underscore",
+        "part-of-a-hyphenated-word", "a-letter-of-n.c.", "n.c-as-typed", "dotless-i", "too-long-in-lower-case", "curly-apostrophe"])
+def test_the_list_and_the_word_of_a_catalog_list_decision_are_checked_by_code(message, entity, word, expected):
+    decision = triage.parse_decision(reply_text(list_decision(entity, word)))
+    assert decision is not None and decision.label == "catalog_list"
+    request = triage.catalog_list_request(decision, message)
+    assert (None if request is None else (request.entity, request.word)) == expected
+
+
+def test_list_fields_count_only_for_catalog_list_and_may_be_null_elsewhere():
+    unsure = triage.parse_decision(reply_text(json.dumps({"label": "unsure", "reason": "x", "reply": "", "list": "traits",
+                                                          "word": "yield"})))
+    assert unsure is not None and triage.catalog_list_request(unsure, "list traits with yield") is None
+    nulls = triage.parse_decision(reply_text(json.dumps({"label": "data_question", "reason": "x", "reply": "", "list": None,
+                                                         "word": None})))
+    assert nulls is not None and nulls.label == "data_question" and triage.catalog_list_request(None, "anything") is None

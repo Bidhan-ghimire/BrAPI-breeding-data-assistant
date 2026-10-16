@@ -51,7 +51,7 @@ from contracts import (
     dump_json,
 )
 from access_policy import ACCESS_NOTES_PATH, access_notes_review_date
-from llm import Budget, ModelClient, compact_tool_result, run_agent_loop
+from llm import REPEAT_ENDED, Budget, ModelClient, compact_tool_result, run_agent_loop
 from mcp_bridge import BridgeError, McpTools
 from artifacts import ArtifactError
 from plan_permissions import endpoint_families_for_plan
@@ -133,7 +133,7 @@ class RunConfig:
     agent_led: bool = True
     unified_mcp: bool = True
     max_supervisor_turns: int = 8
-    catalog_list: str | None = None        # "traits", "locations", "seasons" or "programs": a fixed list (catalog_lists.py), no planner
+    catalog_list: str | None = None        # one of catalog_lists.ENTITIES ("traits" ... "study_types"): a fixed list, no planner
     catalog_list_word: str | None = None   # keep only the names that contain this word, ignoring case
     follow_up_of: str | None = None        # a follow-up (chat memory, Step 2b): the earlier run it continues (or the app's
                                            # note for a catalog answer, which had no run), for the record
@@ -1224,8 +1224,14 @@ class Controller:
                 while True:
                     agent = await run_agent_loop(model, tools, agent_name="retriever", system_prompt=RETRIEVER_SYSTEM_PROMPT,
                                                 user_message=request, budget=self.budget, allowed_tools=set(RETRIEVER_TOOLS),
-                                                log_dir=self.run_dir.parent, run_id=self.run_id, model_requested=self.models.requested)
+                                                log_dir=self.run_dir.parent, run_id=self.run_id, model_requested=self.models.requested,
+                                                repeat_guard=tools)
                     self.agents.append(agent)
+                    if any(error.code == REPEAT_ENDED for error in agent.errors):
+                        self.notes.append("retriever: the same complete table was asked for again; code answered each repeat "
+                                          "from the saved table and ended the fetching step, writing the Retriever's answer "
+                                          "from the approved plan as confirmed by tool results")   # no failure word: never
+                                                                                                  # a reason in the chat
                     if agent.status != "needs_clarification":
                         break
                     question = (agent.payload or {}).get("question")

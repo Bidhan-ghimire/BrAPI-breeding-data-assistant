@@ -3,6 +3,10 @@
 The controller owns approval and shared MCP sessions. ApprovedTools checks each
 requested tool against that permission, and build_report records only evidence
 returned by the tools. Explicit model-script loading remains for offline tests.
+ApprovedTools is also the loop's repeat guard (llm.RepeatGuard): an exact repeat
+of a fetch or catalog export that already saved a complete table is not sent
+again, and when the loop ends at the second repeat for one table, the Retriever's
+answer is written from the approved plan as confirmed by tool results.
 """
 from __future__ import annotations
 
@@ -39,6 +43,12 @@ __all__ = [
 ]
 
 FIXTURE_DIR = PART2_DIR / "tests" / "fixtures" / "model_retriever"
+
+# The tools that save a table: an exact repeat of one that saved a complete table is not sent again (ApprovedTools.saved_result).
+TABLE_TOOLS = FETCH_TOOLS | {"export_metadata"}
+REPEAT_NOTE = ("This exact request already returned a complete table in this run (its artifact_ids are above). It was not sent "
+               "again and used no fetch. Do not ask for it again: use that table, fetch only what the approved plan still "
+               "needs, then finish with your final JSON answer.")
 
 # The Retriever's tool menu. No analysis tools; request_log is for evidence.
 RETRIEVER_TOOLS = frozenset({
@@ -182,6 +192,50 @@ class ApprovedTools:
                         label = row.get(_LABEL_KEYS[kind])
                         self.seen[kind].setdefault(value, label if isinstance(label, str) else None)
 
+    def _complete_tables(self, record: ToolRecord) -> list[str]:
+        """The complete, registered tables a dispatched call saved; [] for a failed, blocked or incomplete call."""
+        if record.blocked_here or not record.result.ok or record.result.complete is not True:
+            return []
+        registered = set(self.ctx.registry.artifact_ids())
+        return [a for a in record.result.artifact_ids if a in registered and self.ctx.registry.manifest(a).complete]
+
+    def saved_result(self, name: str, args: Mapping[str, Any]) -> ToolResult | None:
+        """For an exact repeat (the same tool, the same arguments) of a fetch or catalog export that already saved a complete
+        table in this run: what the model is shown instead of sending it again. None for anything else: another tool,
+        other arguments, or a repeat of an attempt that failed, was blocked or saved no complete table."""
+        key = _call_key(name, args)
+        if key is None:
+            return None
+        for record in self.records:
+            if record.name == name and _call_key(name, record.args) == key:
+                saved = self._complete_tables(record)
+                if saved:
+                    return ToolResult(ok=True, complete=True, artifact_ids=saved,
+                                      data={"not_sent_again": True, "note": REPEAT_NOTE})
+        return None
+
+    def payload_from_evidence(self) -> dict[str, Any]:
+        """The Retriever's final answer when code ends the fetching step (llm.MAX_REPEATS), written from the approved
+        studies and variables that a complete fetch of this run confirms, never from the model's words: "studies" holds
+        those whose observations were fetched (as the prompt asks), "resolved" those the tool results also returned.
+        build_report still checks it all."""
+        confirmed: list[str] = []
+        studies: list[str] = []
+        variables: list[str] = []
+        for record in self.records:
+            study, variable = record.args.get("study_db_id"), record.args.get("variable_db_id")
+            if (record.name not in FETCH_TOOLS or not self._complete_tables(record) or self.approval is None
+                    or not isinstance(study, str) or not self.approval.allows_study(study)):
+                continue
+            confirmed.append(study)
+            if record.name == "get_observations":
+                studies.append(study)
+                if isinstance(variable, str) and self.approval.allows_variable(variable):
+                    variables.append(variable)
+        resolved = ([{"kind": "study", "id": s} for s in dict.fromkeys(confirmed) if s in self.seen["study"]]
+                    + [{"kind": "variable", "id": v} for v in dict.fromkeys(variables) if v in self.seen["variable"]])
+        return {"resolved": resolved, "studies": list(dict.fromkeys(studies)), "notes": []}
+
     @property
     def request_ids(self) -> list[str]:
         out: list[str] = []
@@ -220,7 +274,7 @@ async def run_retriever(
         agent = await run_agent_loop(
             model, tools, agent_name="retriever", system_prompt=RETRIEVER_SYSTEM_PROMPT, user_message=request,
             budget=budget, allowed_tools=set(RETRIEVER_TOOLS), log_dir=log_dir, run_id=run_id,
-            model_requested=model_requested,
+            model_requested=model_requested, repeat_guard=tools,
         )
     report = build_report(agent, tools, ctx, expects_observations=expects_observations)
     return report, agent
@@ -277,6 +331,19 @@ def _missing_planned_fetches(tools: ApprovedTools, ctx: ToolContext, *,
     missing = [f"observations study={s!r}, variable={v!r}" for s, v in missing_pairs]
     missing.extend(f"observation units study={s!r}" for s in missing_units)
     return missing
+
+
+def _call_key(name: str, args: Mapping[str, Any]) -> str | None:
+    """How a table-saving call is compared for a repeat: an export by its validated arguments (catalog_export_key), a fetch
+    by its arguments exactly as given. None for any other tool, or an export whose arguments do not validate."""
+    if name not in TABLE_TOOLS:
+        return None
+    if name == "export_metadata":
+        try:
+            return catalog_export_key(args)
+        except ValidationError:
+            return None
+    return json.dumps(dict(args), sort_keys=True, default=str)
 
 
 def catalog_export_key(args: Mapping[str, Any]) -> str:
