@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 
 from agents.analyst import AnalysisInput, registry_prefix, run_analyst
 from agents.coordinator import (
+    FOLLOW_UP_LABEL,
     WHOLE_SET_WORDS,
     CoordinatorResult,
     KnownMetadata,
@@ -65,7 +66,7 @@ __all__ = [
     "RunConfig", "Models", "Controller", "EXIT_CODES", "build_approval",
     "scope_mismatches", "CLARIFY_PROMPT", "ANALYST_PROMPT", "analyst_questions",
     "RETRIEVER_PROMPT", "DATA_REVIEW_PROMPT", "scope_needs_a_check", "readable_answer", "required_fetches", "plan_too_wide", "CATALOG_PROMPT",
-    "approval_lead", "source_host",
+    "approval_lead", "source_host", "carried_over_line",
 ]
 
 EXIT_CODES = {"completed": 0, "incomplete": 1, "failed": 1, "limit_reached": 1, "blocked": 3, "needs_clarification": 3, "canceled": 130}
@@ -111,6 +112,9 @@ class RunConfig:
     max_supervisor_turns: int = 8
     catalog_list: str | None = None        # "traits", "locations", "seasons" or "programs": a fixed list (catalog_lists.py), no planner
     catalog_list_word: str | None = None   # keep only the names that contain this word, ignoring case
+    follow_up_of: str | None = None        # a follow-up (chat memory, Step 2b): the earlier run it continues (or the app's
+                                           # note for a catalog answer, which had no run), for the record
+    carried_over: str | None = None        # ... and that run's question, which this question starts with (carried_over_line)
 
     @property
     def uses_memory_mcp(self) -> bool:
@@ -145,6 +149,10 @@ class RunConfig:
         if self.max_http_attempts < 1:
             problems.append("max_http_attempts must be at least 1")
         problems.extend(catalog_lists.config_problems(self.catalog_list, self.catalog_list_word))
+        if (self.follow_up_of is None) != (self.carried_over is None):
+            problems.append("follow_up_of and carried_over are set together")
+        elif self.carried_over is not None and not self.question.startswith(self.carried_over + FOLLOW_UP_LABEL):
+            problems.append("a follow-up question must start with the question it carries over")
         return problems
 
     def _live_problems(self) -> list[str]:
@@ -192,6 +200,23 @@ def is_approval_revision(answer: str) -> bool:
     ids = normalized.replace(",", " ").split()
     return bool(ids) and all(any(char.isdigit() for char in item)
                              and all(char.isalnum() or char in "_-" for char in item) for item in ids)
+
+
+CARRIED_OVER_CHARS = 300          # the most of the earlier question quoted on a follow-up's approval screen
+
+
+def carried_over_line(config: RunConfig) -> str | None:
+    """A follow-up's approval screen says, in words written by code, what was carried over from the earlier question (the
+    person's words only) and that nothing from the earlier approval is reused. None for any other question."""
+    carried = getattr(config, "carried_over", None)
+    if not carried:
+        return None
+    earlier = " ".join(person_words(carried).split())
+    if len(earlier) > CARRIED_OVER_CHARS:                         # the start and the newest end (a chain of follow-ups)
+        head = CARRIED_OVER_CHARS * 2 // 5
+        earlier = f"{earlier[:head].rstrip()} … {earlier[len(earlier) - (CARRIED_OVER_CHARS - head - 3):].lstrip()}"
+    return (f"Carried over from your earlier question: “{earlier}”. Your follow-up was added to it. This plan needs its own "
+            "approval: nothing from the earlier approval is reused.")
 
 
 def analyst_questions(report: AnalysisReport | None) -> list[str]:
@@ -893,6 +918,8 @@ class Controller:
             approval_lead(self.manifest, self.plan), "",
             "=" * 72, "APPROVAL NEEDED - no observation data has been fetched yet", "=" * 72,
             f"question       : {self.config.question}",
+            *([f"carried over   : {carried_over_line(self.config)} (earlier: {self.config.follow_up_of})"]
+              if self.config.carried_over else []),
             f"database access: {', '.join(self.manifest.endpoint_families)}",
             f"interpretation : {self.plan.interpretation}",
             f"plan scope     : {scope_text}",

@@ -297,7 +297,7 @@ def test_at_the_planners_trait_question_the_hint_works_and_the_run_keeps_waiting
     assert content.startswith("**Trait names containing “yield”: 12 of 46.** A to Z:") and SAVED_SOURCE in content
     assert content.endswith("I'm still waiting for your answer to my question (or reply **cancel**): “Which trait is meant?”")
     assert state["job"] is job and job.waiting_on == ctl.CLARIFY_PROMPT and job.controller.clarification_answers == 0
-    assert lists.front_door == [] and len(models.planner.requests) == 1          # the list asked no model
+    assert lists.front_door == [1] and len(models.planner.requests) == 1          # the question asked the front door once; the list asked no model
     history, state = lists.turn("list all traits", history, state, models_=models)
     assert "- … and 16 more." in history[-1]["content"] and "Full report" not in history[-1]["content"]   # this run's report is not a list
     history, state = lists.turn("cancel", history, state, models_=models)

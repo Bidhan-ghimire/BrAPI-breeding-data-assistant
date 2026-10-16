@@ -10,7 +10,7 @@ from typing import Any
 from contracts import Claim
 from metadata_answers import render_metadata_facts
 from agents.coordinator import person_words
-from run import approval_lead, required_fetches, scope_needs_a_check
+from run import approval_lead, carried_over_line, required_fetches, scope_needs_a_check
 
 
 LIST_LIMIT = 30
@@ -442,7 +442,11 @@ def approval_summary(controller: Any) -> str:
     studies = {study.study_id: study for study in (getattr(metadata, "studies", []) or [])}
     variables = {variable.variable_id: variable for variable in (getattr(metadata, "variables", []) or [])}
     pairs, units = required_fetches(plan, manifest)
-    lines = [_text(approval_lead(manifest, plan)), "", "**Review this plan before approving**", "", f"Source: {_text(manifest.base_url)}."]
+    lines = [_text(approval_lead(manifest, plan)), ""]
+    carried = carried_over_line(controller.config)               # a follow-up: what was carried over, written by code
+    if carried:
+        lines += [_text(carried), ""]
+    lines += ["**Review this plan before approving**", "", f"Source: {_text(manifest.base_url)}."]
     if manifest.origin == "snapshot":
         lines += ["Uses an offline snapshot; no live requests."]
     else:

@@ -27,7 +27,10 @@ def faq_items(source_details: str, *, data_sharing_policy: str = "") -> list[tup
          "It provides descriptive results such as counts, means and missing-data summaries. "
          "It does not make parental-selection or line-advancement recommendations. "
          "Greetings and questions about the app that it recognizes are answered right away, without a database request. "
-         "A question about breeding data starts a request, and nothing is fetched until you approve."),
+         "A question about what the saved catalog holds, such as 'tell me about Florida', may be answered from it right away. "
+         "A question about breeding data starts a request, and nothing is fetched until you approve. "
+         "A short follow-up such as 'and in 2025?' continues your last question: the approval screen says what was carried "
+         "over, and the follow-up needs its own approval. **New question** clears what the chat remembers."),
         ("Where do the data come from?", source_details),
         ("What makes a good question?",
          "Ask about one clear task at a time. Use a study name or ID and the exact trait name when you know them. "

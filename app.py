@@ -4,11 +4,15 @@ app_space.py selects agent-led coordination, the shared MCP service, and human
 review before retrieval and analysis. Each browser session has its own run;
 the Full report retains sources, calculations, answers and review decisions.
 A new message first passes the front door (triage.py): greetings and questions
-about the app are answered without starting a run. A message typed while a run
-waits is sorted by conversation.py before anything reaches the run. "list all
-traits" (and locations, seasons, programs) is answered by code from the cached
-catalog (catalog_lists.py): as a short run of its own, or, while a run waits,
-from that run's catalog.
+about the app are answered without starting a run, and the model's label decides
+whether any other message starts one. A message typed while a run waits is
+sorted by conversation.py before anything reaches the run. "list all traits" (and
+locations, seasons, programs) is answered by code from the cached catalog
+(catalog_lists.py): as a short run of its own, or, while a run waits, from that
+run's catalog. The tab remembers its earlier questions (chat_memory.py), so a
+follow-up such as "and in 2025?" continues the last one with its own approval,
+and a question about what the catalog holds is answered from the saved catalog's
+summary (catalog_summary.py) without a run.
 """
 from __future__ import annotations
 
@@ -23,6 +27,8 @@ from typing import Any, Callable, Iterator, Mapping
 from urllib.parse import urlsplit
 
 import catalog_lists
+import catalog_summary
+import chat_memory
 import conversation
 import triage
 from app_style import CSS, HERO_HTML, build_theme
@@ -306,14 +312,64 @@ def _source_name() -> str:
         return "the breeding database"
 
 
-def _ask_front_door(text: str, triage_model: Callable[[], Any], known_label: str | None = None) -> triage.TriageDecision | None:
+def _ask_front_door(text: str, triage_model: Callable[[], Any], known_label: str | None = None, *,
+                    catalog: catalog_summary.CatalogSummary | None = None, earlier: str = "") -> triage.TriageDecision | None:
     return triage.ask_model(text, triage_model, source=_source_name(), reference=triage.reference_text(_faq()),
-                            known_label=known_label)
+                            known_label=known_label, catalog=catalog.for_message(text) if catalog is not None else "",
+                            earlier=earlier)
 
 
-def _reply_without_run(label: str, topic: str | None, text: str, model_text: str,
-                       state: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """The answer to a message that starts nothing, and the tab's state after it. It only returns text: no run, no request."""
+def _saved_catalog(config_for: Callable[[str], RunConfig], text: str) -> catalog_summary.CatalogSummary | None:
+    """The saved catalog's summary for the front-door model: read from the cache a run would use (nothing is requested)."""
+    try:
+        return catalog_summary.from_cache(config_for(text))
+    except Exception:  # a bad setting only means no summary; the message is still sorted
+        return None
+
+
+def _memory(state: dict[str, Any]) -> chat_memory.ConversationMemory:
+    memory = state.get("memory")
+    return memory if isinstance(memory, chat_memory.ConversationMemory) else chat_memory.ConversationMemory()
+
+
+def _remember(state: dict[str, Any], job: Job, *, status: str, acceptance: str) -> dict[str, Any]:
+    """Add the question that just ended to the tab's memory (chat_memory.py). A run that cannot be summarized is not
+    remembered: memory is a convenience, never a reason to fail a turn."""
+    try:
+        turn = chat_memory.past_turn(job.controller, status=status, acceptance=acceptance)
+    except Exception:  # noqa: BLE001
+        return state
+    return {**state, "memory": _memory(state).add(turn)}
+
+
+def _remember_result(state: dict[str, Any], job: Job, event: tuple[str, Any]) -> dict[str, Any]:
+    kind, result = event
+    if kind != "done":
+        return state
+    return _remember(state, job, status=str(getattr(result, "execution_status", "unknown")),
+                     acceptance=str(getattr(result, "human_acceptance", "pending")))
+
+
+KEPT_FOR_A_NEW_QUESTION = ("guide_shown", "memory")    # what a new question keeps of the tab's state
+CATALOG_ANSWER_ID = "a catalog answer, no run"         # a remembered catalog answer has no run ID
+
+
+def _reply_without_run(label: str, topic: str | None, text: str, model_text: str, state: dict[str, Any], *,
+                       catalog: catalog_summary.CatalogSummary | None = None, context: bool = False) -> tuple[str, dict[str, Any]]:
+    """The answer to a message that starts nothing, and the tab's state after it. It only returns text: no run, no request.
+    A catalog question is answered by code from the saved catalog (CatalogSummary.answer; the model's text is not used) and
+    remembered, so a follow-up can continue it; without a saved catalog the person is asked whether to look it up, as for
+    unsure. context: the saved catalog or the earlier questions were in the prompt, so the model's reply is not shown under
+    any label: the line written by code for the label is (no count, place or name in the chat is the model's)."""
+    if label == "catalog_question":
+        if catalog is not None:
+            turn = chat_memory.PastTurn(question=text, run_id=CATALOG_ANSWER_ID, status="answered from the saved catalog by code",
+                                        acceptance="not asked", scope=None, answer=catalog.mentions_line(text),
+                                        kind="catalog_answer")
+            return catalog.answer(text), {**state, "memory": _memory(state).add(turn)}
+        label, model_text = "unsure", ""
+    if context:
+        model_text = ""
     show_guide = label == "greeting_or_smalltalk" and not state.get("guide_shown")     # "Questions to try" once per tab
     content = triage.front_door_reply(label, model_text, text=text, topic=topic, faq=_faq(), source=_source_name(),
                                       show_guide=show_guide)
@@ -434,11 +490,14 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
     go to the run; a catalog list ("list all traits") is shown from the run's own catalog; any other message gets one
     triage_model call that labels it, and only an answer to the waiting question reaches the run (a side question or an
     out-of-scope message is answered while the run keeps waiting; a new data question asks drop or keep; without a
-    decision the message goes to the run as before). A new message passes the front door: a catalog list starts a short list run (catalog_lists.py: no
-    rule, model or planner); otherwise triage.py sorts it. A data question starts a run; greetings, app questions,
-    out-of-scope and unsure messages start nothing and get one triage_model call that writes the reply (the line written by
-    code when there is no model or the call fails). A message the rules cannot place is sorted by that same call; without a decision it
-    starts a run as before. Yields (history, state, box)."""
+    decision the message goes to the run as before). A new message passes the front door: a catalog list starts a short
+    list run (catalog_lists.py: no rule, model or planner); greetings and app questions found by the rules start nothing and
+    get one triage_model call that writes the reply (the line written by code when there is no model or the call fails).
+    Every other message, with data words or not, gets that one call with the saved catalog's summary and the tab's earlier
+    questions in view, and its label decides (Step 2b): a data question starts a run; a follow-up starts a run that
+    continues the last question; a catalog question, an out-of-scope or an unsure message starts nothing. Without a
+    decision, the message starts a run as before. A question that ends is added to the tab's memory. Yields
+    (history, state, box)."""
     text = (message or "").strip()
     if not text:
         yield history, state, ""
@@ -447,10 +506,12 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
     job: Job | None = state.get("job")
     working = False                          # the progress line is already shown (while the front door asked the model)
     if job is not None and _run_has_ended(job):                                    # it ended while the chat went on
-        content, _ = render(job, job.next_event(timeout=5))
+        event = job.next_event(timeout=5)
+        content, _ = render(job, event)
         history.append({"role": "assistant", "content": "This question had already ended, so your message was not sent to it.\n\n"
                         + content})
         state = {**_without(state, "job", *OPEN_QUESTIONS), "full_report": job.controller.answer_markdown()}
+        state = _remember_result(state, job, event)
         yield history, state, ""
         return
     if job is not None:
@@ -469,9 +530,11 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
             yield history, state, ""
             return
         if route == "drop":
+            state = _remember(state, job, status="dropped for a new question",
+                              acceptance=str(getattr(job.controller, "acceptance", "pending")))
             job.close()                                                            # the waiting run ends and is recorded ...
             job, text = None, payload                                              # ... and the new question starts below
-            state = {k: v for k, v in state.items() if k == "guide_shown"}
+            state = {k: v for k, v in state.items() if k in KEPT_FOR_A_NEW_QUESTION}
         else:
             job.reply(payload)                                                     # the person's own words, or the exact word
     if job is None:
@@ -505,16 +568,26 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
             history.append({"role": "assistant", "content": "This question cannot run yet:\n" + "\n".join(f"- {p}" for p in problems)})
             yield history, state, ""
             return
-        if by_rules is None and listing is None and not from_pending and triage_model is not None:  # the rules could not tell
-            history.append({"role": "assistant", "content": WORKING})
+        if listing is None and not from_pending and triage_model is not None:   # data words, or the rules could not tell:
+            history.append({"role": "assistant", "content": WORKING})            # the model's label decides (Step 2b)
             working = True
             yield history, state, ""
-            decision = _ask_front_door(text, triage_model)                       # None: no decision, so the run starts
-            if decision is not None and decision.label not in triage.PIPELINE_LABELS:
-                content, state = _reply_without_run(decision.label, None, text, decision.reply, state)
+            memory = _memory(state)
+            catalog = _saved_catalog(config_for, text)
+            earlier_text = chat_memory.for_model(memory)
+            decision = _ask_front_door(text, triage_model, catalog=catalog, earlier=earlier_text)
+            if decision is not None and decision.label not in triage.PIPELINE_LABELS:   # None: no decision, so the run starts
+                content, state = _reply_without_run(decision.label, None, text, decision.reply, state, catalog=catalog,
+                                                    context=catalog is not None or bool(earlier_text))
                 history[-1] = {"role": "assistant", "content": content}
                 yield history, state, ""
                 return
+            earlier = memory.last
+            if (decision is not None and decision.label == "follow_up" and earlier is not None
+                    and earlier.continuable):                                    # continue the last question (not a list)
+                question = chat_memory.follow_up_question(earlier, text)
+                plain = config_for
+                config_for = lambda q: dataclasses.replace(plain(q), follow_up_of=earlier.run_id, carried_over=earlier.question)
         try:
             job = Job(question, make_config=config_for, make_models=make_models).start()
         except Exception:
@@ -525,11 +598,12 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
                 history.append(failed)
             yield history, state, ""
             return
-        state = {"job": job, **{k: state[k] for k in ("guide_shown",) if k in state}}   # a new question clears the old report
+        state = {"job": job, **{k: state[k] for k in KEPT_FOR_A_NEW_QUESTION if k in state}}   # it clears the old report
     if not working:
         history.append({"role": "assistant", "content": WORKING})
     yield history, state, ""
-    content, finished = render(job, job.next_event())
+    event = job.next_event()
+    content, finished = render(job, event)
     history[-1] = {"role": "assistant", "content": content}
     if job.answer_shown or finished:
         state = {**state, "full_report": job.controller.answer_markdown()}
@@ -541,7 +615,7 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
     elif job.waiting_on == DATA_REVIEW_PROMPT:
         state = {**state, "full_report": job.controller.data_review_screen()}
     if finished:
-        state = {k: v for k, v in state.items() if k != "job"}
+        state = _remember_result({k: v for k, v in state.items() if k != "job"}, job, event)
     yield history, state, ""
 
 
@@ -617,8 +691,8 @@ def after_step(state: dict[str, Any] | None):
 
 
 def start_over(state: dict[str, Any] | None) -> tuple[list[Message], dict[str, Any], str]:
-    """New question: a run that waits for a reply is ended (cancel; it is still recorded) and the chat is cleared.
-    The tab keeps only one thing: that it has already shown the example questions (once per tab)."""
+    """New question: a run that waits for a reply is ended (cancel; it is still recorded) and the chat is cleared, and so is
+    the tab's memory of earlier questions. The tab keeps only one thing: that it has already shown the example questions."""
     _close_job(state or {})
     return [], {k: v for k, v in (state or {}).items() if k == "guide_shown"}, ""
 

@@ -286,7 +286,7 @@ def test_a_side_question_at_the_planners_question_leaves_the_run_waiting(live):
     """2026-10-15: "what's your name?" typed at the planner's question became clarification answer 1. Now it is answered, the
     question is repeated, and only the real answer is added to the question."""
     server, kwargs, tmp_path = live
-    model, factory = front_door_model("side_question", "answer_to_pending")
+    model, factory = front_door_model("data_question", "side_question", "answer_to_pending")   # the front door's label first
     kw = {**kwargs, "triage_model": factory}
     history, state = turn(VAGUE, [], {}, kw)
     job = state["job"]
@@ -300,14 +300,15 @@ def test_a_side_question_at_the_planners_question_leaves_the_run_waiting(live):
     result = last_run(tmp_path)
     assert result.plan.question == f"{VAGUE}\nClarification 1 from the person: S1, mean yield per clone"
     assert [n.split(":", 1)[0] for n in result.notes if n.startswith("clarification ")] == ["clarification 1"]
-    assert len(model.requests) == 2 and "what's your name?" not in json.dumps(result.notes)
+    assert len(model.requests) == 3 and "what's your name?" not in json.dumps(result.notes)
 
 
 def test_an_out_of_scope_message_at_the_planners_question_is_answered_and_the_run_keeps_waiting(live):
     """2026-10-15 live: "which country has the largest population?" typed at a waiting question was taken as a new data
     question (drop or keep). Now it is answered like a side question, and only the real answer reaches the planner."""
     server, kwargs, tmp_path = live
-    replies = [{"label": "out_of_scope", "reason": "scripted", "reply": "I can help only with public breeding records."},
+    replies = [{"label": "data_question", "reason": "scripted", "reply": ""},                # the front door's label (Step 2b)
+               {"label": "out_of_scope", "reason": "scripted", "reply": "I can help only with public breeding records."},
                {"label": "answer_to_pending", "reason": "scripted", "reply": ""}]
     model = FakeModelClient([reply_text(json.dumps(r), model="mock-model") for r in replies], reported_model="mock-model")
     kw = {**kwargs, "triage_model": lambda: model}
@@ -316,7 +317,7 @@ def test_an_out_of_scope_message_at_the_planners_question_is_answered_and_the_ru
     history, state = turn("which country has the largest population?", history, state, kw)
     shown = history[-1]["content"]
     assert shown.startswith("I can help only with public breeding records.\n\n")
-    assert "then offer one example question" not in model.requests[0]["messages"][0]["content"]   # no example while it waits
+    assert "then offer one example question" not in model.requests[1]["messages"][0]["content"]   # no example while it waits
     assert "\n\nI'm still waiting for your answer to my question (or reply **cancel**): “Which study is meant?" in shown
     assert state == {"job": job} and job.waiting_on == ctl.CLARIFY_PROMPT and job.controller.clarification_answers == 0
     history, state = turn("S1, mean yield per clone", history, state, kw)
@@ -324,7 +325,7 @@ def test_an_out_of_scope_message_at_the_planners_question_is_answered_and_the_ru
     history, state = turn("cancel", history, state, kw)
     result = last_run(tmp_path)
     assert result.plan.question == f"{VAGUE}\nClarification 1 from the person: S1, mean yield per clone"
-    assert "population" not in json.dumps(result.notes) and len(model.requests) == 2
+    assert "population" not in json.dumps(result.notes) and len(model.requests) == 3
 
 
 def test_a_side_question_at_the_analysts_question_fetches_nothing_and_the_analyst_still_gets_its_answer(live):
@@ -338,9 +339,9 @@ def test_a_side_question_at_the_analysts_question_fetches_nothing_and_the_analys
                                                model="mock-model")], reported_model="mock-model")
         return synthetic_models().analyst_factory(prefix)
 
-    model, factory = front_door_model("side_question", "answer_to_pending")
+    model, factory = front_door_model("data_question", "side_question", "answer_to_pending")
     kw = {**kwargs, "triage_model": factory, "make_models": lambda: dataclasses.replace(synthetic_models(), analyst_factory=analyst)}
-    history, state = turn(Q, [], {}, kw)                                          # a data question: the rules start the run
+    history, state = turn(Q, [], {}, kw)                                          # a data question: the model's label starts the run
     history, state = turn("approve", history, state, kw)                         # an exact word: no model call
     fetched = list(server.calls)
     history, state = turn("what's your name?", history, state, kw)
@@ -351,7 +352,7 @@ def test_a_side_question_at_the_analysts_question_fetches_nothing_and_the_analys
     assert "| Mean |" in history[-1]["content"] and server.calls == fetched and len(made) == 2
     history, state = turn("accept", history, state, kw)
     result = last_run(tmp_path)
-    assert result.execution_status == "completed" and len(model.requests) == 2
+    assert result.execution_status == "completed" and len(model.requests) == 3
     assert [n for n in result.notes if n.startswith("analyst clarification")] == [
         "analyst clarification 1: the analyst asked: Use the seasons column instead? - answer: yes, use seasons"]
 

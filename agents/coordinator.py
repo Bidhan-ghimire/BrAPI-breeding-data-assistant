@@ -58,7 +58,8 @@ __all__ = [
     "COORDINATOR_SYSTEM_PROMPT", "NoTools", "draft_plan", "assemble_plan", "render_numeric_table", "sanitize_prose",
     "RETRIEVER_ACTIONS", "ANALYST_ACTIONS", "DECISION_WORDS", "WHOLE_SET_WORDS", "WHOLE_SET_REJECTION", "ONE_OR_SEVERAL", "SCOPE_JUDGED_NOTE",
     "PERSON_REVIEWS_NOTE",
-    "add_clarification", "clarifications_given", "person_words", "latest_words",
+    "add_clarification", "clarifications_given", "person_words", "latest_words", "add_follow_up", "FOLLOW_UP_LABEL",
+    "FOLLOW_UP_NOTE",
 ]
 
 RETRIEVER_ACTIONS = frozenset({"server_info", "search_studies", "study_types", "get_study", "list_variables", "get_observations",
@@ -87,9 +88,12 @@ PERSON_REVIEWS_NOTE = ("A person sees the approval screen, with the plan's scope
                        "plan it with all_known_studies and exact filters instead of asking again which study is meant.")
 
 # A person's answer to the planner's question is ADDED to the question (run.clarify_phase calls add_clarification), after a
-# label that code writes. The rules that read a question use only the person's words: person_words() drops the labels, so
-# "Clarification 1" can never name a study whose ID is 1, and latest_words() is what the person said last.
+# label that code writes. A follow-up such as "and in 2025?" is added to the earlier question the same way, after its own
+# label (add_follow_up; the chat's memory, Step 2b). The rules that read a question use only the person's words: person_words()
+# drops the labels, so "Clarification 1" can never name a study whose ID is 1, and latest_words() is what the person said last.
 _CLARIFIED = re.compile(r"\nClarification (\d+) from the person: ")
+FOLLOW_UP_LABEL = "\nFollow-up from the person: "
+_LABELLED = re.compile(r"\nClarification \d+ from the person: |\nFollow-up from the person: ")
 
 
 def clarifications_given(question: str) -> int:
@@ -101,14 +105,21 @@ def add_clarification(question: str, answer: str) -> str:
     return f"{question}\nClarification {clarifications_given(question) + 1} from the person: {' '.join(answer.split())}"
 
 
+def add_follow_up(question: str, message: str) -> str:
+    """An earlier question plus the person's follow-up to it ("and in 2025?"), labelled. The earlier words stay as they were."""
+    return f"{question}{FOLLOW_UP_LABEL}{' '.join(message.split())}"
+
+
 def person_words(question: str) -> str:
     """Only what the person typed: the question with the code-written labels removed."""
-    return _CLARIFIED.sub("\n", question)
+    return _LABELLED.sub("\n", question)
 
 
 def latest_words(question: str) -> str:
-    """What the person said last: the question itself, or their newest answer once they have answered."""
-    return _CLARIFIED.split(question)[-1]
+    """What the person said since their last answer to a question of ours: the question itself, or their newest answer. A
+    follow-up does not reset it: "and in 2025?" after "which clone is best ...?" still carries the "best" that was never
+    answered, so the rule that asks about a breeding judgement still sees it (decision words are read here)."""
+    return _CLARIFIED.split(question)[-1].replace(FOLLOW_UP_LABEL, "\n")
 
 
 DECISION_WORDS = re.compile(r"\b(best|worst|superior|inferior|recommend\w*|release|outperform\w*|top[- ]performing|winner|highest[- ]yielding|should (?:we|i) (?:grow|plant|select))\b", re.IGNORECASE)
@@ -165,15 +176,8 @@ class KnownMetadata(_Strict):
         """Build from export_metadata artifacts (text tables). complete is the AND of the exports' completeness."""
         s_manifest, s_rows = registry.load(studies_artifact)
         v_manifest, v_rows = registry.load(variables_artifact)
-        complete = s_manifest.complete and v_manifest.complete
-        studies = [KnownStudy(study_id=r["studyDbId"], name=r.get("studyName", ""), location_id=r.get("locationDbId") or None,
-                              location_name=r.get("locationName") or None, seasons=_seasons_from_text(r.get("seasons", "")),
-                              study_type=r.get("studyType") or None, program_id=r.get("programDbId") or None,
-                               program_name=r.get("programName") or None) for r in s_rows if r.get("studyDbId")]
-        variables = [KnownVariable(variable_id=r["observationVariableDbId"], name=r.get("observationVariableName", ""),
-                                   trait=r.get("traitName") or None, unit=r.get("units") or None) for r in v_rows if r.get("observationVariableDbId")]
-        location_ids = sorted({s.location_id for s in studies if s.location_id})
-        season_ids = sorted({season for s in studies for season in s.seasons})
+        metadata = cls.from_rows(s_rows, v_rows, base_url=base_url, complete=s_manifest.complete and v_manifest.complete)
+        complete, location_ids, season_ids = metadata.complete, list(metadata.location_ids), list(metadata.season_ids)
         if locations_artifact:
             l_manifest, l_rows = registry.load(locations_artifact)
             complete = complete and l_manifest.complete
@@ -182,6 +186,22 @@ class KnownMetadata(_Strict):
             se_manifest, se_rows = registry.load(seasons_artifact)
             complete = complete and se_manifest.complete
             season_ids = sorted(set(season_ids) | {r["seasonDbId"] for r in se_rows if r.get("seasonDbId")})
+        return cls(base_url=base_url, complete=complete, studies=metadata.studies, variables=metadata.variables,
+                   location_ids=location_ids, season_ids=season_ids)
+
+    @classmethod
+    def from_rows(cls, study_rows: list[dict[str, Any]], variable_rows: list[dict[str, Any]], *, base_url: str,
+                  complete: bool) -> "KnownMetadata":
+        """Build from the export rows themselves (the shapes export_metadata saves). The chat's catalog summary reads the cached
+        catalogs this way, without saving a table (catalog_summary.py)."""
+        studies = [KnownStudy(study_id=r["studyDbId"], name=r.get("studyName", ""), location_id=r.get("locationDbId") or None,
+                              location_name=r.get("locationName") or None, seasons=_seasons_from_text(r.get("seasons", "")),
+                              study_type=r.get("studyType") or None, program_id=r.get("programDbId") or None,
+                               program_name=r.get("programName") or None) for r in study_rows if r.get("studyDbId")]
+        variables = [KnownVariable(variable_id=r["observationVariableDbId"], name=r.get("observationVariableName", ""),
+                                   trait=r.get("traitName") or None, unit=r.get("units") or None) for r in variable_rows if r.get("observationVariableDbId")]
+        location_ids = sorted({s.location_id for s in studies if s.location_id})
+        season_ids = sorted({season for s in studies for season in s.seasons})
         return cls(base_url=base_url, complete=complete, studies=studies, variables=variables, location_ids=location_ids, season_ids=season_ids)
 
     def summary_for_model(self, question: str | None = None) -> str:
@@ -641,11 +661,18 @@ def _ensure_clarification(existing: list[Clarification], text: str, already_patt
     return [*existing, Clarification(question=text, required=True)]
 
 
+FOLLOW_UP_NOTE = ("The question continues an earlier one: the lines before 'Follow-up from the person' are the person's earlier question "
+                  "(with its answers), and the follow-up is what they ask now. Plan the follow-up: keep from the earlier question only "
+                  "what the follow-up leaves out (for example, 'and in 2025?' asks the same question for 2025 instead).")
+
+
 def _user_message(question: str, metadata: KnownMetadata | None, problems: list[str], earlier_questions: list[str] | None = None,
                   person_reviews_scope: bool = False) -> str:
     """What the planner reads. Its own earlier questions are CONTEXT only: every rule in assemble_plan reads the question (the
     person's words), never these lines, so the planner's words cannot name a study or unlock a rule."""
     lines = [f"Question: {question}"]
+    if FOLLOW_UP_LABEL in question:
+        lines.append(FOLLOW_UP_NOTE)
     if earlier_questions:
         lines.append("For context, your earlier questions to the person (the person's answers are the 'Clarification N' lines of the "
                      "question above; only the person's words are the question):")
