@@ -32,7 +32,7 @@ from retrieval_review import _cell as _escaped       # the same escaping the dat
 
 __all__ = ["ListEntity", "ENTITIES", "SHOWN", "WORD_MAX_CHARS", "TRAIT_HINT", "ListRequest", "CatalogTable", "ListItem",
            "CatalogList", "parse_request", "config_problems", "catalog_tables", "build", "chat_message", "report_lines",
-           "fixed_plan", "evidence", "run_note", "setup_plan", "setup_evidence"]
+           "fixed_plan", "evidence", "run_note", "setup_plan", "setup_evidence", "is_refresh_request", "setup_message"]
 
 ListEntity = Literal["traits", "locations", "seasons", "programs"]
 ENTITIES: tuple[str, ...] = ("traits", "locations", "seasons", "programs")
@@ -61,6 +61,9 @@ _REQUEST = re.compile(
     r"(?: (?:with|containing|that contains?|matching) (?P<word>\S+))?"
     r"(?: please)?")
 _YEAR = re.compile(r"(?<!\d)(1[89]\d\d|2\d\d\d)(?!\d)")
+# "refresh catalogs" (Item 5): download the saved study and trait catalogs again, with the catalog setup's approval.
+_REFRESH = re.compile(r"(?:please )?(?:refresh|update|reload|re download|redownload)(?: the)?(?: saved)?(?: study and trait)? "
+                      r"catalogs?(?: again)?(?: now)?(?: please)?")
 
 
 @dataclass(frozen=True)
@@ -438,3 +441,19 @@ def setup_evidence(tables: dict[str, CatalogTable], registry: Any) -> tuple[Retr
                               methods=["catalog setup: rows of the two hash-checked catalog tables counted by code; "
                                        "no model inference, no measurements"])
     return retrieval, analysis
+
+
+def is_refresh_request(text: str) -> bool:
+    """The whole message asks to download the saved catalogs again: "refresh catalogs", "please update the catalog"."""
+    return _REFRESH.fullmatch(" ".join(_TOKEN.findall((text or "").lower().replace("-", " ")))) is not None
+
+
+def setup_message(tables: dict[str, CatalogTable], *, fetched_now: bool, again: bool = True) -> str:
+    """The chat's answer to a catalog setup run (a refresh): what the catalogs hold now and when they were fetched."""
+    studies, traits = tables["studies"], tables["variables"]
+    head = (("**The study and trait catalogs were downloaded again.**" if again else
+             "**The study and trait catalogs were downloaded.**") if fetched_now
+            else "**The study and trait catalogs were already saved; nothing new was requested.**")
+    return (f"{head} The study catalog has {_count(studies.rows, 'study', 'studies')} and the trait catalog "
+            f"{_count(traits.rows, 'trait', 'traits')}, from {_host(studies.base_url)}, fetched {_when(studies)}. "
+            "No measurements were fetched. Lists and catalog answers use these catalogs from now on.")

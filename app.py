@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+from datetime import datetime, timedelta, timezone
 import os
 import math
 import re
@@ -145,7 +146,8 @@ def live_config(question: str) -> RunConfig:
                      max_fetches=5, max_http_attempts=_app_number("APP_MAX_HTTP_ATTEMPTS", "10", 1, 100, integer=True),
                      max_clarification_rounds=CHAT_CLARIFICATION_ROUNDS,
                      read_timeout=_app_number("APP_READ_TIMEOUT", "90", 1, 600), max_elapsed_seconds=600,
-                     bootstrap_catalogs=True, catalog_standing_approval=_app_flag("APP_CATALOG_STANDING_APPROVAL"))
+                     bootstrap_catalogs=True, catalog_standing_approval=_app_flag("APP_CATALOG_STANDING_APPROVAL"),
+                     catalog_max_age_hours=_app_number("APP_CATALOG_MAX_AGE_HOURS", "24", 1, 8760))
 
 
 def _never_asked(prompt: str) -> str:
@@ -200,8 +202,8 @@ def live_preflight(question: str, make_config: Callable[[str], RunConfig] = live
     try:
         problems = make_config(question).validate()
     except (TypeError, ValueError, OverflowError):
-        return ["App settings are invalid. Check APP_MAX_HTTP_ATTEMPTS, APP_READ_TIMEOUT, APP_CATALOG_STANDING_APPROVAL "
-                "and the BrAPI settings."]
+        return ["App settings are invalid. Check APP_MAX_HTTP_ATTEMPTS, APP_READ_TIMEOUT, APP_CATALOG_STANDING_APPROVAL, "
+                "APP_CATALOG_MAX_AGE_HOURS and the BrAPI settings."]
     try:
         from llm import is_loopback, load_llm_settings
 
@@ -308,6 +310,11 @@ def render(job: Job, event: tuple[str, Any]) -> tuple[str, bool]:
         listing = getattr(controller, "catalog_list", None)
         if listing is not None and getattr(result, "execution_status", None) == "completed":   # a list run: the list itself;
             return catalog_lists.chat_message(listing, in_report=True), True                     # no accept or reject is asked
+        if (getattr(getattr(controller, "config", None), "catalog_setup_only", False)          # a refresh: what the catalogs
+                and getattr(result, "execution_status", None) == "completed"):                  # hold now
+            fetched_now = any(r.get("origin") == "live" and not r.get("error") for r in controller.catalog_requests)
+            return catalog_lists.setup_message(controller.catalog_tables, fetched_now=fetched_now,
+                                               again=bool(getattr(controller, "catalog_set_aside", None))), True
         if not job.answer_shown:
             return answer_summary(controller), True
         review = {"accepted": "**Accepted.** Your review is recorded.",
@@ -369,11 +376,19 @@ def _ask_front_door(text: str, triage_model: Callable[[], Any], known_label: str
 
 
 def _saved_catalog(config_for: Callable[[str], RunConfig], text: str) -> catalog_summary.CatalogSummary | None:
-    """The saved catalog's summary for the front-door model: read from the cache a run would use (nothing is requested)."""
+    """The saved catalog's summary for the front-door model: read from the cache a run would use (nothing is requested).
+    None when it is older than APP_CATALOG_MAX_AGE_HOURS: then it counts as missing here too, so a question about it starts
+    a run, which asks for the catalog download first."""
     try:
-        return catalog_summary.from_cache(config_for(text))
+        config = config_for(text)
+        summary = catalog_summary.from_cache(config)
     except Exception:  # a bad setting only means no summary; the message is still sorted
         return None
+    hours = getattr(config, "catalog_max_age_hours", None)
+    if (summary is not None and hours and summary.fetched_at is not None    # an unknown date counts as fresh, as in a run
+            and datetime.now(timezone.utc) - summary.fetched_at > timedelta(hours=hours)):
+        return None
+    return summary
 
 
 def _memory(state: dict[str, Any]) -> chat_memory.ConversationMemory:
@@ -479,6 +494,8 @@ def _sort_waiting_message(text: str, job: Job, state: dict[str, Any]) -> tuple[s
             return "run", unsent, state
         if conversation.is_no(text):
             return "reply", conversation.still_waiting_line(kind, pending), state
+    if catalog_lists.is_refresh_request(text):                         # "refresh catalogs": a run of its own, so a new question
+        return "reply", conversation.drop_or_keep_question(text), {**state, "new_question": text}
     listing = catalog_lists.parse_request(text)
     if listing is not None and not conversation.asks_about_listing(pending):   # "list all traits": from the run's own catalog
         shown = _list_from_the_runs_catalog(listing, job)                         # (never a study ID or a reply the run reads)
@@ -581,6 +598,8 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
         if route == "drop":
             state = _remember(state, job, status="dropped for a new question",
                               acceptance=str(getattr(job.controller, "acceptance", "pending")))
+            if (getattr(job.controller, "catalog_setup", None) or {}).get("status") == "completed":
+                catalog_summary.forget()                                           # the front door reads the new catalogs
             job.close()                                                            # the waiting run ends and is recorded ...
             job, text = None, payload                                              # ... and the new question starts below
             state = {k: v for k, v in state.items() if k in KEPT_FOR_A_NEW_QUESTION}
@@ -589,9 +608,11 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
     if job is None:
         pending = state.get("pending_question")
         state = {k: v for k, v in state.items() if k != "pending_question"}      # this message answers it either way
-        question, by_rules, from_pending, listing = text, None, False, None
+        question, by_rules, from_pending, listing, refresh = text, None, False, None, False
         if pending and triage.is_yes(text):
             question, from_pending = pending, True                               # "yes" starts the earlier question as typed
+        elif catalog_lists.is_refresh_request(text):                             # "refresh catalogs": code decides, no model
+            question, refresh = CATALOG_SETUP_QUESTION, True
         elif (listing := catalog_lists.parse_request(text)) is None:            # a catalog list: code decides, no rule or model
             by_rules = triage.sort_by_rules(text)
             if by_rules is not None and by_rules.label not in triage.PIPELINE_LABELS:
@@ -609,6 +630,9 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
                 return
         config_for = make_config if listing is None else (           # a list run: the same settings plus the fixed list
             lambda q: dataclasses.replace(make_config(q), catalog_list=listing.entity, catalog_list_word=listing.word))
+        if refresh:                                                   # a refresh: a catalog setup run, with its own approval
+            config_for = lambda q: dataclasses.replace(make_config(q), catalog_setup_only=True, catalog_refresh=True,
+                                                       bootstrap_catalogs=True)
         try:
             problems = (preflight or (lambda q: live_preflight(q, config_for)))(question)
         except Exception:  # a bad setting must not leave the chat locked or echo its value
@@ -617,7 +641,7 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
             history.append({"role": "assistant", "content": "This question cannot run yet:\n" + "\n".join(f"- {p}" for p in problems)})
             yield history, state, ""
             return
-        if listing is None and not from_pending and triage_model is not None:   # data words, or the rules could not tell:
+        if listing is None and not from_pending and not refresh and triage_model is not None:   # data words, or unplaced:
             history.append({"role": "assistant", "content": WORKING})            # the model's label decides (Step 2b)
             working = True
             yield history, state, ""
@@ -665,6 +689,9 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
         state = {**state, "full_report": job.controller.data_review_screen()}
     if finished:
         state = _remember_result({k: v for k, v in state.items() if k != "job"}, job, event)
+        if (getattr(getattr(job.controller, "config", None), "catalog_setup_only", False)
+                or (getattr(job.controller, "catalog_setup", None) or {}).get("status") == "completed"):
+            catalog_summary.forget()                                               # the front door reads the new catalogs
     yield history, state, ""
 
 
@@ -701,8 +728,11 @@ def catalog_source_line(make_config: Callable[[str], RunConfig]) -> str:
     when = (f"The saved study and trait catalogs were downloaded {summary.fetched_at:%Y-%m-%d %H:%M} UTC."
             if summary is not None and summary.fetched_at is not None else
             "The study and trait catalogs are saved." if summary is not None else "The study and trait catalogs are not saved yet.")
+    hours = getattr(config, "catalog_max_age_hours", None)
+    age = (f" Saved catalogs older than {hours:g} hours are downloaded again; type **refresh catalogs** to do it now."
+           if hours else " Type **refresh catalogs** to download them again.")
     return (f"{when} When they need downloading, the app's operator approves it (a standing approval); measurements always "
-            "need your approval.")
+            f"need your approval.{age}")
 
 
 def hosted_notice(environ: Mapping[str, str] | None = None) -> str:

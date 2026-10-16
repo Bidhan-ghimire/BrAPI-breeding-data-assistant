@@ -453,10 +453,12 @@ def load_questions(path: Path) -> list[dict[str, Any]]:
 
 
 def eval_config(base_config: Callable[[str], RunConfig], cache_dir: Path, out_dir: Path) -> Callable[[str], RunConfig]:
-    """The app's own settings for a question, on the cache copy: runs are recorded under the results folder, and no
-    catalog is ever prepared under the operator's standing approval (the copy must already hold it)."""
+    """The app's own settings for a question, on the cache copy: runs are recorded under the results folder; no catalog
+    is ever prepared under the operator's standing approval (the copy must already hold it); and the copy is used as it
+    is, however old (APP_CATALOG_MAX_AGE_HOURS is not applied): the expected answers come from the same copy."""
     def make(question: str) -> RunConfig:
-        return dataclasses.replace(base_config(question), cache_dir=cache_dir, out_dir=out_dir, catalog_standing_approval=False)
+        return dataclasses.replace(base_config(question), cache_dir=cache_dir, out_dir=out_dir, catalog_standing_approval=False,
+                                   catalog_max_age_hours=None)
     return make
 
 

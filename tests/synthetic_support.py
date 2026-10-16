@@ -147,6 +147,9 @@ def context(tmp_path, run_id="run_shared"):
 def hosted_config(tmp_path, question, **changes):
     import app_space
     seed_synthetic(CacheStore(tmp_path / "cache"))
-    config = replace(app_space.space_config(question), cache_dir=tmp_path / "cache",out_dir=tmp_path / "out")
+    # The seeded replies carry a fixed fetch time (2026-06-01), which the app's catalog age limit (APP_CATALOG_MAX_AGE_HOURS,
+    # default 24) would set aside; these tests are not about catalog age (tests/test_fresh_catalogs.py is).
+    config = replace(app_space.space_config(question), cache_dir=tmp_path / "cache", out_dir=tmp_path / "out",
+                     catalog_max_age_hours=None)
     return replace(config, **changes)
 

@@ -315,6 +315,9 @@ class BrapiClient:
         self._counter = 0
         self._live_attempts = 0                 # counts failed attempts too
         self._studies_fetched: set[str] = set()
+        # An approved catalog refresh (run.Controller, Item 5) sets this: in live mode a cached reply fetched before it is not
+        # reused, so the approved request is sent again and saved as a new cache version (the old version is kept).
+        self.refresh_cached_before: datetime | None = None
 
     def cancel_pending_requests(self) -> None:
         """Permanently stop this run's later requests; an in-flight GET still finishes/logs.
@@ -347,6 +350,11 @@ class BrapiClient:
         self._check_cancelled()
 
     # -- provenance ----------------------------------------------------------
+
+    def _set_aside(self, entry: CacheEntry) -> bool:
+        """Offline, a saved reply is always used. Live, one fetched before refresh_cached_before is not reused."""
+        return (self.settings.mode == "live" and self.refresh_cached_before is not None
+                and entry.fetched_at_utc < self.refresh_cached_before)
 
     def provenance(self) -> list[RequestRecord]:
         """Every attempt and cache use so far, in order."""
@@ -405,9 +413,9 @@ class BrapiClient:
         identity = CacheIdentity(base_url=self.settings.base_url, endpoint=endpoint, params=dict(params or {}))
         deadline_at = self._clock() + self.settings.operation_deadline if deadline_at is None else deadline_at
 
-        # 1. cache
+        # 1. cache (a reply older than refresh_cached_before is set aside in live mode: an approved refresh sends it again)
         hit = self.cache.get(identity)
-        if hit is not None:
+        if hit is not None and not self._set_aside(hit[0]):
             entry, body = hit
             record = entry.request_record(request_id=self._new_request_id(), run_id=self.run_id,
                                           requested_at_utc=self._now_utc())

@@ -87,7 +87,7 @@ class PastTurn:
     acceptance: str                  # accepted / rejected / pending
     scope: ApprovedScope | None      # None when nothing was approved (a catalog list, a canceled plan, ...)
     answer: str                      # the first line of the answer written by code; "" when there was none
-    kind: Literal["question", "catalog_list", "catalog_answer"] = "question"   # a list is remembered but never continued
+    kind: Literal["question", "catalog_list", "catalog_answer", "catalog_setup"] = "question"   # a list or a refresh: never continued
 
     @property
     def continuable(self) -> bool:
@@ -159,7 +159,9 @@ def first_answer_line(controller: Any) -> str:
 
 
 def past_turn(controller: Any, *, status: str, acceptance: str) -> PastTurn:
-    kind = "catalog_list" if getattr(controller.config, "catalog_list", None) else "question"
+    config = controller.config
+    kind = ("catalog_list" if getattr(config, "catalog_list", None) else
+            "catalog_setup" if getattr(config, "catalog_setup_only", False) else "question")
     return PastTurn(question=controller.config.question, run_id=controller.run_id, status=status, acceptance=acceptance,
                     scope=approved_scope(controller), answer=first_answer_line(controller), kind=kind)
 
@@ -173,7 +175,8 @@ def for_model(memory: ConversationMemory | None) -> str:
         approved = turn.scope.describe() if turn.scope is not None else "nothing (no data request was approved)"
         answer = f" First line of the answer: “{turn.answer}”." if turn.answer else " No answer was given."
         what = {"question": "Question", "catalog_list": "Catalog list (code answered it; a follow-up cannot continue it)",
-                "catalog_answer": "Catalog question (code answered it from the saved catalog; no run)"}[turn.kind]
+                "catalog_answer": "Catalog question (code answered it from the saved catalog; no run)",
+                "catalog_setup": "Catalog refresh (no question; a follow-up cannot continue it)"}[turn.kind]
         lines.append(f"{number}. {what}: “{head_and_tail(turn.question, QUESTION_CHARS)}”. It ended: {turn.status}; the "
                      f"person's review: {turn.acceptance}. Approved: {approved}.{answer}")
     return "\n".join(lines)

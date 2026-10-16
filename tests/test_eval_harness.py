@@ -84,11 +84,11 @@ def place(tmp_path, monkeypatch):
     server = FakeLiveServer()
     monkeypatch.setattr(bc, "RequestsTransport", lambda: server)
 
-    def base_config(question):                         # as if the operator's standing approval were on: the harness turns it off
+    def base_config(question):     # as the app's settings could be: the harness turns off the standing approval and the age limit
         return ctl.RunConfig(question=question, offline=False, mock_model=False, direct=False, auto=False,
                              out_dir=tmp_path / "never_out", cache_dir=tmp_path / "never_cache", access_notes=notes,
                              max_clarification_rounds=app.CHAT_CLARIFICATION_ROUNDS, bootstrap_catalogs=True,
-                             catalog_standing_approval=True)
+                             catalog_standing_approval=True, catalog_max_age_hours=24)
 
     catalog_summary.forget()
     yield type("Place", (), dict(root=tmp_path, source=source, seed=staticmethod(seed), server=server, base_config=staticmethod(base_config)))
@@ -170,6 +170,7 @@ def test_end_to_end_with_scripted_models_on_a_copy_of_the_cache(place):
     assert result.human_acceptance == "pending" and result.approval_id is not None    # approved data request, never accepted
     recorded = json.loads((folder / "out" / run_id / "manifest.json").read_text(encoding="utf-8"))["config"]
     assert Path(recorded["cache_dir"]) == folder / "cache" and recorded["catalog_standing_approval"] is False
+    assert recorded["catalog_max_age_hours"] is None            # the copy's catalogs (fetched 2026-06-01) are used as they are
 
     x1 = rows["x1"]                                       # no expected answer: skipped, never run
     assert x1["passed"] is None and x1["status"].startswith("skipped: the expected answer cannot be computed")

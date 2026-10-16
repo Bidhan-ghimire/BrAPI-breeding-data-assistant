@@ -278,7 +278,7 @@ def test_a_catalog_setup_run_is_refused_for_anything_else(place):
 # --------------------------------------------------------------------------
 
 RULE = ("When they need downloading, the app's operator approves it (a standing approval); measurements always need your "
-        "approval.")
+        "approval. Type **refresh catalogs** to download them again.")
 
 
 def save_catalogs(place) -> None:
@@ -297,7 +297,7 @@ def test_the_help_page_says_when_the_catalogs_were_downloaded_and_who_approves_o
         f"The saved study and trait catalogs were downloaded 2026-06-01 00:00 UTC. {RULE}")
     assert app.catalog_source_line(place.config_for(False)) == ""
     details = app.source_details(place.config_for(True))
-    assert details.startswith(app.source_markdown()) and details.endswith("measurements always need your approval.")
+    assert details.startswith(app.source_markdown()) and details.endswith("Type **refresh catalogs** to download them again.")
     assert app.catalog_source_line(lambda q: (_ for _ in ()).throw(ValueError("bad setting"))) == ""
 
 

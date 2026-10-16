@@ -140,6 +140,8 @@ class RunConfig:
     carried_over: str | None = None        # ... and that run's question, which this question starts with (carried_over_line)
     catalog_standing_approval: bool = False   # APP_CATALOG_STANDING_APPROVAL: the operator approves the catalog setup (Part D)
     catalog_setup_only: bool = False       # a run that only prepares the two catalogs (at app startup): no planner, no question
+    catalog_max_age_hours: float | None = None   # APP_CATALOG_MAX_AGE_HOURS: saved catalogs older than this count as missing
+    catalog_refresh: bool = False          # "refresh catalogs": a catalog setup run that downloads the saved catalogs again
 
     @property
     def uses_memory_mcp(self) -> bool:
@@ -182,6 +184,13 @@ class RunConfig:
             problems.append("a catalog setup run lists nothing and continues no question")
         if self.catalog_setup_only and not self.bootstrap_catalogs:
             problems.append("a catalog setup run needs bootstrap_catalogs")
+        if self.catalog_refresh and not self.catalog_setup_only:
+            problems.append("a catalog refresh is a catalog setup run")
+        if self.catalog_max_age_hours is not None and (isinstance(self.catalog_max_age_hours, bool)
+                                                       or not isinstance(self.catalog_max_age_hours, (int, float))
+                                                       or not math.isfinite(self.catalog_max_age_hours)
+                                                       or not 1 <= self.catalog_max_age_hours <= 8760):
+            problems.append("catalog_max_age_hours must be a number of hours from 1 to 8760")
         if self.catalog_standing_approval and standing_review_date(self.access_notes) is None:
             problems.append(STANDING_REVIEW_PROBLEM.format(notes=Path(self.access_notes).name))
         return problems
@@ -569,6 +578,7 @@ class Controller:
         self.catalog_ctx: ToolContext | None = None                     # the tool context that read the catalogs behind self.metadata
         self.catalog_tables: dict[str, catalog_lists.CatalogTable] = {}  # those two tables, with their fetch times (catalog lists)
         self.catalog_list: catalog_lists.CatalogList | None = None      # a list run's answer
+        self.catalog_set_aside: str | None = None    # why the saved catalogs were set aside (too old, or "refresh catalogs")
         settings = load_settings()
         self.cache_dir = Path(self.config.cache_dir) if self.config.cache_dir else settings.cache_dir / "live"
         self.base_url = settings.base_url
@@ -742,15 +752,34 @@ class Controller:
             self.meta_requests = len(meta_ctx.client.provenance())
             fetched = sorted(r.fetched_at_utc.isoformat() for r in meta_ctx.client.provenance() if r.fetched_at_utc is not None)
             self.catalog_fetched_at = fetched[0] if fetched else None
+        reason = self._why_set_aside()              # before the completeness check: a refresh, or an old saved part, means
+        if reason is not None:                       # the whole set is downloaded again (with the catalog setup's approval)
+            self.catalog_set_aside = reason
+            self.notes.append(f"saved catalogs set aside: {reason}; downloading them again needs the catalog setup's approval")
         if not (studies.ok and studies.complete and studies.artifact_ids
                 and variables.ok and variables.complete and variables.artifact_ids):
             self.notes.append("metadata is not in the offline cache; live discovery would need a separate bounded approval")
+            return None
+        if reason is not None:                       # treated as missing
             return None
         metadata = KnownMetadata.from_registry(meta_ctx.registry, base_url=meta_ctx.client.settings.base_url,
                                                studies_artifact=studies.artifact_ids[0], variables_artifact=variables.artifact_ids[0])
         self.base_url = metadata.base_url
         self._keep_catalog_tables(meta_ctx, studies.artifact_ids[0], variables.artifact_ids[0])
         return metadata
+
+    def _why_set_aside(self) -> str | None:
+        """Saved catalogs count as missing when the person asked to refresh them, or when their oldest reply is older than
+        catalog_max_age_hours (APP_CATALOG_MAX_AGE_HOURS). Only WHEN they are downloaded changes, never what or how."""
+        if self.config.catalog_refresh and self.catalog_fetched_at:    # something is saved: a refresh downloads it again
+            return "you asked to refresh the catalogs"
+        hours = self.config.catalog_max_age_hours
+        if hours is None or not self.catalog_fetched_at:
+            return None
+        fetched = datetime.fromisoformat(self.catalog_fetched_at)
+        if self.now() - fetched <= timedelta(hours=hours):
+            return None
+        return f"the saved catalogs were fetched {fetched:%Y-%m-%d %H:%M} UTC, more than {hours:g} hours ago"
 
     def _keep_catalog_tables(self, ctx: ToolContext, studies_artifact: str, variables_artifact: str) -> None:
         """The exact tables behind self.metadata, kept for catalog lists: their source and when they were fetched. Only lists
@@ -765,6 +794,15 @@ class Controller:
             self.notes.append(f"catalog lists unavailable in this run: {type(exc).__name__}: {str(exc)[:200]}")
 
     def catalog_approval_screen(self) -> str:
+        if self.catalog_set_aside:
+            return (f"The saved list of studies and traits needs to be downloaded again from {source_host(self._server())} "
+                    f"({self.catalog_set_aside}). No measurements are fetched in this step.\n\n"
+                    f"CATALOG SETUP APPROVAL NEEDED — the saved catalogs were set aside: {self.catalog_set_aside}.\n"
+                    f"Source: {self._server()}\n"
+                    f"Fetch only public studies and trait/variable catalogs again, at most {CATALOG_MAX_HTTP_ATTEMPTS} HTTP attempts "
+                    f"in total and {CATALOG_MAX_PAGES} pages per catalog. No observation data or model calls.\n"
+                    "This separate catalog budget does not grant approval for the later question. "
+                    "The new replies are added to this app's public-data cache; the old ones are kept.")
         return (f"First I need the public list of studies and traits from {source_host(self._server())}. "
                 "No measurements are fetched in this step.\n\n"
                 f"CATALOG SETUP APPROVAL NEEDED — complete cached catalogs are missing.\n"
@@ -817,6 +855,8 @@ class Controller:
         try:
             self.budget.start(_clock)
             meta_ctx = self._build_ctx(self.run_dir / "metadata", run_id=catalog_run_id)
+            if self.catalog_set_aside:              # the saved replies are not reused: the approved requests are sent again
+                meta_ctx.client.refresh_cached_before = self.now()
             meta_ctx.approval = approval
             meta_ctx.export_max_pages = CATALOG_MAX_PAGES
             exports = []
@@ -888,7 +928,8 @@ class Controller:
             self.meta_requests = 0
         self.execution_status = "completed"
         self.notes.append("catalog setup only: " + ("the catalogs were fetched in this run" if self.catalog_requests
-                                                    else "the catalogs were already saved; nothing was requested"))
+                                                    else "the catalogs were already saved; nothing was requested")
+                          + (f" (set aside before: {self.catalog_set_aside})" if self.catalog_set_aside else ""))
         self.notes.append("acceptance is not asked for a catalog setup; it stays pending")
         return True
 
