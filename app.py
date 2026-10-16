@@ -414,8 +414,9 @@ def _route_waiting_decision(decision: conversation.WaitingDecision | None, text:
     sendable = conversation.sendable(kind, text)
     if decision is None:                                                # no model or no decision: what the run can take goes
         return ("run", text, state) if sendable else ("reply", conversation.not_understood(kind, pending), state)
-    if decision.label == "side_question":
-        return "reply", conversation.side_reply(decision.reply, kind, pending), state
+    if decision.label in ("side_question", "out_of_scope"):          # answered; the run keeps waiting (never drop or keep)
+        fallback = triage.out_of_scope_line(_source_name(), example=False) if decision.label == "out_of_scope" else ""
+        return "reply", conversation.side_reply(decision.reply, kind, pending, fallback=fallback), state
     if decision.label == "new_data_question":
         return "reply", conversation.drop_or_keep_question(text), {**state, "new_question": text}
     if decision.label == "answer_to_pending" and sendable:
@@ -431,12 +432,12 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
             triage_model: Callable[[], Any] | None = None) -> Iterator[tuple[list[Message], dict[str, Any], str]]:
     """One chat turn. A message typed while a run waits is sorted first (conversation.py): the prompt's exact control words
     go to the run; a catalog list ("list all traits") is shown from the run's own catalog; any other message gets one
-    triage_model call that labels it, and only an answer to the waiting question reaches the run (a side question is
-    answered while the run keeps waiting; a new data question asks drop or keep; without a decision the message goes to the
-    run as before). A new message passes the front door: a catalog list starts a short list run (catalog_lists.py: no
-    rule, model or planner); otherwise triage.py sorts it. A data question starts a run; greetings, app questions and
-    unsure messages start nothing and get one triage_model call that writes the reply (the line written by code when there
-    is no model or the call fails). A message the rules cannot place is sorted by that same call; without a decision it
+    triage_model call that labels it, and only an answer to the waiting question reaches the run (a side question or an
+    out-of-scope message is answered while the run keeps waiting; a new data question asks drop or keep; without a
+    decision the message goes to the run as before). A new message passes the front door: a catalog list starts a short list run (catalog_lists.py: no
+    rule, model or planner); otherwise triage.py sorts it. A data question starts a run; greetings, app questions,
+    out-of-scope and unsure messages start nothing and get one triage_model call that writes the reply (the line written by
+    code when there is no model or the call fails). A message the rules cannot place is sorted by that same call; without a decision it
     starts a run as before. Yields (history, state, box)."""
     text = (message or "").strip()
     if not text:

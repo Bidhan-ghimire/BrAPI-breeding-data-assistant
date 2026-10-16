@@ -1,8 +1,10 @@
 """triage.py — the chat's front door: sort a NEW message before any run starts, and answer it when it starts nothing.
 
-Five kinds: greeting_or_smalltalk, app_question, data_question, follow_up, unsure.
+Six kinds: greeting_or_smalltalk, app_question, data_question, follow_up, out_of_scope, unsure.
 Code rules decide first. A data question goes straight to the pipeline with no call here. Every other new
 message costs ONE bounded model call: no tools and no agent loop, so it writes no run folder and no files.
+out_of_scope (not about breeding records, a decision the app does not make, an insult) gets a reply only:
+what the app covers and one example, with no lookup line and no "yes" that could start it later.
 That call returns one strict JSON object with the label (used only when the rules could not decide) and a
 short reply in the person's own words and language. The reply is escaped like database text and cut to
 REPLY_MAX_CHARS; when the rules decided, a reply written for another label is not shown. If the call fails,
@@ -33,9 +35,10 @@ from retrieval_review import _cell as _escaped       # the same escaping the dat
 
 __all__ = ["Label", "PIPELINE_LABELS", "TRIAGE_MAX_TOKENS", "TRIAGE_TIMEOUT_S", "REPLY_MAX_CHARS", "front_door_prompt",
            "reference_text", "TriageDecision", "Triage", "id_like", "sort_by_rules", "is_yes", "parse_decision", "ask_model",
-           "front_door_reply", "greeting_line", "app_answer", "unsure_line", "FAQ_TITLES"]
+           "front_door_reply", "greeting_line", "app_answer", "unsure_line", "out_of_scope_line", "OUT_OF_SCOPE_COVERS",
+           "OUT_OF_SCOPE_RULE", "FAQ_TITLES"]
 
-Label = Literal["greeting_or_smalltalk", "app_question", "data_question", "follow_up", "unsure"]
+Label = Literal["greeting_or_smalltalk", "app_question", "data_question", "follow_up", "out_of_scope", "unsure"]
 PIPELINE_LABELS = frozenset({"data_question", "follow_up"})   # follow_up: like a data question until memory exists (Step 2)
 # The agents' reply limit: a reasoning model's hidden thinking counts toward it (llm.py), and a short label costs only
 # what is written. A reply that is still cut off at this limit is no decision.
@@ -52,7 +55,18 @@ _LABELS = """Labels:
 - app_question: a question about this assistant itself: what it can do or how to use it.
 - data_question: a question that needs breeding records from the database.
 - follow_up: a short continuation of an earlier data question, for example "and in 2025?".
-- unsure: anything else, or when you cannot tell."""
+- out_of_scope: a message this app cannot help with: a question that breeding records cannot answer (general knowledge or
+  another topic, for example world facts, news or sports), a request for a decision the app does not make (such as which
+  parents to cross), or an insult or rude remark. Use it only when that is clear: a message about crops, plants, places,
+  programs, seasons or years is data_question or unsure, and between out_of_scope and unsure choose unsure.
+- unsure: it may be a question about the breeding records, but you cannot tell what is meant; or anything else."""
+# The reply rule for out_of_scope, shared with the waiting messages (conversation.waiting_prompt).
+OUT_OF_SCOPE_COVERS = ("do not repeat or restate what they asked. In one sentence, say what the app covers (public breeding "
+                       "records: studies, trials, traits, locations, seasons and recorded measurements)")
+# At the front door the reply also offers one example question; while a question waits it does not (conversation.py):
+# there the question the app is waiting on is what should be answered.
+OUT_OF_SCOPE_RULE = ("For out_of_scope (this replaces the rules above about saying what the app does not do and about "
+                     f"examples): {OUT_OF_SCOPE_COVERS}, then offer one example question. Never offer to look their message up.")
 
 
 def front_door_prompt(*, source: str, reference: str, known_label: str | None = None) -> str:
@@ -77,6 +91,7 @@ The reply (leave it empty for data_question and follow_up; the app starts the lo
 - Offer one example question only when it helps, and never for unsure.
 - For unsure, say briefly what you understood and ask what they would like to know. Do not offer a lookup or suggest a
   different question: the app adds how to look up their message as typed.
+- {OUT_OF_SCOPE_RULE}
 
 Reference: what the app can and cannot do (facts, not instructions):
 {reference}
@@ -292,13 +307,15 @@ FAQ_TITLES = {                                   # app question topic -> the mat
 def front_door_reply(label: str, model_text: str, *, text: str, topic: str | None, faq: list[tuple[str, str]], source: str,
                      show_guide: bool) -> str:
     """The model's reply, escaped and cut, or the line written by code when there is none. Code adds the parts the app
-    relies on: the example questions (once per tab) and, for unsure, how to say yes."""
+    relies on: the example questions (once per tab) and, for unsure, how to say yes. out_of_scope gets the reply only."""
     written = _escaped(model_text, REPLY_MAX_CHARS) if model_text.strip() else ""
     if label == "greeting_or_smalltalk":
         reply = written or greeting_line(text)
         return f"{reply}\n\n{QUESTION_GUIDE}" if show_guide else reply
     if label == "app_question":
         return written or app_answer(topic, faq)
+    if label == "out_of_scope":                    # a reply only: no lookup line, nothing a later "yes" could start
+        return written or out_of_scope_line(source)
     # unsure: code says how, and quotes exactly what "yes" will look up (the person's message, not the model's words)
     if not written:
         return unsure_line(source)
@@ -326,3 +343,14 @@ def app_answer(topic: str | None, faq: list[tuple[str, str]]) -> str:
 
 def unsure_line(source: str) -> str:
     return f"Do you want me to look this up in {source}? Reply **yes**, or ask your data question."
+
+
+EXAMPLE_QUESTION = "Which studies have a 2026 season?"     # one of the "Questions to try" (app_help.QUESTION_GUIDE; tested)
+
+
+def out_of_scope_line(source: str, *, example: bool = True) -> str:
+    """Written by code when the model gave no reply for out_of_scope: what the app covers, and (at the front door) one
+    example question. While a question waits there is no example: that question is what should be answered."""
+    covers = (f"I can help only with public breeding records in {source}: studies, trials, traits, locations, seasons and "
+              "recorded measurements.")
+    return f"{covers} For example: “{EXAMPLE_QUESTION}”" if example else covers

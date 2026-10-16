@@ -11,6 +11,7 @@ What these tests prove, in plain words:
   after three answers the run ends with the planner's question still shown. The three count for the whole run, also after
   the coordinator asks for a new plan or asks its own question, and the last message lists every round.
 * The Analyst's question is shown too; the answer goes back to it with the data already fetched (nothing fetched again).
+  A side question or an out-of-scope message at a waiting question is answered and the run keeps waiting.
   "New question" ends a waiting run and clears the chat; while the app works the input is dimmed (locked/unlocked).
   The header is Bidhan's wording: the server, approve, accept, descriptive numbers only.
 * The page builds (Gradio) without being launched; a Hugging Face Space refuses to start without a password.
@@ -300,6 +301,30 @@ def test_a_side_question_at_the_planners_question_leaves_the_run_waiting(live):
     assert result.plan.question == f"{VAGUE}\nClarification 1 from the person: S1, mean yield per clone"
     assert [n.split(":", 1)[0] for n in result.notes if n.startswith("clarification ")] == ["clarification 1"]
     assert len(model.requests) == 2 and "what's your name?" not in json.dumps(result.notes)
+
+
+def test_an_out_of_scope_message_at_the_planners_question_is_answered_and_the_run_keeps_waiting(live):
+    """2026-10-15 live: "which country has the largest population?" typed at a waiting question was taken as a new data
+    question (drop or keep). Now it is answered like a side question, and only the real answer reaches the planner."""
+    server, kwargs, tmp_path = live
+    replies = [{"label": "out_of_scope", "reason": "scripted", "reply": "I can help only with public breeding records."},
+               {"label": "answer_to_pending", "reason": "scripted", "reply": ""}]
+    model = FakeModelClient([reply_text(json.dumps(r), model="mock-model") for r in replies], reported_model="mock-model")
+    kw = {**kwargs, "triage_model": lambda: model}
+    history, state = turn(VAGUE, [], {}, kw)
+    job = state["job"]
+    history, state = turn("which country has the largest population?", history, state, kw)
+    shown = history[-1]["content"]
+    assert shown.startswith("I can help only with public breeding records.\n\n")
+    assert "then offer one example question" not in model.requests[0]["messages"][0]["content"]   # no example while it waits
+    assert "\n\nI'm still waiting for your answer to my question (or reply **cancel**): “Which study is meant?" in shown
+    assert state == {"job": job} and job.waiting_on == ctl.CLARIFY_PROMPT and job.controller.clarification_answers == 0
+    history, state = turn("S1, mean yield per clone", history, state, kw)
+    assert "Review this plan before approving" in history[-1]["content"] and server.calls == []
+    history, state = turn("cancel", history, state, kw)
+    result = last_run(tmp_path)
+    assert result.plan.question == f"{VAGUE}\nClarification 1 from the person: S1, mean yield per clone"
+    assert "population" not in json.dumps(result.notes) and len(model.requests) == 2
 
 
 def test_a_side_question_at_the_analysts_question_fetches_nothing_and_the_analyst_still_gets_its_answer(live):

@@ -6,8 +6,10 @@ What these tests prove, in plain words:
   like an ID (4 or more digits, or letters mixed with digits) is, and so is any number next to a data word.
   Breeding words (yield, clone, variety, ...) are data words. "help" makes an app question only in a message of
   4 words or fewer, or in one that is nothing but a request for help.
-* Every message that starts nothing (greeting, app question, unsure) costs exactly ONE scripted model call with no
-  tools. That call writes the reply, and for a message the rules cannot place it also picks the label.
+* Every message that starts nothing (greeting, app question, out of scope, unsure) costs exactly ONE scripted model call
+  with no tools. That call writes the reply, and for a message the rules cannot place it also picks the label.
+* Out of scope ("i hate you", "which country has the largest population?") gets the reply only: what the app covers and
+  one example, with no lookup line, and a later "yes" starts nothing.
 * The model's text is escaped like database text and cut to 600 characters. When the call fails, or the model wrote
   its reply for another label than the rules chose, the line written by code is shown. The "yes" line for unsure
   (quoting the person's message) and the example questions (once per tab) are written by code.
@@ -145,8 +147,15 @@ def test_the_prompt_carries_the_rules_the_reference_and_the_examples():
                  "Never claim to have looked anything up", "If they ask about something the reference below does not say "
                  "the app can do, say that the app does not do that", "Offer one example question only when it helps, "
                  "and never for unsure", "Do not offer a lookup or suggest a", "leave it empty for data_question and follow_up",
-                 "front-door.invalid", "Choose the label"):
-        assert rule in prompt
+                 "front-door.invalid", "Choose the label", "- out_of_scope: a message this app cannot help with",
+                 "an insult or rude remark", "between out_of_scope and unsure choose unsure",       # a doubt keeps the lookup offer
+                 "a message about crops, plants, places, programs, seasons or years is data_question or unsure",
+                 "For out_of_scope (this replaces the rules above about saying what the app does not do and about examples): "
+                 "do not repeat or restate what they asked. In one sentence, say what the app covers",
+                 "then offer one example question. Never offer to look their message up."):
+        assert rule in " ".join(prompt.split())                     # the same words, whatever the line breaks
+    assert "geography" not in prompt                                # locations are breeding data
+    assert f"- {triage.EXAMPLE_QUESTION}" in triage.QUESTION_GUIDE    # the code line's example is one of the questions to try
     for fact in ("It does not make parental-selection or line-advancement recommendations", "Which studies have a 2026 season?",
                  "synthetic source details", "Approve allows the specific database request"):
         assert fact in prompt
@@ -155,7 +164,7 @@ def test_the_prompt_carries_the_rules_the_reference_and_the_examples():
     assert "already sorted this message as app_question: use that label. Nothing will be looked up for this message" in known
 
 
-@pytest.mark.parametrize("label", ["greeting_or_smalltalk", "app_question", "data_question", "follow_up", "unsure"])
+@pytest.mark.parametrize("label", ["greeting_or_smalltalk", "app_question", "data_question", "follow_up", "out_of_scope", "unsure"])
 def test_one_call_without_tools_returns_the_label_and_the_reply(label):
     model = FakeModelClient([reply_text(decision(label, "Hello there"))])
     result = ask("tell me something interesting", lambda: model)
@@ -272,6 +281,9 @@ def test_code_adds_the_yes_line_for_unsure_and_the_examples_only_when_asked():
     ("app_question", "what can you do?", "capabilities", "**What can I use this assistant for?**"),
     ("app_question", "what's your name?", None, "### Your first question"),
     ("unsure", "bla bla bla", None, "Do you want me to look this up in front-door.invalid? Reply **yes**"),
+    ("out_of_scope", "i hate you", None, "I can help only with public breeding records in front-door.invalid: studies, trials, "
+                                         "traits, locations, seasons and recorded measurements. For example: “Which studies "
+                                         "have a 2026 season?”"),
 ])
 def test_without_model_text_the_line_written_by_code_is_shown(label, message, topic, expected):
     assert shown(label, "   ", message=message, topic=topic).startswith(expected)
@@ -385,7 +397,8 @@ def test_greetings_and_app_questions_get_one_model_reply_and_start_nothing(chat,
     ("hello", "app_question", "Hello! I can help you explore public breeding data."),
     ("can you help me?", "data_question", "### Your first question"),                         # the rules say app question
     ("What does approve mean?", "greeting_or_smalltalk", "**What do Approve, Continue and Accept mean?**"),
-], ids=["greeting-data", "greeting-follow-up", "greeting-unsure", "greeting-app", "help-data", "approve-greeting"])
+    ("hello", "out_of_scope", "Hello! I can help you explore public breeding data."),
+], ids=["greeting-data", "greeting-follow-up", "greeting-unsure", "greeting-app", "help-data", "approve-greeting", "greeting-oos"])
 def test_a_reply_written_for_another_label_is_not_shown_and_starts_nothing(chat, no_runs, message, label, expected):
     model, _, factory = model_factory(reply_text(decision(label, "I'll search those records now; just say yes.")))
     history, state = chat.turn(message, triage_model=factory)
@@ -487,6 +500,44 @@ def test_a_run_that_cannot_start_after_sorting_leaves_one_clear_reply(chat, monk
     history, state = chat.turn("tell me something interesting", triage_model=factory)
     assert [m["role"] for m in history] == ["user", "assistant"] and "could not start" in history[-1]["content"]
     assert "secret-that-must-not-appear" not in str(history) and state == {}
+
+
+OUT_OF_SCOPE_REPLY = ("I can help only with public breeding records such as studies, traits and measurements. "
+                      "For example: “Which studies have a 2026 season?”")
+
+
+@pytest.mark.parametrize("message", ["i hate you", "which country has the largest population?"])
+def test_out_of_scope_gets_the_reply_only_no_lookup_line_and_no_waiting_yes(chat, no_runs, message):
+    """2026-10-15 live: "i hate you" got "Reply yes to look up"; the population question got the same lookup offer."""
+    model, _, factory = model_factory(reply_text(decision("out_of_scope", OUT_OF_SCOPE_REPLY)))
+    history, state = chat.turn(message, triage_model=factory)
+    content = history[-1]["content"]
+    assert content == OUT_OF_SCOPE_REPLY                                           # the model's reply only
+    assert "Reply **yes**" not in content and "look up" not in content and "Questions to try" not in content
+    assert "pending_question" not in state and "job" not in state and len(model.requests) == 1
+    assert "Choose the label" in model.requests[0]["messages"][0]["content"]       # the rules could not place it
+    history, state = chat.turn("yes", history, state, triage_model=None)           # a later yes starts nothing
+    assert no_runs == [] and chat.requests == [] and not chat.out.exists() and "job" not in state
+    assert history[-1]["content"].startswith("I can help you explore public breeding data.")   # just the word "yes"
+
+
+def test_out_of_scope_forgets_an_earlier_unsure_question(chat, no_runs):
+    _, _, factory = model_factory(reply_text(decision("unsure", "What would you like to know?")),
+                                  reply_text(decision("out_of_scope", OUT_OF_SCOPE_REPLY)))
+    _, state = chat.turn("tell me something interesting", triage_model=factory)
+    assert state["pending_question"] == "tell me something interesting"
+    history, state = chat.turn("i hate you", [], state, triage_model=factory)
+    assert history[-1]["content"] == OUT_OF_SCOPE_REPLY and "pending_question" not in state
+    chat.turn("yes", history, state, triage_model=None)                            # nothing waits for a yes any more
+    assert no_runs == [] and chat.requests == []
+
+
+def test_out_of_scope_without_model_text_gets_the_line_written_by_code(chat, no_runs):
+    _, _, factory = model_factory(reply_text(decision("out_of_scope", "")))
+    history, state = chat.turn("i hate you", triage_model=factory)
+    assert history[-1]["content"] == ("I can help only with public breeding records in front-door.invalid: studies, trials, traits, "
+                                      "locations, seasons and recorded measurements. For example: “Which studies have a 2026 season?”")
+    assert "pending_question" not in state and no_runs == []
 
 
 def test_the_page_hands_the_front_door_model_to_the_chat(monkeypatch):
