@@ -252,21 +252,23 @@ _MODEL_REPEAT_REQUIRES = {
     "descriptive mean is not evidence of genetic superiority.": _note_key(_CODE_AVERAGE_LIMIT),
     "the mean is a simple descriptive average of all valid recorded values in the study; it does not account for trial design, environment, or genetic factors.": _note_key(_CODE_AVERAGE_LIMIT),
 }
-# Exact administrative wording already covered by the table; never a keyword-based warning filter.
+# The Retriever's own notes ("model note: ..." in the retrieval warnings, agents.retriever.build_report) describe its job
+# (finding IDs, fetching tables), not the data. Under an answer they read as if it were wrong: "The pooled mean was not
+# computed." under "Mean: 2.37857" (eval 20261016T205733Z, q13). The chat leaves every one out; the Full report keeps them
+# ("Retriever note: ..."), as the data review screen already did. What only they told the chat is now written by code: a
+# fetch the approval gate refused (_ledger_reasons) and a saved table with no rows (_empty_tables). The three exact wordings
+# of Retriever process notes that were hidden here before are gone with them.
+_RETRIEVER_NOTE = "model note:"
+# Exact administrative wording already covered by the table; never a keyword-based warning filter. (Also an Analyst note.)
 _MODEL_BOOKKEEPING = frozenset({"study names were found in the artifact preview"})
-# Observed process summaries only. Additional clauses or unfamiliar warnings are kept in chat.
-_MODEL_PROCESS_PATTERNS = (
-    re.compile(r"Observations for variable '[^'\r\n]+' \([^()\r\n]+\) in study [A-Za-z0-9_-]+ were fetched\. Artifact: art_[A-Za-z0-9_]+\. Statistical calculations, such as the pooled mean, are not performed\."),
-    re.compile(r"Exported complete study metadata for season [0-9]+ in art_[A-Za-z0-9_]+ \([0-9]+ studies, [0-9]+ previewed\)\."),
-    re.compile(r"There are [0-9]+ locations in the catalog\. Artifact art_[A-Za-z0-9_]+ contains the complete exported table\."),
-)
 
 
 def _caveat_groups(controller: Any, claims: list[Claim]) -> tuple[list[str], list[str]]:
     """Keep tool/controller limits separate from unverified model prose; preserve unknown warnings."""
     analysis = getattr(controller, "analysis", None)
     retrieval = getattr(controller, "retrieval", None)
-    notes = [*(getattr(analysis, "caveats", []) or []), *(getattr(retrieval, "warnings", []) or [])]
+    notes = [*(getattr(analysis, "caveats", []) or []),
+             *[warning for warning in (getattr(retrieval, "warnings", []) or []) if not warning.lower().startswith(_RETRIEVER_NOTE)]]
     exclusions = [*(getattr(analysis, "exclusions", []) or []), *[item for claim in claims for item in claim.exclusions]]
     notes += [f"Excluded: {item.count} — {item.reason}." for item in exclusions if item.count]
     source_notes, model_notes = [], []
@@ -297,7 +299,7 @@ def _caveat_groups(controller: Any, claims: list[Claim]) -> tuple[list[str], lis
             source_result.append(_text(note))
     for note in model_notes:
         key = _note_key(note)
-        if key in source_keys or key in _MODEL_BOOKKEEPING or any(pattern.fullmatch(note) for pattern in _MODEL_PROCESS_PATTERNS):
+        if key in source_keys or key in _MODEL_BOOKKEEPING:
             continue
         if note == "The measurement unit is not stated in the source data." and unit_in_result:
             continue
@@ -313,6 +315,37 @@ def _caveat_groups(controller: Any, claims: list[Claim]) -> tuple[list[str], lis
         if _note_key(warning) not in seen_source:
             source_result.append(warning)
     return source_result, model_result
+
+
+_ID_LIKE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,39}")
+
+
+def _ledger_reasons(controller: Any) -> list[str]:
+    """For a run that did not complete: each fetch the approval gate refused (the ledger's "blocked" studies), in fixed words.
+    The gate's own reason is not shown: it quotes the arguments the model wrote (review, 2026-10-16: a "variable" holding a
+    false claim reached the chat). The study ID is shown only when it looks like an ID. Other ledger statuses are not
+    repeated here: their reasons are the fetch's own warnings, which the screen already shows."""
+    reasons = []
+    for entry in getattr(getattr(controller, "retrieval", None), "study_ledger", None) or []:
+        if getattr(entry, "status", None) != "blocked":
+            continue
+        study = str(getattr(entry, "study_id", "") or "")
+        who = f"Study {study}: a fetch" if _ID_LIKE.fullmatch(study) else "A fetch"
+        reasons.append(_text(f"{who} was refused by the approval check; the Full report has the reason."))
+    return list(dict.fromkeys(reasons))
+
+
+def _empty_tables(controller: Any) -> list[str]:
+    """Each saved measurement table with no rows: complete-empty is complete evidence, so no warning is written for it."""
+    lines = []
+    for artifact in getattr(getattr(controller, "retrieval", None), "artifacts", None) or []:
+        kind = getattr(artifact, "kind", None)
+        if kind not in ("observations", "observation_units") or getattr(artifact, "row_count", None) != 0:
+            continue
+        variables = ", ".join(getattr(artifact, "variable_ids", None) or [])
+        what = f"Study {', '.join(getattr(artifact, 'study_ids', None) or []) or '(not stated)'}" + (f", variable {variables}" if variables else "")
+        lines.append(_text(f"{what}: " + ("no rows were returned." if kind == "observations" else "no observation units were returned.")))
+    return list(dict.fromkeys(lines))
 
 
 def _caveats(controller: Any, claims: list[Claim]) -> list[str]:
@@ -342,6 +375,22 @@ def _provider_failure(controller: Any) -> tuple[str, str, str] | None:
     return None
 
 
+# Run notes that are never the reason a run stopped: the coordinator's bookkeeping (agents.coordinator: the scope code set, the
+# study count, clarifications it dropped or added; not its rejected attempts, errors or stop), and the history of clarification
+# rounds (the needs_clarification screen lists those itself).
+_NOT_A_REASON = re.compile(r"coordinator: (?:scope\.study_ids |the planner judged |dropped clarification |program membership is not "
+                           r"established|matching_study_count=|added required clarification)|clarification \d+: ")
+_CACHE_MISS = "metadata is not in the offline cache"                       # stale once the catalog setup has prepared them
+_CATALOGS_PREPARED = "complete study and variable catalogs prepared"
+
+
+def _fallback_notes(notes: list[str]) -> list[str]:
+    """The run notes a failure screen may show when it has no other reason (the last three that sound like a reason)."""
+    prepared = [i for i, note in enumerate(notes) if note.startswith(_CATALOGS_PREPARED)]
+    kept = [note for i, note in enumerate(notes) if not _NOT_A_REASON.match(note)
+            and not (note.startswith(_CACHE_MISS) and any(j > i for j in prepared))]
+    return [note for note in kept if re.search(r"error|fail|block|missing|not |timeout|cancel|limit|incomplete|clarification|stop|refus",
+                                                 note, re.I)][-3:]
 # A clarification round in the run's notes (run.clarify_phase, coordination_runtime), and the note that ends the last one.
 # When the cap ends a run, the chat lists every round: run 20261015T165633 showed only the last two of five.
 _ROUND_NOTE = re.compile(r"(?:clarification \d+: |still not ready after )")
@@ -355,7 +404,8 @@ def answer_summary(controller: Any) -> str:
     if status != "completed" or getattr(analysis, "status", None) != "completed" or getattr(retrieval, "status", None) != "completed":
         shown = {"incomplete": "Incomplete result", "failed": "Could not complete this question", "blocked": "Question blocked",
                  "canceled": "Question canceled", "needs_clarification": "More detail is needed", "limit_reached": "A request limit was reached"}.get(status, "No verified answer is available")
-        reasons = _caveats(controller, [])
+        empty = _empty_tables(controller) if getattr(retrieval, "status", None) == "completed" else []
+        reasons = list(dict.fromkeys([*_ledger_reasons(controller), *_caveats(controller, []), *empty]))
         provider = _provider_failure(controller)
         if provider is not None:
             raw_error, code, message = provider
@@ -377,7 +427,7 @@ def answer_summary(controller: Any) -> str:
             if status == "needs_clarification" and any(note.startswith("still not ready after ") for note in notes):
                 picked = [note for note in notes if _ROUND_NOTE.match(note)]    # every round, then what is still unclear
             else:
-                picked = [note for note in notes if re.search(r"error|fail|block|missing|not |timeout|cancel|limit|incomplete|clarification|stop|refus", note, re.I)][-3:]
+                picked = _fallback_notes(list(notes))
             reasons = [_text(_human_note(note)) for note in picked]
         if not reasons:
             reasons = ["The run did not produce a complete, verified analysis."]
@@ -419,6 +469,7 @@ def answer_summary(controller: Any) -> str:
             lines += [*block, ""]
     lines += _numeric_blocks(other, sources, source_labels, focus_mean=focus_mean)
     caveats, model_notes = _caveat_groups(controller, claims)
+    caveats += [line for line in _empty_tables(controller) if line not in caveats]
     if focus_mean:
         for claim in claims:
             if claim.kind != "mean" and claim.value is None and claim.missing_reason:
