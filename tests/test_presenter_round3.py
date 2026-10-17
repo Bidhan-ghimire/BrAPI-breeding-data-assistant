@@ -213,6 +213,49 @@ def test_a_failure_screen_shows_the_reason_not_stale_or_planning_notes():
     assert "metadata is not in the offline cache" in missing                       # not stale: no catalogs were prepared
 
 
+# Eval 20261017T122825Z (Luna), q14: numeric_summary's count (analysis units 140) and count_records' row count (units not
+# checked) in one answer. The row count's "Recorded analysis units: unknown" read as contradicting the first block.
+def row_count(value=140, kind="observations"):
+    return Claim(claim_id="clm_presenter_rows", kind="count", value=value, source_artifact_hashes=["a" * 64],
+                 denominator={"name": f"rows in the complete {kind} table", "n": value}, transformation="row count of a complete table")
+
+
+def test_a_row_count_says_it_does_not_check_analysis_units():
+    valid = mean().model_copy(update={"claim_id": "clm_presenter_valid", "kind": "count", "value": 140,
+                                      "transformation": "count of valid values; valid values used as recorded (one row per observation unit)"})
+    shown = cp.answer_summary(view([mean(), valid, row_count()], [CODE_DATES], question="How many valid values does T4501 have?",
+                                   kind="count"))
+    assert "Based on valid numeric values, one per observation unit: 140. Recorded analysis units: 140." in shown
+    assert "Based on rows in the complete observations table: 140. Analysis units: not checked by a row count." in shown
+    assert "Recorded analysis units: unknown" not in shown and "| Count | 140 |" in shown      # nothing else moved
+    without_units = mean().model_copy(update={"n_independent_units": None})                # any other claim keeps "unknown"
+    other = cp.answer_summary(view([without_units, row_count()], [], question="Give the mean and the count of rows.",
+                                   kind="mean"))                                  # "count" keeps every block (no mean lead-in)
+    assert "Recorded analysis units: unknown" in other and "Analysis units: not checked by a row count." in other
+
+
+def test_only_a_row_count_without_units_gets_the_not_checked_line():
+    """Review (2026-10-17): pin both conditions. A row count that recorded units keeps them; other counts without units
+    (distinct IDs, valid values) keep "unknown"."""
+    with_units = row_count().model_copy(update={"n_independent_units": 7})
+    assert "Recorded analysis units: 7." in cp.answer_summary(view([with_units], [], question="How many rows?", kind="count"))
+    distinct = Claim(claim_id="clm_presenter_distinct", kind="count", value=5, source_artifact_hashes=["a" * 64],
+                     denominator={"name": "rows in the complete observations table", "n": 140},
+                     transformation="number of distinct non-empty exact text values")
+    valid = Claim(claim_id="clm_presenter_valid_none", kind="count", value=140, source_artifact_hashes=["a" * 64],
+                  denominator={"name": "valid numeric values", "n": 140},
+                  transformation="count of valid values; valid values used as recorded")
+    shown = cp.answer_summary(view([distinct, valid], [], question="How many distinct clones and valid values?", kind="count"))
+    assert shown.count("Recorded analysis units: unknown") == 2 and "not checked by a row count" not in shown
+    # A block that holds a row count and another statistic (no tool writes one today; the review built it): every claim of
+    # the block must be a row count, not only the first.
+    mixed = Claim(claim_id="clm_presenter_mixed", kind="mean", value=2.0, source_artifact_hashes=["a" * 64],
+                  denominator={"name": "rows in the complete observations table", "n": 140},
+                  transformation="mean of valid values; row count of a complete table")
+    block = cp.answer_summary(view([row_count(), mixed], [], question="Give the row count and the mean.", kind="count"))
+    assert "| Mean |" in block and "Recorded analysis units: unknown" in block and "not checked by a row count" not in block
+
+
 @pytest.mark.parametrize("code, message, next_step", [
     ("provider_http_error", "provider returned HTTP 429", "cause of HTTP 429 is unknown"),
     ("provider_quota", "provider reports account quota or billing limit HTTP 429", "Check the model provider account quota"),

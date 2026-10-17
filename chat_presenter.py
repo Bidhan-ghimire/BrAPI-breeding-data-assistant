@@ -16,6 +16,7 @@ from run import approval_lead, carried_over_line, required_fetches, scope_needs_
 LIST_LIMIT = 30
 DISTINCT = "number of distinct non-empty exact text values"
 FREQUENCY = "frequency of exact text values"
+ROW_COUNT = "row count of a complete table"      # analyst_tools.tool_count_records: it counts rows and never checks units
 NAMES = {
     "studyDbId": ("Studies", (("studyName", "Study"), ("locationName", "Location"), ("seasons", "Season"))),
     "locationDbId": ("Locations", (("locationName", "Location"), ("countryName", "Country"))),
@@ -215,10 +216,13 @@ def _numeric_blocks(claims: list[Claim], sources: _Sources, source_labels: dict[
         else:
             lines += _table(["Statistic", "Result"], rendered)
         independent = str(first.n_independent_units) if first.n_independent_units is not None else "unknown"
+        units = f"Recorded analysis units: {independent}."
+        if first.n_independent_units is None and all(claim.transformation == ROW_COUNT for claim in group):
+            units = "Analysis units: not checked by a row count."  # "unknown" read as contradicting a block that has them (q14)
         if focus_mean:
-            lines += ["", f"n = {first.denominator.n} ({_text(first.denominator.name)}). Recorded analysis units: {independent}.", ""]
+            lines += ["", f"n = {first.denominator.n} ({_text(first.denominator.name)}). {units}", ""]
         else:
-            lines += ["", f"Based on {_text(first.denominator.name)}: {first.denominator.n}. Recorded analysis units: {independent}.",
+            lines += ["", f"Based on {_text(first.denominator.name)}: {first.denominator.n}. {units}",
                       f"Method: {_text(_claim_method(first))}.", ""]
     return lines
 
@@ -273,7 +277,7 @@ def _caveat_groups(controller: Any, claims: list[Claim]) -> tuple[list[str], lis
     notes += [f"Excluded: {item.count} — {item.reason}." for item in exclusions if item.count]
     source_notes, model_notes = [], []
     catalog_only = (bool(claims) and all(claim.kind == "count" and claim.transformation in
-                    (DISTINCT, FREQUENCY, "row count of a complete table") for claim in claims)) or (
+                    (DISTINCT, FREQUENCY, ROW_COUNT) for claim in claims)) or (
                     not claims and getattr(getattr(getattr(controller, "plan", None), "statistic", None), "kind", None) == "count")
     for note in notes:
         if note.lower().startswith("key claims (model"):
