@@ -27,6 +27,7 @@ REQUIRED_MODULES = {
     "pytest": "pytest",
     "mcp": "mcp",
     "openai": "openai",
+    "anthropic": "anthropic",    # Claude as a second model provider (LLM_PROVIDER=anthropic), added 2026-10-17
     "pydantic": "pydantic",
     "gradio": "gradio",          # the chat window (app.py), added 2026-09-29
 }

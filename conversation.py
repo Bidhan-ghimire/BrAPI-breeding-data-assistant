@@ -36,6 +36,7 @@ from typing import Any, Callable, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import triage
+from llm import ModelProviderError
 from retrieval_review import _cell as _escaped       # the same escaping the data review uses for database text
 from run import (ANALYST_PROMPT, CATALOG_PROMPT, CLARIFY_PROMPT, DATA_REVIEW_PROMPT, RETRIEVER_PROMPT, SUPERVISOR_PROMPT,
                  is_approval_revision)
@@ -229,6 +230,10 @@ def ask_model(text: str, make_model: Callable[[], Any] | None, *, prompt: str) -
         return None
     try:
         reply = triage._within_time_limit(triage._complete(make_model(), prompt, text))
+    except ModelProviderError as exc:
+        if exc.code == "quota":      # the model budget is used up: the chat says so and nothing is sent (app.budget_reply)
+            raise
+        return None
     except Exception:  # settings, provider, timeout: the message then goes to the run as before, never a crash
         return None
     return parse_decision(reply)

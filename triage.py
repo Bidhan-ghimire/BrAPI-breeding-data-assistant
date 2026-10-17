@@ -51,7 +51,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import catalog_lists
 from app_help import QUESTION_GUIDE, QUICK_START
-from llm import DEFAULT_MAX_TOKENS
+from llm import DEFAULT_MAX_TOKENS, ModelProviderError, for_role
 from retrieval_review import _cell as _escaped       # the same escaping the data review uses for database text
 
 __all__ = ["Label", "PIPELINE_LABELS", "TRIAGE_MAX_TOKENS", "TRIAGE_TIMEOUT_S", "REPLY_MAX_CHARS", "front_door_prompt",
@@ -345,9 +345,9 @@ def catalog_list_request(decision: TriageDecision | None, text: str) -> catalog_
 async def _complete(model: Any, prompt: str, text: str) -> Any:
     messages = [{"role": "system", "content": prompt}, {"role": "user", "content": text[:SHOWN_CHARS]}]
     if hasattr(model, "__aenter__"):                 # the real client opens its connection here and closes it after
-        async with model as opened:
-            return await opened.complete(messages, [], max_tokens=TRIAGE_MAX_TOKENS)
-    return await model.complete(messages, [], max_tokens=TRIAGE_MAX_TOKENS)
+        async with model as opened:                  # Claude: the front door's effort (llm.for_role), on the opened client
+            return await for_role(opened, "front_door").complete(messages, [], max_tokens=TRIAGE_MAX_TOKENS)
+    return await for_role(model, "front_door").complete(messages, [], max_tokens=TRIAGE_MAX_TOKENS)
 
 
 def ask_model(text: str, make_model: Callable[[], Any] | None, *, source: str, reference: str,
@@ -359,6 +359,10 @@ def ask_model(text: str, make_model: Callable[[], Any] | None, *, source: str, r
     prompt = front_door_prompt(source=source, reference=reference, known_label=known_label, catalog=catalog, earlier=earlier)
     try:
         reply = _within_time_limit(_complete(make_model(), prompt, text))
+    except ModelProviderError as exc:
+        if exc.code == "quota":      # the model budget is used up: the chat says so (app.budget_reply) and tries nothing else
+            raise
+        return None
     except Exception:  # settings, provider, timeout: the person still gets an answer, never a crash
         return None
     return parse_decision(reply)
@@ -518,6 +522,10 @@ def ask_to_talk(text: str, make_model: Callable[[], Any] | None, *, label: str, 
         words = recent_words(earlier_words)
         prompt = talk_prompt(label=label, source=source, reference=reference, earlier_words=words)
         reply = _within_time_limit(_complete(make_model(), prompt, text), TALK_TIMEOUT_S)
+    except ModelProviderError as exc:
+        if exc.code == "quota":      # the model budget is used up: the chat says so (app.budget_reply)
+            raise
+        return None
     except Exception:  # settings, provider, timeout: the line written by code, never a crash
         return None
     talk = parse_talk(reply)

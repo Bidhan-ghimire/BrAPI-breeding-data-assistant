@@ -613,12 +613,12 @@ class Controller:
     async def _real_model(self) -> ModelClient:
         """The configured model, opened once per run and closed with the run."""
         if self._real_client is None:
-            from llm import OpenAICompatibleClient, load_llm_settings
+            from llm import load_llm_settings, make_model_client
 
             settings = load_llm_settings()
             self.models.requested = settings.model or "unset"
             assert self._stack is not None
-            self._real_client = await self._stack.enter_async_context(OpenAICompatibleClient(settings))
+            self._real_client = await self._stack.enter_async_context(make_model_client(settings))   # LLM_PROVIDER decides
         return self._real_client
 
     def _server(self) -> str:

@@ -15,6 +15,19 @@ What is here:
   implements it on the installed `openai` async SDK (local Ollama by default),
   with an explicit lifetime (`async with`) and no SDK auto-retries.
   FakeModelClient is a scripted stand-in for tests and the mock smoke test.
+* AnthropicClient — the same interface on the installed `anthropic` SDK (Claude's
+  Messages API), chosen with LLM_PROVIDER=anthropic (blank or openai: as before).
+  Its settings: LLM_MODEL (a claude-... name), ANTHROPIC_API_KEY, LLM_ALLOW_REMOTE=true,
+  LLM_EFFORT_FRONT_DOOR / _RETRIEVER (default low) and LLM_EFFORT_COORDINATOR /
+  _ANALYST (default medium), LLM_ANTHROPIC_MAX_TOKENS (default 16000, thinking
+  included) and LLM_ANTHROPIC_TIMEOUT (seconds per request, default 120). Every
+  request sets the asking role's effort (for_role) and never sends temperature,
+  top_p, top_k, thinking or a forced tool; the reply's blocks go back unchanged on
+  the next turn; a used-up budget (credit, spend limit, billing) is never retried.
+  LLM_MODEL must be a model that takes the effort setting (Opus 5 / 5.5, Sonnet 5 /
+  5.5, Haiku 5.5); an older one answers every request with HTTP 400. The address,
+  key and headers are fixed in code; proxy and certificate variables of the
+  operating system (HTTPS_PROXY, SSL_CERT_FILE) still apply, as for OpenAI.
 * Budget — model calls, tool calls, elapsed seconds, fetch tools, repairs.
   One Budget object is SHARED across agents and retries; it is never reset per
   model turn. A model turn containing 8 tool calls is 8 tool calls.
@@ -51,6 +64,7 @@ import json
 import math
 import os
 import random
+import re
 import sys
 import time
 import uuid
@@ -84,6 +98,8 @@ __all__ = [
     "reply_text", "reply_tools", "normalize_openai_response",
     "Budget", "compact_tool_result", "run_agent_loop", "FETCH_TOOLS", "DEFAULT_MAX_TOKENS", "SmokeTools", "mock_smoke_model", "smoke", "main",
     "RepeatGuard", "MAX_REPEATS", "REPEAT_ENDED",
+    "ProviderConfigError", "PROVIDERS", "AnthropicClient", "normalize_anthropic_response", "to_anthropic_request",
+    "make_model_client", "for_role", "agent_role", "ANTHROPIC_BASE_URL", "ANTHROPIC_EFFORTS", "BUDGET_MESSAGE",
 ]
 
 FETCH_TOOLS = frozenset({"get_observations", "get_observation_units"})   # the expensive, approval-guarded tools
@@ -101,6 +117,21 @@ REPLY_LIMIT_PARAMS = ("max_tokens", "max_completion_tokens")
 # Some OpenAI reasoning models refuse tools on the chat-completions endpoint unless it is "none" (HTTP 400, seen 2026-09-28).
 REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high")
 _LOOPBACK = {"localhost", "127.0.0.1", "::1", "[::1]"}
+PROVIDERS = ("openai", "anthropic")          # LLM_PROVIDER; blank = openai (any OpenAI-compatible endpoint, as before)
+# Claude (LLM_PROVIDER=anthropic). Facts from Anthropic's docs and the installed SDK (anthropic 1.15.0), checked 2026-10-17.
+ANTHROPIC_BASE_URL = "https://api.anthropic.com"    # passed to the SDK, so ANTHROPIC_BASE_URL in the environment cannot redirect it
+ANTHROPIC_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+ROLES = ("front_door", "coordinator", "retriever", "analyst")       # who asks; each has its own effort setting
+DEFAULT_EFFORTS = {"front_door": "low", "retriever": "low", "coordinator": "medium", "analyst": "medium"}
+OTHER_ROLE_EFFORT = "medium"                                        # any other caller (the smoke test): effort is still sent
+# Thinking counts inside the reply limit. Above about 16K output Anthropic advises streaming, which this adapter does not use.
+ANTHROPIC_MAX_TOKENS = 16000
+ANTHROPIC_MAX_TOKENS_RANGE = (1024, 16000)
+ANTHROPIC_TIMEOUT_RANGE = (30.0, 300.0)
+# The installed SDK reads these from the process environment whatever the app passes: extra request headers (which can
+# replace its own) and request logging. Refused while set; their values are never read. An explicit key makes the SDK
+# ignore ANTHROPIC_AUTH_TOKEN and profiles, and telemetry is switched off in code (AnthropicClient.__aenter__).
+ANTHROPIC_REFUSED_ENV = ("ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_LOG")
 
 
 # --------------------------------------------------------------------------
@@ -109,6 +140,10 @@ _LOOPBACK = {"localhost", "127.0.0.1", "::1", "[::1]"}
 
 class LlmConfigError(Exception):
     """A settings problem. The message never contains the key."""
+
+
+class ProviderConfigError(LlmConfigError):
+    """A provider setting the chat may show as it is: written without any value from the settings (no key, no address)."""
 
 
 @dataclass(frozen=True)
@@ -120,11 +155,20 @@ class LlmSettings:
     request_timeout: float = 120.0
     reply_limit_param: str = "max_tokens"      # LLM_REPLY_LIMIT_PARAM: which request field carries the reply limit
     reasoning_effort: str | None = None        # LLM_REASONING_EFFORT: sent as "reasoning_effort" when set; None = not sent
+    provider: str = "openai"                   # LLM_PROVIDER: openai (the endpoint above) or anthropic (Claude)
+    efforts: tuple[tuple[str, str], ...] = ()  # anthropic: (role, effort) from the LLM_EFFORT_* settings
+    anthropic_max_tokens: int = ANTHROPIC_MAX_TOKENS     # anthropic: LLM_ANTHROPIC_MAX_TOKENS, the reply limit sent
+    key_source: str | None = None              # anthropic: where the key came from (".env" or "the environment"), never the key
+
+    def effort_for(self, role: str) -> str:
+        """The effort a request from `role` carries (Claude): its setting, else its default, else medium."""
+        return dict(self.efforts).get(role) or DEFAULT_EFFORTS.get(role, OTHER_ROLE_EFFORT)
 
     def __repr__(self) -> str:                 # keep the key out of logs and tracebacks
         return (f"LlmSettings(base_url={self.base_url!r}, api_key='***', model={self.model!r}, "
                 f"allow_remote={self.allow_remote}, request_timeout={self.request_timeout}, reply_limit_param={self.reply_limit_param!r}, "
-                f"reasoning_effort={self.reasoning_effort!r})")
+                f"reasoning_effort={self.reasoning_effort!r}, provider={self.provider!r}, efforts={self.efforts!r}, "
+                f"anthropic_max_tokens={self.anthropic_max_tokens}, key_source={self.key_source!r})")
 
 
 def is_loopback(url: str) -> bool:
@@ -145,6 +189,11 @@ def load_llm_settings(env_file: Path | None = None, environ: Mapping[str, str] |
     if not ignore_default and env_file.is_file():
         values.update({k: v for k, v in dotenv_values(env_file).items() if v is not None})
     values.update(environment)
+    provider = values.get("LLM_PROVIDER", "").strip().lower() or "openai"
+    if provider not in PROVIDERS:
+        raise ProviderConfigError("LLM_PROVIDER must be blank, openai or anthropic")
+    if provider == "anthropic":
+        return _anthropic_settings(values, environment)
     base_url = values.get("LLM_BASE_URL", "http://localhost:11434/v1").strip().rstrip("/")
     allow_remote = values.get("LLM_ALLOW_REMOTE", "false").strip().lower() in ("1", "true", "yes")
     reply_limit_param = values.get("LLM_REPLY_LIMIT_PARAM", "max_tokens").strip() or "max_tokens"
@@ -158,6 +207,53 @@ def load_llm_settings(env_file: Path | None = None, environ: Mapping[str, str] |
                            reasoning_effort=reasoning_effort)
     check_endpoint(settings)
     return settings
+
+
+def _anthropic_settings(values: Mapping[str, str], environment: Mapping[str, str]) -> LlmSettings:
+    """LLM_PROVIDER=anthropic. Every refusal is a ProviderConfigError whose message names settings, never their values."""
+    if values.get("SPACE_ID", "").strip():
+        raise ProviderConfigError("LLM_PROVIDER=anthropic is not allowed on the hosted demo yet: its data-sharing text does "
+                                  "not describe Claude's data policy")
+    present = [name for name in ANTHROPIC_REFUSED_ENV if name in environment]
+    if present:
+        raise ProviderConfigError(f"remove {' and '.join(present)} from the environment before using LLM_PROVIDER=anthropic "
+                                  "(the Claude SDK would add request headers or log requests)")
+    if values.get("LLM_ALLOW_REMOTE", "false").strip().lower() not in ("1", "true", "yes"):
+        raise ProviderConfigError("LLM_PROVIDER=anthropic sends questions to Anthropic's servers: set LLM_ALLOW_REMOTE=true on purpose")
+    model = values.get("LLM_MODEL", "").strip()
+    if not model.startswith("claude-"):
+        raise ProviderConfigError("LLM_MODEL must name a Claude model (claude-...) when LLM_PROVIDER=anthropic")
+    key = values.get("ANTHROPIC_API_KEY", "").strip()
+    if not key:
+        raise ProviderConfigError("ANTHROPIC_API_KEY is missing: add it to .env to use LLM_PROVIDER=anthropic")
+    efforts = []
+    for role in ROLES:
+        name = f"LLM_EFFORT_{role.upper()}"
+        effort = values.get(name, "").strip().lower() or DEFAULT_EFFORTS[role]
+        if effort not in ANTHROPIC_EFFORTS:
+            raise ProviderConfigError(f"{name} must be blank or one of {list(ANTHROPIC_EFFORTS)}")
+        efforts.append((role, effort))
+    max_tokens = int(_bounded(values, "LLM_ANTHROPIC_MAX_TOKENS", ANTHROPIC_MAX_TOKENS, ANTHROPIC_MAX_TOKENS_RANGE, int))
+    timeout = _bounded(values, "LLM_ANTHROPIC_TIMEOUT", 120.0, ANTHROPIC_TIMEOUT_RANGE, float)
+    settings = LlmSettings(base_url=ANTHROPIC_BASE_URL, api_key=key, model=model, allow_remote=True, request_timeout=timeout,
+                           provider="anthropic", efforts=tuple(efforts), anthropic_max_tokens=max_tokens,
+                           key_source="the environment" if environment.get("ANTHROPIC_API_KEY", "").strip() else ".env")
+    check_endpoint(settings)
+    return settings
+
+
+def _bounded(values: Mapping[str, str], name: str, default: float, limits: tuple[float, float], kind: type) -> float:
+    raw = values.get(name, "").strip()
+    if not raw:
+        return default
+    low, high = limits
+    try:
+        number = kind(raw)
+    except ValueError:
+        number = None
+    if number is None or not math.isfinite(number) or not low <= number <= high:
+        raise ProviderConfigError(f"{name} must be a {'whole number' if kind is int else 'number'} from {low:g} to {high:g}")
+    return number
 
 
 def check_endpoint(settings: LlmSettings) -> None:
@@ -188,6 +284,8 @@ class ModelReply:
     model: str | None            # the model the SERVER says answered
     usage: Usage | None          # None = the provider reported nothing (unknown, not zero)
     refusal: str | None = None
+    provider_content: tuple[dict[str, Any], ...] | None = None   # Claude: the reply's blocks, sent back unchanged (None: OpenAI)
+    usage_detail: dict[str, int] | None = None                    # Claude: the four token counts as reported, for pricing
 
 
 class ModelProviderError(Exception):
@@ -327,6 +425,293 @@ def normalize_openai_response(response: Any) -> ModelReply:
     return ModelReply(content=getattr(message, "content", None), tool_calls=calls,
                       finish_reason=getattr(choice, "finish_reason", None), model=getattr(response, "model", None),
                       usage=usage, refusal=getattr(message, "refusal", None))
+
+
+# --------------------------------------------------------------------------
+# Claude (LLM_PROVIDER=anthropic)
+# --------------------------------------------------------------------------
+
+BUDGET_MESSAGE = ("The model budget is used up: the Claude account reports that its credit or spend limit was reached. "
+                  "No automatic retry was made.")
+BILLING_MESSAGE = ("The Claude account reports a billing or payment problem (HTTP 402). Check the payment details in the "
+                   "Console. No automatic retry was made.")
+SPEND_CAP_CODE = "enforced_spend_limit_reached"      # HTTP 429 error.details.error_code of the tier's monthly spend cap
+# A spend limit set in the Console (organization or workspace) is HTTP 400 with no code of its own, and so is a used-up
+# credit balance: these fixed beginnings are matched (Anthropic's docs, 2026-10-17). The message itself is never logged,
+# stored or shown; this is the one place where provider prose is read.
+_BUDGET_400_STARTS = ("you have reached your specified api usage limits", "you have reached your specified workspace api usage limits")
+_CREDIT_400_PHRASE = "your credit balance is too low"
+_STATUS_MESSAGES = {
+    401: "The Claude API refused the key (HTTP 401). Check ANTHROPIC_API_KEY.",
+    403: "The Claude API refused this request (HTTP 403): this key's organization or workspace may not use this model. "
+         "Check the Console.",
+    404: "The Claude API does not offer the model named in LLM_MODEL to this account (HTTP 404).",
+}
+
+
+def _anthropic_status_error(exc: Any) -> ModelProviderError:
+    """Classify by status and the structured error fields; the only prose read is the two budget 400s above."""
+    status = getattr(exc, "status_code", None)
+    body = getattr(exc, "body", None)
+    error = body.get("error") if isinstance(body, dict) and isinstance(body.get("error"), dict) else body
+    error = error if isinstance(error, dict) else {}
+    kind = error.get("type")
+    details = error.get("details") if isinstance(error.get("details"), dict) else {}
+    text = error.get("message").strip().lower() if isinstance(error.get("message"), str) else ""
+    headers = getattr(getattr(exc, "response", None), "headers", None) or {}
+    if status == 429:
+        if details.get("error_code") == SPEND_CAP_CODE:          # the monthly cap: no retry-after, retrying cannot help
+            return ModelProviderError("quota", BUDGET_MESSAGE, status_code=429)
+        wait = _retry_after_seconds(headers)
+        if kind == "rate_limit_error" and wait is not None:      # a rate limit with a retry time; the provider may forbid a retry
+            return ModelProviderError("rate_limit", "The Claude API reports a temporary rate limit (HTTP 429). "
+                                      "Wait before trying the question again.", status_code=429,
+                                      retryable=headers.get("x-should-retry", "").lower() != "false", retry_after_seconds=wait)
+        return ModelProviderError("rate_limit_unknown", "The Claude API returned HTTP 429 without a retry time, or of a kind "
+                                  "this app does not recognize. No automatic retry was made.", status_code=429)
+    if status == 402:
+        return ModelProviderError("quota", BILLING_MESSAGE, status_code=402)
+    if status == 400 and (text.startswith(_BUDGET_400_STARTS) or _CREDIT_400_PHRASE in text):
+        return ModelProviderError("quota", BUDGET_MESSAGE, status_code=400)
+    return ModelProviderError("http_error", _STATUS_MESSAGES.get(status, f"provider returned HTTP {status}"), status_code=status)
+
+
+def _not_sent(why: str) -> ModelProviderError:
+    return ModelProviderError("invalid_request", f"not sent to Claude: {why}")
+
+
+def _anthropic_tool(tool: Mapping[str, Any]) -> dict[str, Any]:
+    function = tool.get("function") if tool.get("type") == "function" else None
+    if not isinstance(function, dict) or not function.get("name"):
+        raise _not_sent("a tool without a name")
+    schema = function.get("parameters")
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        raise _not_sent(f"the tool {function['name']!r} has no object input schema")
+    converted = {"name": function["name"], "input_schema": schema}
+    if function.get("description"):
+        converted["description"] = function["description"]
+    return converted
+
+
+def _assistant_blocks(message: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """An assistant turn this app wrote in the OpenAI shape (no Claude blocks kept with it) as Claude's blocks."""
+    blocks: list[dict[str, Any]] = []
+    if message.get("content"):
+        blocks.append({"type": "text", "text": str(message["content"])})
+    for call in message.get("tool_calls") or []:
+        function = call.get("function") or {}
+        try:
+            arguments = json.loads(function.get("arguments") or "{}")
+        except ValueError:
+            arguments = None
+        if not isinstance(arguments, dict):
+            raise _not_sent("a tool call whose arguments are not a JSON object")
+        blocks.append({"type": "tool_use", "id": call.get("id"), "name": function.get("name"), "input": arguments})
+    return blocks
+
+
+def to_anthropic_request(messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
+    """The loop's OpenAI-shape conversation as the Messages API's `system`, `messages` and `tools`.
+
+    Consecutive tool results become ONE user turn of tool_result blocks, in the calls' order. An assistant turn that kept
+    Claude's own blocks (provider_content) is sent with exactly those blocks. Refused before anything is sent: a system
+    message after the first, a tool result without its call, a tool call left without a result, two turns in a row from
+    one side, an empty assistant turn, and a conversation that ends on the assistant's turn (Claude refuses "prefill")."""
+    request: dict[str, Any] = {}
+    rest = list(messages)
+    if rest and rest[0].get("role") == "system":
+        request["system"] = str(rest.pop(0).get("content") or "")
+    turns: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
+    waiting: list[Any] = []                    # the tool_use ids of the last assistant turn, in order
+
+    def add(turn: dict[str, Any]) -> None:
+        if turns and turns[-1]["role"] == turn["role"]:
+            raise _not_sent("two turns in a row from one side")
+        turns.append(turn)
+
+    def close_results() -> None:
+        nonlocal results, waiting
+        if waiting and [r["tool_use_id"] for r in results] != waiting:
+            raise _not_sent("a tool call has no result" if len(results) < len(waiting) else "tool results out of order")
+        if results:
+            add({"role": "user", "content": results})
+        results, waiting = [], []
+
+    for message in rest:
+        role = message.get("role")
+        if role == "tool":
+            if message.get("tool_call_id") not in waiting:
+                raise _not_sent("a tool result has no matching tool call")
+            results.append({"type": "tool_result", "tool_use_id": message["tool_call_id"], "content": str(message.get("content") or "")})
+            continue
+        close_results()
+        if role == "user":
+            add({"role": "user", "content": str(message.get("content") or "")})
+        elif role == "assistant":
+            kept = message.get("provider_content")
+            blocks = [dict(block) for block in kept] if kept is not None else _assistant_blocks(message)
+            if not blocks:
+                raise _not_sent("an empty assistant turn")
+            add({"role": "assistant", "content": blocks})
+            waiting = [block.get("id") for block in blocks if block.get("type") == "tool_use"]
+        elif role == "system":
+            raise _not_sent("a system message after the first message")
+        else:
+            raise _not_sent(f"a message with the unknown role {str(role)[:20]!r}")
+    close_results()
+    if not turns or turns[-1]["role"] != "user":
+        raise _not_sent("the conversation must end with the person's message or tool results")
+    request["messages"] = turns
+    if tools:
+        request["tools"] = [_anthropic_tool(tool) for tool in tools]
+    return request
+
+
+def _dump_block(block: Any) -> dict[str, Any]:
+    """A reply block exactly as the SDK itself would send it back (anthropic._utils._json.openapi_model_dump)."""
+    if hasattr(block, "model_dump"):
+        return block.model_dump(mode="json", exclude_unset=True, by_alias=True)
+    return dict(block)
+
+
+def _anthropic_usage(raw: Any) -> tuple[Usage | None, dict[str, int] | None]:
+    """prompt = input + cache-write + cache-read tokens; completion = output tokens, thinking included. Unknown: None."""
+    if raw is None:
+        return None, None
+    counts: dict[str, int] = {}
+    for name in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"):
+        value = getattr(raw, name, None)
+        if value is None and name.startswith("cache_"):
+            value = 0                                       # no cache use reported is none
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return None, None
+        counts[name] = value
+    prompt = counts["input_tokens"] + counts["cache_creation_input_tokens"] + counts["cache_read_input_tokens"]
+    try:
+        usage = Usage(prompt_tokens=prompt, completion_tokens=counts["output_tokens"], total_tokens=prompt + counts["output_tokens"])
+    except Exception:  # noqa: BLE001 - inconsistent usage is "unknown", not a crash
+        usage = None
+    return usage, counts
+
+
+def normalize_anthropic_response(response: Any) -> ModelReply:
+    """Claude's reply as our plain ModelReply; its blocks are kept whole, in order, to be sent back unchanged."""
+    blocks = tuple(_dump_block(block) for block in (getattr(response, "content", None) or []))
+    texts = [block["text"] for block in blocks if block.get("type") == "text" and isinstance(block.get("text"), str)]
+    calls = [ToolCallRequest(id=str(block.get("id") or f"call_{uuid.uuid4().hex[:8]}"), name=str(block.get("name") or ""),
+                             arguments_json=json.dumps(block.get("input", {}), ensure_ascii=False))
+             for block in blocks if block.get("type") == "tool_use"]
+    reason = getattr(response, "stop_reason", None)
+    refusal = None
+    if reason in ("end_turn", "stop_sequence"):
+        finish = "stop"
+    elif reason == "tool_use":
+        finish = "tool_calls"
+    elif reason in ("max_tokens", "model_context_window_exceeded"):
+        finish = "length"                          # cut off: the loop ends it as incomplete; a cut-off tool call is never run
+    elif reason == "refusal":                      # stop_details may be null even on a refusal
+        finish = "content_filter"
+        category = getattr(getattr(response, "stop_details", None), "category", None)
+        refusal = ("The model provider's safety check declined this request"
+                   + (f" (category: {category})." if isinstance(category, str) and category.strip() else " (no category given)."))
+    else:                                          # pause_turn belongs to server tools, which this app never sends
+        raise ModelProviderError("unexpected_stop", f"the Claude API stopped for a reason this app does not handle ({str(reason)[:40]!r})")
+    usage, detail = _anthropic_usage(getattr(response, "usage", None))
+    return ModelReply(content="\n".join(texts) if texts else None, tool_calls=calls, finish_reason=finish,
+                      model=getattr(response, "model", None), usage=usage, refusal=refusal, provider_content=blocks,
+                      usage_detail=detail)
+
+
+class AnthropicClient:
+    """Claude through the installed `anthropic` async SDK. Use `async with`. No SDK retries, explicit timeout, fixed address.
+
+    for_role(role) gives a view that uses this client's open connection and carries that role's effort; a view has no
+    lifetime of its own. Every request sets `output_config.effort` and never temperature, top_p, top_k, thinking (Claude
+    Opus 5.5 always thinks; a manual thinking budget is HTTP 400) or tool_choice (auto, the default; forcing a tool is
+    HTTP 400). http_client is for offline tests only (an httpx2 mock transport)."""
+
+    def __init__(self, settings: LlmSettings, *, role: str = "other", http_client: Any = None) -> None:
+        if settings.provider != "anthropic":
+            raise LlmConfigError("AnthropicClient needs LLM_PROVIDER=anthropic settings")
+        if not settings.model:
+            raise LlmConfigError("LLM_MODEL is blank")
+        check_endpoint(settings)
+        self.settings = settings
+        self.role = role
+        self._owner: AnthropicClient | None = None       # a view's client, which holds the connection
+        self._http_client = http_client
+        self._client: Any = None
+
+    @property
+    def effort(self) -> str:
+        return self.settings.effort_for(self.role)
+
+    @property
+    def reply_limit(self) -> int:
+        return self.settings.anthropic_max_tokens
+
+    def for_role(self, role: str) -> "AnthropicClient":
+        view = AnthropicClient(self.settings, role=role)
+        view._owner = self._owner or self
+        return view
+
+    async def __aenter__(self) -> "AnthropicClient":
+        if self._owner is not None:
+            raise RuntimeError("a role view has no lifetime of its own: open the client it came from")
+        from anthropic import AsyncAnthropic
+
+        options: dict[str, Any] = {"http_client": self._http_client} if self._http_client is not None else {}
+        self._client = AsyncAnthropic(api_key=self.settings.api_key, base_url=ANTHROPIC_BASE_URL, timeout=self.settings.request_timeout,
+                                      max_retries=0, open_telemetry=False, **options)   # False: no spans, no telemetry variables read
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        client, self._client = self._client, None
+        if client is not None:
+            await client.close()
+
+    async def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], *, max_tokens: int) -> ModelReply:
+        """`max_tokens` (the caller's limit) is replaced by LLM_ANTHROPIC_MAX_TOKENS: Claude's thinking counts inside it."""
+        client = (self._owner or self)._client
+        if client is None:
+            raise ModelProviderError("closed", "client is not open; use `async with`")
+        import anthropic
+
+        request = to_anthropic_request(messages, tools)
+        request.update(model=self.settings.model, max_tokens=self.reply_limit, output_config={"effort": self.effort})
+        try:
+            response = await client.messages.create(**request)
+        except anthropic.APITimeoutError as exc:
+            raise ModelProviderError("timeout", "the model did not answer in time") from exc
+        except anthropic.APIConnectionError as exc:
+            raise ModelProviderError("connection", f"could not reach {ANTHROPIC_BASE_URL}") from exc
+        except anthropic.APIStatusError as exc:
+            raise _anthropic_status_error(exc) from exc
+        except anthropic.AnthropicError as exc:
+            raise ModelProviderError("provider_error", type(exc).__name__) from exc
+        except ValueError as exc:                     # any other ValueError from the SDK, before or after sending
+            raise ModelProviderError("provider_error", "the Claude SDK raised ValueError for this request; it may or may not "
+                                     "have been sent") from exc
+        return normalize_anthropic_response(response)
+
+
+def make_model_client(settings: LlmSettings) -> Any:
+    """The configured provider's client, not yet open (use `async with`)."""
+    return AnthropicClient(settings) if settings.provider == "anthropic" else OpenAICompatibleClient(settings)
+
+
+AGENT_ROLES = {"coordinator": "coordinator", "supervisor": "coordinator", "retriever": "retriever", "analyst": "analyst"}
+
+
+def agent_role(agent_name: str) -> str:
+    """The role an agent asks as: coordinator_2 and supervisor_3 -> coordinator; retriever; analyst; anything else -> other."""
+    return AGENT_ROLES.get(re.sub(r"_\d+$", "", agent_name), "other")
+
+
+def for_role(model: Any, role: str) -> Any:
+    """The model as `role` asks it: a client with per-role settings (AnthropicClient) gives a view; any other is itself."""
+    return model.for_role(role) if callable(getattr(type(model), "for_role", None)) else model
 
 
 class FakeModelClient:
@@ -532,6 +917,7 @@ async def run_agent_loop(
 ) -> AgentResult:
     """Drive one agent to a terminal AgentResult. See the module docstring for the rules."""
     budget.start(clock)
+    model = for_role(model, agent_role(agent_name))            # Claude: this agent's effort; any other model: unchanged
     log_dir = Path(log_dir)
     log_file = log_dir / run_id / f"llm_{agent_name}.jsonl"
     log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -566,7 +952,9 @@ async def run_agent_loop(
     emit("start", run_id=run_id, tools=[t["function"]["name"] for t in model_tools], budget=dataclass_public(budget),
          max_tokens=max_tokens,                                      # the reply limit this run used, so a log says what actually ran
          reply_limit_param=getattr(getattr(model, "settings", None), "reply_limit_param", "max_tokens"),   # and the field that carried it
-         reasoning_effort=getattr(getattr(model, "settings", None), "reasoning_effort", None))             # and the effort asked for, if any
+         reasoning_effort=getattr(getattr(model, "settings", None), "reasoning_effort", None),             # and the effort asked for, if any
+         reply_limit_sent=getattr(model, "reply_limit", max_tokens),                  # what each request really carries: Claude's own
+         effort_sent=getattr(model, "effort", getattr(getattr(model, "settings", None), "reasoning_effort", None)))   # limit and effort
 
     try:
         while True:
@@ -625,7 +1013,8 @@ async def run_agent_loop(
                     total_tokens=prev.total_tokens + reply.usage.total_tokens)
             content = reply.content or ""
             emit("assistant", correlation_id=correlation, finish_reason=reply.finish_reason, content_chars=len(content),
-                 tool_calls=[c.name for c in reply.tool_calls], model=reply.model, usage=None if reply.usage is None else reply.usage.model_dump())
+                 tool_calls=[c.name for c in reply.tool_calls], model=reply.model, usage=None if reply.usage is None else reply.usage.model_dump(),
+                 **({"usage_detail": reply.usage_detail} if reply.usage_detail is not None else {}))
             state.normalized.append(NormalizedMessage(role="assistant", content=content, correlation_id=correlation,
                                                       name=",".join(c.name for c in reply.tool_calls) or None))
 
@@ -641,10 +1030,10 @@ async def run_agent_loop(
 
             if reply.tool_calls:
                 # the assistant turn goes into the transcript as the SDK expects it
-                state.messages.append({"role": "assistant", "content": reply.content,
-                                       "tool_calls": [{"id": c.id, "type": "function",
-                                                       "function": {"name": c.name, "arguments": c.arguments_json}}
-                                                      for c in reply.tool_calls]})
+                state.messages.append(_with_provider_content({"role": "assistant", "content": reply.content,
+                                                              "tool_calls": [{"id": c.id, "type": "function",
+                                                                              "function": {"name": c.name, "arguments": c.arguments_json}}
+                                                                             for c in reply.tool_calls]}, reply))
                 ended = False                                      # a second repeat for one table: ends after this turn
                 for call in reply.tool_calls:                      # sequential: no parallel fetching
                     budget.tool_calls += 1
@@ -709,7 +1098,7 @@ async def run_agent_loop(
                 if budget.repairs > budget.max_repairs:
                     add_error("invalid_json", "final reply was not the required JSON object; repair budget used up")
                     return finish("failed", None)
-                state.messages.append({"role": "assistant", "content": content})
+                state.messages.append(_with_provider_content({"role": "assistant", "content": content}, reply))
                 state.messages.append({"role": "user", "content": "Your reply was not a valid JSON object. " + FINAL_ANSWER_INSTRUCTIONS})
                 emit("repair", correlation_id=correlation, reason="final reply not JSON object")
                 continue
@@ -738,6 +1127,13 @@ async def run_agent_loop(
     except anyio.get_cancelled_exc_class():
         emit("cancelled", correlation_id="terminal", model_calls=budget.model_calls, tool_calls=budget.tool_calls)
         raise
+
+
+def _with_provider_content(turn: dict[str, Any], reply: ModelReply) -> dict[str, Any]:
+    """Claude's blocks (thinking included) stay with the assistant turn, to be sent back unchanged; OpenAI turns are as before."""
+    if reply.provider_content is not None:
+        turn["provider_content"] = reply.provider_content
+    return turn
 
 
 def _validate_call(call: ToolCallRequest, schema_by_name: dict[str, dict[str, Any]], allowed_tools: set[str] | None) -> ToolResult | dict[str, Any]:
@@ -842,6 +1238,9 @@ async def smoke(model_kind: Literal["mock", "local"], out_dir: Path, log_fn: Cal
         real_calls = 0
     else:
         settings = load_llm_settings()
+        if settings.provider != "openai":
+            raise LlmConfigError("--smoke --local checks the local OpenAI-compatible model only; LLM_PROVIDER=anthropic would "
+                                 "make paid requests")
         async with OpenAICompatibleClient(settings) as client:
             result = await run_agent_loop(client, tools, agent_name="smoke", system_prompt=SMOKE_SYSTEM, user_message=SMOKE_QUESTION,
                                           budget=budget, log_dir=out_dir, run_id=run_id, model_requested=settings.model or "")

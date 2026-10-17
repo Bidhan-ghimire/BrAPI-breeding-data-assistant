@@ -40,6 +40,7 @@ from app_style import CSS, HERO_HTML, build_theme
 from app_help import QUICK_START, QUESTION_GUIDE, faq_items
 from chat_presenter import answer_summary, approval_summary
 from brapi_client import load_settings
+from llm import ModelProviderError, ProviderConfigError
 from run import (ANALYST_PROMPT, CLARIFY_PROMPT, CATALOG_PROMPT, CATALOG_SETUP_QUESTION, DATA_REVIEW_PROMPT, RETRIEVER_PROMPT, SUPERVISOR_PROMPT,
                  Controller, Models, RunConfig, analyst_questions, source_host, standing_review_date)
 
@@ -196,9 +197,9 @@ def default_models() -> Models:
 
 def default_triage_model():
     """The configured model for the front door's one call. Built only for a message that does not go straight to a run."""
-    from llm import OpenAICompatibleClient, load_llm_settings
+    from llm import load_llm_settings, make_model_client
 
-    return OpenAICompatibleClient(load_llm_settings())
+    return make_model_client(load_llm_settings())
 
 
 def live_preflight(question: str, make_config: Callable[[str], RunConfig] = live_config) -> list[str]:
@@ -214,8 +215,11 @@ def live_preflight(question: str, make_config: Callable[[str], RunConfig] = live
         settings = load_llm_settings()
         if not settings.model:
             problems.append("LLM_MODEL is missing; set the model name before starting a question")
-        if not is_loopback(settings.base_url) and settings.api_key.strip().lower() in ("", "ollama"):
+        if (getattr(settings, "provider", "openai") == "openai" and not is_loopback(settings.base_url)
+                and settings.api_key.strip().lower() in ("", "ollama")):           # Claude's key is checked with its settings
             problems.append("LLM_API_KEY must be set to a real key for this remote-model chat")
+    except ProviderConfigError as exc:  # a provider setting's own reason: it names settings, never their values
+        problems.append(str(exc))
     except Exception:  # a model endpoint that cannot be used is a stated reason, not a crash
         problems.append("the model endpoint cannot be used: check LLM_BASE_URL, LLM_MODEL, LLM_API_KEY and LLM_ALLOW_REMOTE")
     return problems
@@ -565,6 +569,18 @@ def _list_from_the_runs_catalog(listing: catalog_lists.ListRequest, job: Job) ->
     return catalog_lists.chat_message(catalog_lists.build(listing, metadata, tables), in_report=False)
 
 
+WAITING_KEPT = "Your message was not sent; the question is still waiting."
+NOTHING_STARTED = "No question was started."
+DROPPED_NOTHING_STARTED = "The earlier question was dropped as you asked; no new question was started."
+
+
+def budget_reply(error: Exception, after: str = "") -> str:
+    """A front-door model call found the model budget used up (the account's credit, spend, quota or billing limit;
+    triage passes only that error up): said plainly, with no second request, and `after` says what did not happen.
+    Nothing is started, and while a question waits, the message is not sent to it."""
+    return " ".join(part for part in ("**The model service cannot answer right now.**", getattr(error, "message", ""), after) if part)
+
+
 def _ask_while_waiting(text: str, job: Job, triage_model: Callable[[], Any]) -> conversation.WaitingDecision | None:
     prompt = conversation.waiting_prompt(kind=conversation.waiting_kind(_waiting_on(job)), pending=_pending_questions(job),
                                          source=_source_name(), reference=triage.reference_text(_faq()))
@@ -617,6 +633,7 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
     history = list(history) + [{"role": "user", "content": text}]
     job: Job | None = state.get("job")
     working = False                          # the progress line is already shown (while the front door asked the model)
+    dropped = False                          # the waiting question was dropped for this message
     if job is not None and _run_has_ended(job):                                    # it ended while the chat went on
         event = job.next_event(timeout=5)
         content, _ = render(job, event)
@@ -634,7 +651,12 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
             else:
                 history.append({"role": "assistant", "content": WORKING})
                 yield history, state, ""
-                decision = _ask_while_waiting(text, job, triage_model)
+                try:
+                    decision = _ask_while_waiting(text, job, triage_model)
+                except ModelProviderError as exc:                              # the model budget is used up
+                    history[-1] = {"role": "assistant", "content": budget_reply(exc, WAITING_KEPT)}
+                    yield history, state, ""
+                    return
                 history = history[:-1]
                 route, payload, state = _route_waiting_decision(decision, text, job, state)
         if route == "reply":                                                       # nothing reaches the run: it keeps waiting
@@ -642,6 +664,7 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
             yield history, state, ""
             return
         if route == "drop":
+            dropped = True
             state = _remember(state, job, status="dropped for a new question",
                               acceptance=str(getattr(job.controller, "acceptance", "pending")))
             if (getattr(job.controller, "catalog_setup", None) or {}).get("status") == "completed":
@@ -662,16 +685,19 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
         elif (listing := catalog_lists.parse_request(text)) is None:            # a catalog list: code decides, no rule or model
             by_rules = triage.sort_by_rules(text)
             if by_rules is not None and by_rules.label not in triage.PIPELINE_LABELS:
-                model_text = ""
+                model_text, budget_note = "", ""
                 if triage_model is not None:                                     # one call writes the reply
                     history.append({"role": "assistant", "content": WORKING})
                     yield history, state, ""
-                    decision = _ask_front_door(text, triage_model, known_label=by_rules.label)
+                    try:
+                        decision = _ask_front_door(text, triage_model, known_label=by_rules.label)
+                    except ModelProviderError as exc:          # the model budget is used up: the line written by code, and why
+                        decision, budget_note = None, budget_reply(exc)
                     if decision is not None and decision.label == by_rules.label:   # a reply written for another label is not shown
                         model_text = decision.reply
                     history = history[:-1]
                 content, state = _reply_without_run(by_rules.label, by_rules.topic, text, model_text, state)
-                history.append({"role": "assistant", "content": content})
+                history.append({"role": "assistant", "content": content + ("\n\n" + budget_note if budget_note else "")})
                 yield history, state, ""                                         # no run and no database request
                 return
         config_for = make_config if listing is None else _list_config(make_config, listing)   # a list run: plus the list
@@ -693,7 +719,13 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
             memory = _memory(state)
             catalog = _saved_catalog(config_for, text)
             earlier_text = chat_memory.for_model(memory)
-            decision = _ask_front_door(text, triage_model, catalog=catalog, earlier=earlier_text)
+            try:
+                decision = _ask_front_door(text, triage_model, catalog=catalog, earlier=earlier_text)
+            except ModelProviderError as exc:                                  # the model budget is used up: no run
+                after = DROPPED_NOTHING_STARTED if dropped else NOTHING_STARTED
+                history[-1] = {"role": "assistant", "content": budget_reply(exc, after)}
+                yield history, state, ""
+                return
             listed = triage.catalog_list_request(decision, text)                  # a whole list or one word, checked by code
             if listed is None and decision is not None and decision.label == "catalog_list":
                 decision = None                                                     # refused fields: as without a decision
@@ -701,8 +733,14 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
                 config_for = _list_config(make_config, listed)                      # no planner, no model-written answer
             elif decision is not None and decision.label not in triage.PIPELINE_LABELS:   # None: no decision, so the run starts
                 context = catalog is not None or bool(earlier_text)
-                talk = (_ask_to_talk(text, triage_model, decision.label, history)      # Step 2c: a second call writes the
-                        if context and decision.label in triage.TALK_LABELS else None)  # reply without those facts in view
+                try:
+                    talk = (_ask_to_talk(text, triage_model, decision.label, history)      # Step 2c: a second call writes the
+                            if context and decision.label in triage.TALK_LABELS else None)  # reply without those facts in view
+                except ModelProviderError as exc:                              # the model budget is used up
+                    after = DROPPED_NOTHING_STARTED if dropped else NOTHING_STARTED
+                    history[-1] = {"role": "assistant", "content": budget_reply(exc, after)}
+                    yield history, state, ""
+                    return
                 content, state = _reply_without_run(decision.label, None, text, decision.reply, state, catalog=catalog,
                                                     context=context, talk=talk)
                 history[-1] = {"role": "assistant", "content": content}

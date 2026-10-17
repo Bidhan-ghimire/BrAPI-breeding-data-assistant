@@ -372,8 +372,8 @@ def _provider_failure(controller: Any) -> tuple[str, str, str] | None:
     retrieval = getattr(controller, "retrieval", None)
     notes = [*(getattr(analysis, "caveats", []) or []), *(getattr(retrieval, "warnings", []) or []),
              *(getattr(controller, "notes", []) or [])]
-    for note in notes:
-        match = re.fullmatch(r"agent error (provider_[a-z_]+): (.+)", note)
+    for note in notes:     # the planner's notes carry "coordinator: ", the next-step call's "supervisor: supervisor error"
+        match = re.fullmatch(r"(?:coordinator: agent|supervisor: supervisor|agent) error (provider_[a-z_]+): (.+)", note)
         if match:
             return note, match[1], match[2]
     return None
