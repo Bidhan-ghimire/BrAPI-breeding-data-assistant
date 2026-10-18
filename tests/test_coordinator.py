@@ -556,7 +556,7 @@ def test_discovery_is_refused_when_complete_metadata_exists(tmp_path, metadata):
 
 
 def test_agent_failures_carry_through(tmp_path, metadata):
-    result = plan_with(tmp_path, Q_AB, fake(reply_text("", model="mock-model")), metadata)
+    result = plan_with(tmp_path, Q_AB, fake(*[reply_text("", model="mock-model")] * 3), metadata)   # empty until repairs run out
     assert result.status == "failed" and result.plan is None and any("empty_reply" in n for n in result.notes)
     result = plan_with(tmp_path, Q_AB, fake(reply_text("not json", model="mock-model")) if False else fake(completed({"nonsense": True}), completed(draft())), metadata)
     assert result.status == "completed" and result.attempts == 2

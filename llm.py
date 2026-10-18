@@ -35,6 +35,11 @@ What is here:
   completed, needs_clarification, incomplete, blocked, failed, limit_reached.
   Length truncation, refusal, empty reply, invalid JSON, oversized output and
   provider errors are all different, and a partial completion is not success.
+  An empty reply (no text, no tool call, not cut off) is sent again once per
+  repair: the same request, nothing appended (Claude Opus 5.5 gave a thinking-only
+  reply in the eval of 2026-10-17). Every repair (empty reply, malformed tool
+  arguments, non-JSON final reply) draws on one pool, Budget.max_repairs, which a
+  run's agents share (run.py builds one Budget per run).
   One reply may use DEFAULT_MAX_TOKENS tokens, thinking included; more room
   does not change the rule that a reply which is still cut off is no answer.
 * compact_tool_result — the summary a tool result becomes for the model: always
@@ -1089,9 +1094,13 @@ async def run_agent_loop(
                 continue
 
             # no tool calls: this must be the final JSON answer
-            if not content.strip():
-                add_error("empty_reply", "the model returned no content and no tool call")
-                return finish("failed", None)
+            if not content.strip():                 # e.g. a thinking-only reply: ask the same again, nothing appended
+                budget.repairs += 1
+                if budget.repairs > budget.max_repairs:
+                    add_error("empty_reply", "the model returned no content and no tool call; repair budget used up")
+                    return finish("failed", None)
+                emit("repair", correlation_id=correlation, reason="empty reply: the same request was sent again")
+                continue
             parsed = _parse_final(content)
             if parsed is None:
                 budget.repairs += 1

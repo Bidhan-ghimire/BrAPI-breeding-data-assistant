@@ -92,7 +92,7 @@ def test_model_cannot_smuggle_authority_artifacts_or_plan_edits(tmp_path, fields
     ("retrieve", {"question": "Which trait?"}),
     ("retrieve", {"question": None}), ("retrieve", {"instruction": "fetch everything"}),
     ("finish", {"instruction": None}), ("analyze", {"question": "Which trait?"}),
-    ("stop", {"reason": ""}), ("retrieve", {"reason": "x" * 601}),
+    ("stop", {"reason": ""}),          # an over-long reason is shortened since 2026-10-17 (test_an_over_long_reason_...)
     ("clarify", {"question": "x" * 601}),
     ("analyze", {"instruction": "x" * 1001}),
     ("retrieve", {"reason": 123}),
@@ -169,3 +169,30 @@ def test_decision_schema_is_frozen_and_excludes_authority():
     assert set(SupervisorDecision.model_fields) == {"action", "reason", "question", "instruction"}
     with pytest.raises(ValueError):
         decision.action = "finish"
+
+
+# Eval 2026-10-17 (Opus 5.5, q13): a 600+ character reason blocked a run whose analysis was done.
+def test_an_over_long_reason_is_shortened_and_noted_not_fatal(tmp_path):
+    long_reason = "The analysis is complete and validated. " * 25                       # 1,000 characters
+    result = choose(FakeModelClient([decision_reply("stop", reason=long_reason)]), tmp_path)
+    assert result.status == "completed" and result.decision.action == "stop"
+    assert len(result.decision.reason) == 600 and result.decision.reason.endswith("…")
+    assert result.notes == [f"the Coordinator's reason was shortened from {len(long_reason.strip())} to 600 characters"]
+    retrieve = choose(FakeModelClient([decision_reply("retrieve", reason="x" * 601)]), tmp_path)   # was a blocking case
+    assert retrieve.status == "completed" and retrieve.decision.reason == "x" * 599 + "…"
+    exact = choose(FakeModelClient([decision_reply("stop", reason="x" * 600)]), tmp_path)
+    assert exact.status == "completed" and exact.decision.reason == "x" * 600 and exact.notes == []
+
+
+@pytest.mark.parametrize("field, size", [("question", 601), ("instruction", 1001)])
+def test_an_over_long_question_or_instruction_still_blocks(tmp_path, field, size):
+    action = "clarify" if field == "question" else "revise_plan"
+    result = choose(FakeModelClient([decision_reply(action, **{field: "y" * size})]), tmp_path)
+    assert result.status == "blocked" and result.decision is None
+    assert result.notes == [f"supervisor decision rejected at {field} (string_too_long)"]
+
+
+def test_the_prompt_states_the_limits():
+    from agents.supervisor import SUPERVISOR_SYSTEM_PROMPT
+
+    assert "Limits: reason at most 600 characters, question at most 600, instruction at most 1000." in SUPERVISOR_SYSTEM_PROMPT

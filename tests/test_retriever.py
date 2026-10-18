@@ -358,7 +358,7 @@ def test_agent_failures_and_limits_carry_through_to_the_report(tmp_path):
     report, agent, _, _ = run_script(tmp_path, "valid_request.json", model=exhausted, budget=Budget(max_model_calls=2), request="Loop.")
     assert agent.status == "limit_reached" and report.status == "limit_reached" and report.complete is False
     assert any("agent error budget_exhausted" in w for w in report.warnings)
-    empty = FakeModelClient([reply_text("")], reported_model="mock-model")
+    empty = FakeModelClient([reply_text("")] * 3, reported_model="mock-model")       # sent again until the repairs run out
     report, agent, _, _ = run_script(tmp_path, "valid_request.json", model=empty, request="Nothing.")
     assert agent.status == "failed" and report.status == "failed" and any("empty_reply" in w for w in report.warnings)
 

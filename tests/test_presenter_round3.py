@@ -338,3 +338,9 @@ def test_full_report_separates_raw_model_independence_claim_from_recorded_action
     assert "A disease-rating warning needs review." in raw_model           # a Retriever note the chat leaves out
     assert "scientific interpretation unverified" in report
     assert controller.analysis.model_dump_json() == before
+
+
+
+def test_a_shortened_reason_note_is_bookkeeping_not_the_reason_a_run_stopped():
+    note = "supervisor: the Coordinator's reason was shortened from 1000 to 600 characters"
+    assert cp._NOT_A_REASON.match(note) and cp._fallback_notes([note]) == []

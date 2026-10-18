@@ -383,7 +383,8 @@ def _provider_failure(controller: Any) -> tuple[str, str, str] | None:
 # study count, clarifications it dropped or added; not its rejected attempts, errors or stop), and the history of clarification
 # rounds (the needs_clarification screen lists those itself).
 _NOT_A_REASON = re.compile(r"coordinator: (?:scope\.study_ids |the planner judged |dropped clarification |program membership is not "
-                           r"established|matching_study_count=|added required clarification)|clarification \d+: ")
+                           r"established|matching_study_count=|added required clarification)|clarification \d+: "
+                           r"|supervisor: the Coordinator's reason was shortened ")
 _CACHE_MISS = "metadata is not in the offline cache"                       # stale once the catalog setup has prepared them
 _CATALOGS_PREPARED = "complete study and variable catalogs prepared"
 

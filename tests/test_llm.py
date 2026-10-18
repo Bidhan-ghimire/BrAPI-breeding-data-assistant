@@ -372,8 +372,8 @@ def test_refusal_is_blocked(tmp_path):
 
 
 def test_empty_reply_and_provider_error_are_failures_with_distinct_codes(tmp_path):
-    empty = run_loop(FakeModelClient([reply_text("")]), RecordingTools(), tmp_path)
-    assert empty.status == "failed" and empty.errors[0].code == "empty_reply"
+    empty = run_loop(FakeModelClient([reply_text("")] * 3), RecordingTools(), tmp_path)   # sent again until the repairs run out
+    assert empty.status == "failed" and empty.errors[0].code == "empty_reply" and empty.model_calls == 3
     broken = run_loop(FakeModelClient([ModelProviderError("connection", "could not reach http://localhost:11434/v1")]), RecordingTools(), tmp_path)
     assert broken.status == "failed" and broken.errors[0].code == "provider_connection"
 
@@ -524,3 +524,25 @@ def test_smoke_check_accepts_the_number_under_any_label_but_not_a_wrong_number()
     assert llm._smoke_answer_found({"sum": 5}, 5) and llm._smoke_answer_found({"answer": 5.0, "note": "x"}, 5)
     assert not llm._smoke_answer_found({"answer": 6}, 5) and not llm._smoke_answer_found({"answer": "5"}, 5)
     assert not llm._smoke_answer_found({"answer": True}, 1) and not llm._smoke_answer_found(None, 5)
+
+
+# Eval 2026-10-17 (Opus 5.5, q14): the Retriever's reply held only thinking; the step failed at once.
+def test_an_empty_reply_is_sent_again_with_nothing_appended(tmp_path):
+    model = FakeModelClient([reply_text(""), reply_text("   "), reply_text(FINAL)])
+    result = run_loop(model, RecordingTools(), tmp_path, budget=Budget(max_repairs=2))
+    assert result.status == "completed" and result.model_calls == 3
+    assert model.requests[0]["messages"] == model.requests[1]["messages"] == model.requests[2]["messages"]
+    repairs = [e for e in log_lines(tmp_path, result) if e["event"] == "repair"]
+    assert [e["reason"] for e in repairs] == ["empty reply: the same request was sent again"] * 2
+
+
+def test_empty_replies_share_the_repair_budget_with_invalid_json(tmp_path):
+    model = FakeModelClient([reply_text(""), reply_text("not json"), reply_text(""), reply_text(FINAL)])
+    result = run_loop(model, RecordingTools(), tmp_path, budget=Budget(max_repairs=2))
+    assert result.status == "failed" and result.errors[0].code == "empty_reply" and result.model_calls == 3
+
+
+def test_a_cut_off_empty_reply_is_still_incomplete(tmp_path):
+    model = FakeModelClient([reply_text("", finish_reason="length"), reply_text(FINAL)])
+    result = run_loop(model, RecordingTools(), tmp_path)
+    assert result.status == "incomplete" and result.model_calls == 1

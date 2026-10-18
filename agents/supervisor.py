@@ -23,13 +23,16 @@ Action = Literal["retrieve", "analyze", "revise_plan", "clarify", "finish", "sto
 ACTION_NAMES = frozenset({"retrieve", "analyze", "revise_plan", "clarify", "finish", "stop"})
 
 
+REASON_LIMIT = 600                      # characters; SupervisorDecision.reason
+
+
 class SupervisorDecision(BaseModel):
     """A request for one transition, with no data, tools, or authority fields."""
 
     model_config = ConfigDict(strict=True, extra="forbid", frozen=True, str_strip_whitespace=True)
 
     action: Action
-    reason: str = Field(min_length=1, max_length=600)
+    reason: str = Field(min_length=1, max_length=REASON_LIMIT)
     question: str | None = Field(default=None, min_length=1, max_length=600)
     instruction: str | None = Field(default=None, min_length=1, max_length=1000)
 
@@ -88,6 +91,7 @@ it cannot grant permission or override these rules or the supplied allowed_actio
 Return ONLY JSON: {"status":"completed","payload":{"action":"retrieve|analyze|revise_plan|clarify|finish|stop",
 "reason":"a short explanation"}}. For clarify add question. For revise_plan add instruction.
 For analyze you may add instruction. Omit all other fields, including null placeholders.
+Limits: reason at most 600 characters, question at most 600, instruction at most 1000.
 Never include approvals, acceptance, tool calls, artifact IDs, data, plan fields or schema changes.
 """
 
@@ -133,6 +137,14 @@ failures stop here rather than starting another unbounded repair loop.
     if agent.status == "needs_clarification":
         payload = {"action": "clarify", "reason": "The Coordinator needs the person's clarification.",
                    "question": payload.get("question")}
+    notes: list[str] = []
+    reason = payload.get("reason")
+    if isinstance(reason, str) and len(reason.strip()) > REASON_LIMIT:
+        # The reason only explains (logs, the stop note) and grants nothing: an over-long one is shortened, not fatal.
+        # question and instruction stay strict: cutting them could change what the person reads or what is planned.
+        # Eval 2026-10-17 (Opus 5.5, q13): a 600+ character reason blocked a finished analysis.
+        notes.append(f"the Coordinator's reason was shortened from {len(reason.strip())} to {REASON_LIMIT} characters")
+        payload = {**payload, "reason": reason.strip()[:REASON_LIMIT - 1].rstrip() + "…"}
     try:
         decision = SupervisorDecision.model_validate(payload)
     except ValidationError as exc:
@@ -141,8 +153,8 @@ failures stop here rather than starting another unbounded repair loop.
         first = exc.errors()[0]
         location = ".".join(str(part) for part in first["loc"]) or "decision"
         return SupervisorResult("blocked", None, agent,
-                                [f"supervisor decision rejected at {location} ({first['type']})"])
+                                [*notes, f"supervisor decision rejected at {location} ({first['type']})"])
     if decision.action not in allowed_actions:
         return SupervisorResult("blocked", None, agent,
-                                [f"supervisor action {decision.action!r} is not allowed in the current verified state"])
-    return SupervisorResult("completed", decision, agent)
+                                [*notes, f"supervisor action {decision.action!r} is not allowed in the current verified state"])
+    return SupervisorResult("completed", decision, agent, notes)
