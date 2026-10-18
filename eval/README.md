@@ -14,8 +14,10 @@ code computes from the same saved data. It is how we measure whether the app ans
    on the copy. A scripted approver types only "approve" at the data request's approval screen and "continue" at the data
    review. It never approves a catalog setup, never answers a question the app asks, never says "yes" to "look it up?", and
    never accepts or rejects an answer: it ends the run at the final review, so the review stays "pending".
-4. Writes `results.json` and `results.md`: question, expected, got, pass or fail, model calls, seconds, and how each
-   question ended.
+4. Writes `results.json` and `results.md`: question, expected, got, pass or fail, model calls, tokens in and out,
+   cost, seconds, and how each question ended. Tokens come from the runs' model logs and the front door's replies; cost
+   uses the prices in `PRICES` in `harness.py`, by the model each reply names ("?" for a model with no price, "at least"
+   when a call had no counts; the app does not keep OpenAI's cached-input count, so its cost is an upper bound).
 
 By default nothing is requested from the database: a request for anything not in the copy is refused and counted
 (`--allow-live` lets the app fetch it after the scripted approval, as it would in the chat). The model calls are real:

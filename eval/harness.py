@@ -14,7 +14,14 @@ What it does, in plain words:
   a question the app asks, never says "yes" to "look it up?", and never accepts or rejects: at the final review it ends
   the run the way the app ends a waiting run, so the review stays "pending".
 * Compares the answer the person sees (the chat's last message for the question, its code-written part only) with the
-  expected answer, and writes results.json and results.md: question, expected, got, pass or fail, model calls, seconds.
+  expected answer, and writes results.json and results.md: question, expected, got, pass or fail, model calls, seconds,
+  tokens and cost.
+* Tokens and cost: every model reply's token counts, from the runs' own logs (llm_*.jsonl, one line per reply) and, for
+  the front door, which logs nothing, from its replies as they pass. Input counts everything the model read (Claude:
+  input + cache writes + cache reads, kept apart for pricing; OpenAI: the prompt, whose cached part the app does not keep,
+  so its cost is an upper bound); output includes thinking. Cost = tokens x PRICES, by the model each reply names. A call
+  with no counts (a provider error, a timeout) is counted in "calls without counts" and makes the cost a lower bound
+  ("at least"); a model with no price gives no cost ("?").
 * Requests: by default nothing goes to the database. A request for anything not in the cache copy is refused and counted
   (--allow-live lets the app fetch after the scripted approval, as it would in the chat). Models: the app's configured
   model, so a real run is Bidhan's own command with --confirm. Without --confirm the harness only prints what it would
@@ -54,6 +61,7 @@ if str(REPO) not in sys.path:
 
 import app  # noqa: E402
 import brapi_client  # noqa: E402
+import llm  # noqa: E402
 from brapi_client import BrapiClient, TransportError, load_settings  # noqa: E402
 from cache_store import CacheStore  # noqa: E402
 from run import (ANALYST_PROMPT, CATALOG_PROMPT, CLARIFY_PROMPT, DATA_REVIEW_PROMPT, RETRIEVER_PROMPT,  # noqa: E402
@@ -370,15 +378,103 @@ def compare(kind: str, expected: Any, shown: str) -> tuple[bool, str, str]:
 # Feeding one question through the app's own pipeline, with the scripted approver
 # --------------------------------------------------------------------------
 
+# US dollars per million tokens (Anthropic's prices as given in the claude-api skill and the coach's research note,
+# checked 2026-10-17; OpenAI's gpt-6-luna from the research note). Cache writes: 1.25 x input (an assumption; the app sets
+# no prompt caching, so none are expected). Haiku 5.5 costs 5x for a request whose prompt is over 100k tokens; the app's
+# requests stay far below. A reply from a model not listed here has no cost.
+PRICES = {
+    "gpt-6-luna": {"input": 0.10, "cache_write": 0.125, "cache_read": 0.01, "output": 0.50},
+    "claude-opus-5-5": {"input": 4.00, "cache_write": 5.00, "cache_read": 0.20, "output": 20.00},
+    "claude-sonnet-5-5": {"input": 2.00, "cache_write": 2.50, "cache_read": 0.10, "output": 10.00},
+    "claude-haiku-5-5": {"input": 0.10, "cache_write": 0.125, "cache_read": 0.01, "output": 0.50},
+}
+TOKEN_KINDS = ("input", "cache_write", "cache_read", "output")
+
+
+def price_of(model: str | None) -> dict[str, float] | None:
+    """The price of the model a reply names; a dated name ("gpt-6-luna-2026-09-30") has its family's price."""
+    names = [name for name in PRICES if model and (model == name or model.startswith(name + "-"))]
+    return PRICES[max(names, key=len)] if names else None
+
+
+def reply_tokens(model: str | None, usage: dict[str, Any] | None, detail: dict[str, Any] | None) -> dict[str, Any] | None:
+    """One reply's counts by kind: Claude's four counts when given, else the prompt as input and the completion as output."""
+    if detail:
+        return {"model": model, "input": detail.get("input_tokens", 0), "cache_write": detail.get("cache_creation_input_tokens", 0),
+                "cache_read": detail.get("cache_read_input_tokens", 0), "output": detail.get("output_tokens", 0)}
+    if usage:
+        return {"model": model, "input": usage.get("prompt_tokens", 0), "cache_write": 0, "cache_read": 0,
+                "output": usage.get("completion_tokens", 0)}
+    return None
+
+
+def tally(replies: list[dict[str, Any]], calls: int) -> dict[str, Any]:
+    """The tokens and cost of one question: `replies` are the counted replies, `calls` every model call it made."""
+    calls = max(calls, len(replies))              # a run with no result still logged its replies: never fewer calls than replies
+    totals = {kind: sum(int(reply[kind]) for reply in replies) for kind in TOKEN_KINDS}
+    unpriced = sorted({str(reply["model"]) for reply in replies if price_of(reply["model"]) is None})
+    cost = None if unpriced else round(sum(reply[kind] * price_of(reply["model"])[kind] for reply in replies
+                                           for kind in TOKEN_KINDS) / 1e6, 6)
+    return {**totals, "calls_with_counts": len(replies), "calls_without_counts": max(0, calls - len(replies)),
+            "cost_usd": cost, "unpriced_models": unpriced}
+
+
+def run_replies(run_dirs: list[Path]) -> list[dict[str, Any]]:
+    """Every counted model reply the runs logged (llm.run_agent_loop writes one "assistant" line per reply)."""
+    replies = []
+    for folder in run_dirs:
+        for log in sorted(Path(folder).glob("llm_*.jsonl")):
+            for line in log.read_text(encoding="utf-8").splitlines():
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(event, dict) and event.get("event") == "assistant":
+                    counted = reply_tokens(event.get("model"), event.get("usage"), event.get("usage_detail"))
+                    if counted is not None:
+                        replies.append(counted)
+    return replies
+
+
+class _Recorded:
+    """A front-door model client that notes each reply's token counts (the front door logs nothing). It opens, closes and
+    takes a role (llm.for_role) as the client it wraps does, and changes nothing it sends or returns."""
+
+    def __init__(self, inner: Any, replies: list[dict[str, Any]]) -> None:
+        self._inner, self._replies, self._opened = inner, replies, None
+
+    async def __aenter__(self) -> "_Recorded":
+        if hasattr(self._inner, "__aenter__"):
+            self._opened = await self._inner.__aenter__()
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        if hasattr(self._inner, "__aexit__"):
+            await self._inner.__aexit__(*exc)
+
+    def for_role(self, role: str) -> "_Recorded":
+        return _Recorded(llm.for_role(self._opened or self._inner, role), self._replies)
+
+    async def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], *, max_tokens: int) -> Any:
+        reply = await (self._opened or self._inner).complete(messages, tools, max_tokens=max_tokens)
+        usage = getattr(reply, "usage", None)
+        counted = reply_tokens(getattr(reply, "model", None), usage.model_dump() if usage is not None else None,
+                               getattr(reply, "usage_detail", None))
+        if counted is not None:
+            self._replies.append(counted)
+        return reply
+
+
 class CountingFactory:
-    """Counts the model clients the chat asks for: one per front-door (or waiting-message) model call."""
+    """Counts the model clients the chat asks for: one per front-door (or waiting-message) model call, and keeps the
+    token counts of their replies."""
 
     def __init__(self, factory: Callable[[], Any]) -> None:
-        self.factory, self.calls = factory, 0
+        self.factory, self.calls, self.replies = factory, 0, []
 
     def __call__(self) -> Any:
         self.calls += 1
-        return self.factory()
+        return _Recorded(self.factory(), self.replies)
 
 
 class RefusingTransport:
@@ -410,6 +506,7 @@ class Outcome:
     typed: list[str] = field(default_factory=list)    # what the scripted approver typed
     results: list[RunResult] = field(default_factory=list)
     threads: list[Any] = field(default_factory=list)   # the runs' threads (one still alive keeps requests refused)
+    run_dirs: list[Path] = field(default_factory=list)  # the runs' folders, where their model logs are
 
 
 def _turn(message: str, history: list, state: dict, chat: dict[str, Any]) -> tuple[list, dict]:
@@ -492,6 +589,7 @@ def ask(question: str, chat: dict[str, Any], *, wait: float = 120.0) -> Outcome:
             job.close()
     outcome.results = [r for r in (_result_of(job, wait) for job in jobs) if r is not None]
     outcome.threads = [job.thread for job in jobs]
+    outcome.run_dirs = [Path(job.controller.run_dir) for job in jobs]
     return outcome
 
 
@@ -558,6 +656,8 @@ def run_questions(questions: list[dict[str, Any]], *, cache_copy: Path, out_dir:
             else:                                     # a question, a lookup offer or a model's reply: no answer to score
                 passed, why, where = False, "no answer was shown to score", _around(plain(outcome.shown), 0, 0, 200)
             run_calls = sum(r.counts.model_calls for r in outcome.results)
+            tokens = tally((counter.replies if counter else []) + run_replies(outcome.run_dirs),
+                           (counter.calls if counter else 0) + run_calls)
             rows.append({**row, "expected": expected, "expected_text": expected_text, "passed": passed, "why": why,
                          "status": outcome.status, "got": where, "answer": outcome.shown[:GOT_CHARS], "typed": outcome.typed,
                          "claims": [{k: c.get(k) for k in ("kind", "value", "unit", "filters", "transformation")} for c in claims],
@@ -568,7 +668,7 @@ def run_questions(questions: list[dict[str, Any]], *, cache_copy: Path, out_dir:
                          "run_ids": [r.run_id for r in outcome.results],
                          "acceptance": [r.human_acceptance for r in outcome.results],
                          "models_reported": sorted({r.model_reported for r in outcome.results if r.model_reported}),
-                         "seconds": round(seconds, 2)})
+                         "tokens": tokens, "seconds": round(seconds, 2)})
     finally:
         app.Job = saved_job
         still_running = [th for th in threads if th.is_alive()]
@@ -576,7 +676,12 @@ def run_questions(questions: list[dict[str, Any]], *, cache_copy: Path, out_dir:
             brapi_client.RequestsTransport = saved_transport
         # else: a run did not end within the wait; requests stay refused in this process (main exits right after)
     answered = [r for r in rows if r["passed"] is not None]
-    return {"cache_copy": str(cache_copy), "base_url": catalog.base_url if catalog else None,
+    counted = [r["tokens"] for r in rows if "tokens" in r]
+    total = {kind: sum(t[kind] for t in counted) for kind in (*TOKEN_KINDS, "calls_with_counts", "calls_without_counts")}
+    costs = [t["cost_usd"] for t in counted]
+    total["cost_usd"] = None if None in costs else round(sum(costs), 6)
+    total["unpriced_models"] = sorted({m for t in counted for m in t["unpriced_models"]})
+    return {"tokens": total, "cache_copy": str(cache_copy), "base_url": catalog.base_url if catalog else None,
             "runs_still_going": len([th for th in threads if th.is_alive()]),
             "catalog_fetched": catalog.fetched_at if catalog else [], "requests": "allowed after the scripted approval"
             if allow_live else "none: cache copy only", "passed": sum(1 for r in answered if r["passed"]),
@@ -588,6 +693,23 @@ def _cell(text: Any, limit: int = 160) -> str:
     return text if len(text) <= limit else text[:limit].rstrip() + "…"
 
 
+def tokens_cell(tokens: dict[str, Any] | None) -> str:
+    """Input (everything read) / output, as whole numbers."""
+    if not tokens:
+        return ""
+    read = tokens["input"] + tokens["cache_write"] + tokens["cache_read"]
+    return f"{read:,} / {tokens['output']:,}"
+
+
+def cost_cell(tokens: dict[str, Any] | None) -> str:
+    """Dollars; "?" when a model has no price; "at least" when a call had no counts."""
+    if not tokens:
+        return ""
+    if tokens["cost_usd"] is None:
+        return "?"
+    return ("at least " if tokens["calls_without_counts"] else "") + f"{tokens['cost_usd']:.6f}"
+
+
 def results_markdown(report: dict[str, Any], *, started: str, models: str) -> str:
     lines = [f"# Answer-quality run, {started}", "",
              f"- Models: {models}", f"- Cache copy: `{report['cache_copy']}` (server {report['base_url']}; catalogs fetched "
@@ -596,15 +718,30 @@ def results_markdown(report: dict[str, Any], *, started: str, models: str) -> st
              "- A pass means the expected value appears in the answer the person sees (the chat's last message, without "
              "what the app marks as model notes); numbers recorded inside the run do not count. Read \"got\" before "
              "trusting it. The scripted approver typed only \"approve\" (data request) and \"continue\" (data review); no "
-             "answer was accepted.", "",
-             "| # | Question | Expected | Got | Pass | Model calls | Seconds | How it ended |",
-             "|---|---|---|---|---|---|---|---|"]
+             "answer was accepted.",
+             *_totals_lines(report.get("tokens")), "",
+             "| # | Question | Expected | Got | Pass | Model calls | Tokens in / out | Cost ($) | Seconds | How it ended |",
+             "|---|---|---|---|---|---|---|---|---|---|"]
     for r in report["questions"]:
         verdict = "skipped" if r["passed"] is None else ("PASS" if r["passed"] else "FAIL")
         lines.append(f"| {r['id']} | {_cell(r['question'], 120)} | {_cell(r['expected_text'], 80)} | "
-                     f"{_cell(r.get('got', ''), 200)} | {verdict} | {r.get('model_calls', '')} | {r.get('seconds', '')} | "
+                     f"{_cell(r.get('got', ''), 200)} | {verdict} | {r.get('model_calls', '')} | {tokens_cell(r.get('tokens'))} | "
+                     f"{cost_cell(r.get('tokens'))} | {r.get('seconds', '')} | "
                      f"{_cell(r['status'] + ('; ' + r['why'] if r.get('why') else ''), 160)} |")
     return "\n".join(lines) + "\n"
+
+
+def _totals_lines(total: dict[str, Any] | None) -> list[str]:
+    if not total:
+        return []
+    lines = [f"- Tokens: {total['input'] + total['cache_write'] + total['cache_read']:,} in (cache writes {total['cache_write']:,}, "
+             f"cache reads {total['cache_read']:,}), {total['output']:,} out (thinking included); cost: {cost_cell(total)} US dollars "
+             "at the prices in eval/harness.py PRICES (the app does not keep OpenAI's cached-input count, so its cost is an upper bound)."]
+    if total["calls_without_counts"]:
+        lines.append(f"- Model calls without token counts (a provider error or a timeout): {total['calls_without_counts']}.")
+    if total["unpriced_models"]:
+        lines.append(f"- No price for: {', '.join(total['unpriced_models'])}.")
+    return lines
 
 
 def main(argv: list[str] | None = None, *, base_config: Callable[[str], RunConfig] | None = None,

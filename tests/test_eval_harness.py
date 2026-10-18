@@ -19,6 +19,10 @@ What these tests prove, in plain words:
   recorded under the results folder, on a copy of the cache: the source cache is unchanged and nothing was requested.
 * The scripted approver never approves a catalog setup and never answers a question the app asks.
 * By default a request for anything not in the cache copy is refused and counted; --allow-live lets the app fetch it.
+* Tokens and cost (2026-10-17): every reply's counts, from the runs' model logs and from the front door's replies as they
+  pass (its role and effort unchanged); Claude's four counts priced apart; a dated model name has its family's price; a
+  model without a price gives "?"; a call without counts makes the cost "at least"; the table shows tokens in / out and
+  cost, and the report adds them up.
 Fake transport and scripted models only; the conftest guard would stop any real socket.
 """
 from __future__ import annotations
@@ -152,7 +156,10 @@ def test_without_confirm_nothing_runs(place, capsys):
 # End to end with scripted models
 # --------------------------------------------------------------------------
 
-def test_end_to_end_with_scripted_models_on_a_copy_of_the_cache(place):
+def test_end_to_end_with_scripted_models_on_a_copy_of_the_cache(place, monkeypatch):
+    counts = harness.reply_tokens                 # the fakes report no usage: count each reply as zeros, so the join is seen
+    monkeypatch.setattr(harness, "reply_tokens", lambda model, usage, detail: counts(model, usage, detail) or
+                        {"model": model, "input": 0, "cache_write": 0, "cache_read": 0, "output": 0})
     place.seed(*FIXTURES)
     before = snapshot(place.source)
     model, front_door = scripted_front_door("catalog_question", "data_question", "unsure>talk")
@@ -194,7 +201,10 @@ def test_end_to_end_with_scripted_models_on_a_copy_of_the_cache(place):
     assert u1["answer"].startswith("What would you like to know?") and "Reply **yes**" in u1["answer"]   # yes line by code)
 
     markdown = (folder / "results.md").read_text(encoding="utf-8")
-    assert "| # | Question | Expected | Got | Pass | Model calls | Seconds | How it ended |" in markdown
+    assert ("| # | Question | Expected | Got | Pass | Model calls | Tokens in / out | Cost ($) | Seconds | How it ended |"
+            in markdown)                                  # two columns added 2026-10-17 (tokens, cost)
+    assert m1["tokens"]["calls_with_counts"] == m1["model_calls"] and m1["tokens"]["calls_without_counts"] == 0   # every
+    assert m1["tokens"]["unpriced_models"] == ["mock-model"] and "| ? |" in markdown   # reply of the run's logs and front door
     assert "Result: 2 passed, 1 failed, 1 skipped" in markdown and "| m1 |" in markdown and "| PASS |" in markdown
     assert len(model.requests) == 4                       # one front-door call per question that ran, and u1's talk call
     assert snapshot(place.source) == before and (folder / "cache").is_dir()           # the source cache is never changed
@@ -498,3 +508,118 @@ def test_the_question_file_is_checked_and_the_real_one_loads():
 def test_a_bad_question_file_is_refused(tmp_path, questions, problem):
     with pytest.raises(ValueError, match=problem):
         harness.load_questions(write_questions(tmp_path, questions))
+
+
+# --------------------------------------------------------------------------
+# Tokens and cost
+# --------------------------------------------------------------------------
+
+def test_a_reply_is_priced_by_the_model_it_names():
+    assert harness.price_of("gpt-6-luna") == harness.price_of("gpt-6-luna-2026-09-30") == harness.PRICES["gpt-6-luna"]
+    assert harness.price_of("claude-opus-5-5") == harness.PRICES["claude-opus-5-5"]
+    assert harness.price_of("gpt-6-lunar") is None and harness.price_of(None) is None and harness.price_of("claude-opus-5") is None
+    claude = harness.reply_tokens("claude-opus-5-5", {"prompt_tokens": 1130, "completion_tokens": 200, "total_tokens": 1330},
+                                  {"input_tokens": 1000, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 30,
+                                   "output_tokens": 200})
+    luna = harness.reply_tokens("gpt-6-luna-2026-09-30", {"prompt_tokens": 2000, "completion_tokens": 100, "total_tokens": 2100}, None)
+    assert claude == {"model": "claude-opus-5-5", "input": 1000, "cache_write": 100, "cache_read": 30, "output": 200}
+    assert harness.reply_tokens("m", None, None) is None
+    totals = harness.tally([claude, luna], calls=3)
+    expected = (1000 * 4.00 + 100 * 5.00 + 30 * 0.20 + 200 * 20.00 + 2000 * 0.10 + 100 * 0.50) / 1e6
+    assert totals["cost_usd"] == pytest.approx(expected) and totals["input"] == 3000 and totals["output"] == 300
+    assert totals["calls_with_counts"] == 2 and totals["calls_without_counts"] == 1 and totals["unpriced_models"] == []
+    assert harness.tally([claude, luna], calls=1)["calls_without_counts"] == 0      # never fewer calls than counted replies
+    unknown = harness.tally([{**luna, "model": "some-other-model"}], calls=1)
+    assert unknown["cost_usd"] is None and unknown["unpriced_models"] == ["some-other-model"]
+
+
+def test_the_runs_model_logs_are_read_one_reply_per_assistant_line(tmp_path):
+    run = tmp_path / "run_1"
+    run.mkdir()
+    lines = [{"event": "start"}, {"event": "assistant", "model": "claude-opus-5-5", "usage": {"prompt_tokens": 7, "completion_tokens": 3},
+                                   "usage_detail": {"input_tokens": 5, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 2,
+                                                    "output_tokens": 3}},
+             {"event": "provider_error", "code": "timeout"},
+             {"event": "assistant", "model": "gpt-6-luna", "usage": {"prompt_tokens": 10, "completion_tokens": 4}},
+             {"event": "assistant", "model": "gpt-6-luna", "usage": None}]
+    (run / "llm_retriever.jsonl").write_text("\n".join(json.dumps(line) for line in lines) + "\nnot json\n", encoding="utf-8")
+    (run / "llm_analyst.jsonl").write_text(json.dumps({"event": "assistant", "model": "gpt-6-luna",
+                                                       "usage": {"prompt_tokens": 1, "completion_tokens": 1}}) + "\n", encoding="utf-8")
+    (run / "notes.jsonl").write_text(json.dumps({"event": "assistant", "usage": {"prompt_tokens": 99}}) + "\n", encoding="utf-8")
+    replies = harness.run_replies([run, tmp_path / "missing"])
+    assert [(r["model"], r["input"], r["cache_read"], r["output"]) for r in replies] == [
+        ("gpt-6-luna", 1, 0, 1), ("claude-opus-5-5", 5, 2, 3), ("gpt-6-luna", 10, 0, 4)]
+
+
+def test_the_front_doors_replies_are_counted_without_changing_its_request(tmp_path, monkeypatch):
+    import anthropic
+    import httpx2
+    import llm
+    import triage
+
+    for name in ("SPACE_ID", *llm.ANTHROPIC_REFUSED_ENV):
+        monkeypatch.delenv(name, raising=False)
+    seen = []
+
+    def answer(request):
+        seen.append(json.loads(request.content))
+        return httpx2.Response(200, json={"id": "msg_1", "type": "message", "role": "assistant", "model": "claude-opus-5-5",
+                                          "content": [{"type": "text", "text": "Hi"}], "stop_reason": "end_turn",
+                                          "stop_sequence": None, "usage": {"input_tokens": 120, "output_tokens": 30,
+                                                                            "cache_read_input_tokens": 10}})
+
+    settings = llm.load_llm_settings(env_file=tmp_path / "none.env", environ={
+        "LLM_PROVIDER": "anthropic", "LLM_ALLOW_REMOTE": "true", "LLM_MODEL": "claude-opus-5-5", "ANTHROPIC_API_KEY": "sk-ant-test"})
+    counter = harness.CountingFactory(lambda: llm.AnthropicClient(
+        settings, http_client=anthropic.DefaultAsyncHttpxClient(transport=httpx2.MockTransport(answer))))
+    import anyio
+
+    reply = anyio.run(triage._complete, counter(), "PROMPT", "hello")
+    assert reply.content == "Hi" and seen[0]["output_config"] == {"effort": "low"}       # the front door's role is kept
+    assert counter.calls == 1 and counter.replies == [{"model": "claude-opus-5-5", "input": 120, "cache_write": 0,
+                                                        "cache_read": 10, "output": 30}]
+    fake = FakeModelClient([reply_text("ok")])
+    assert anyio.run(triage._complete, harness.CountingFactory(lambda: fake)(), "P", "x").content == "ok"   # a fake works too
+    assert len(fake.requests) == 1
+
+
+def test_the_table_shows_tokens_and_cost_and_the_report_adds_them_up():
+    def row(qid, tokens):
+        return {"id": qid, "question": "q", "expected_text": "", "got": "", "passed": True, "model_calls": 1, "seconds": 1.0,
+                "status": "run ended", "tokens": tokens}
+
+    priced = {"input": 46_000, "cache_write": 0, "cache_read": 821, "output": 2_189, "calls_with_counts": 10,
+              "calls_without_counts": 0, "cost_usd": 0.231, "unpriced_models": []}
+    short = {**priced, "calls_without_counts": 1, "cost_usd": 0.01}
+    unpriced = {**priced, "cost_usd": None, "unpriced_models": ["mystery"]}
+    total = {"input": 1, "cache_write": 2, "cache_read": 3, "output": 4, "calls_with_counts": 1, "calls_without_counts": 1,
+             "cost_usd": None, "unpriced_models": ["mystery"]}
+    report = {"cache_copy": "c", "base_url": "b", "catalog_fetched": [], "requests": "none", "passed": 3, "failed": 0, "skipped": 0,
+              "questions": [row("a", priced), row("b", short), row("c", unpriced)], "tokens": total}
+    markdown = harness.results_markdown(report, started="now", models="m")
+    assert "| 46,821 / 2,189 | 0.231000 |" in markdown and "| at least 0.010000 |" in markdown and "| ? |" in markdown
+    assert "- Tokens: 6 in (cache writes 2, cache reads 3), 4 out (thinking included); cost: ? US dollars" in markdown
+    assert "- Model calls without token counts (a provider error or a timeout): 1." in markdown
+    assert "- No price for: mystery." in markdown
+
+
+def test_a_front_door_replys_counts_reach_its_row_and_the_total(place):
+    from contracts import Usage
+
+    place.seed(*FIXTURES)
+    reply = reply_text(json.dumps({"label": "catalog_question", "reason": "scripted", "reply": ""}), model="gpt-6-luna-2026-09-30",
+                       usage=Usage(prompt_tokens=1000, completion_tokens=40, total_tokens=1040))
+    model = FakeModelClient([reply], reported_model="gpt-6-luna-2026-09-30")
+    status = harness.main(["--cache", str(place.source), "--questions", str(write_questions(place.root, [QUESTIONS[0]])),
+                           "--results", str(place.root / "results"), "--confirm"],
+                          base_config=place.base_config, make_models=synthetic_models, triage_model=lambda: model,
+                          preflight=lambda q: place.base_config(q).validate())
+    [folder] = list((place.root / "results").iterdir())
+    report = json.loads((folder / "results.json").read_text(encoding="utf-8"))
+    [row] = report["questions"]
+    assert status == 0 and row["id"] == "c1" and row["model_calls"] == 1
+    assert row["tokens"] == {"input": 1000, "cache_write": 0, "cache_read": 0, "output": 40, "calls_with_counts": 1,
+                             "calls_without_counts": 0, "cost_usd": pytest.approx((1000 * 0.10 + 40 * 0.50) / 1e6),
+                             "unpriced_models": []}
+    assert report["tokens"]["input"] == 1000 and report["tokens"]["cost_usd"] == row["tokens"]["cost_usd"]
+    assert "| 1,000 / 40 | 0.000120 |" in (folder / "results.md").read_text(encoding="utf-8")
