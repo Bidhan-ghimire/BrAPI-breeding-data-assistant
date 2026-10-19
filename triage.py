@@ -81,6 +81,10 @@ APP_QUESTION_MAX_CHARS = 300   # the app-question phrases are checked on short m
 # The talk call (Step 2c): the labels it writes a reply for, and its own, shorter time limit (it comes second).
 TALK_LABELS = frozenset({"greeting_or_smalltalk", "app_question", "out_of_scope", "unsure"})
 TALK_TIMEOUT_S = 10.0
+# A talk reply that breaks the format (not the JSON object, another label, nothing that shows, a number of its own) is
+# asked for once more. Live 2026-10-19 (Luna): one reply came as plain text, one with another label, and the person got
+# the line written by code (for the second, the whole quick-start page). A timeout or a provider error is not retried.
+TALK_ATTEMPTS = 2
 EARLIER_MESSAGES = 3           # the person's own last messages the talk call sees (never the app's answers)
 EARLIER_MESSAGE_CHARS = 200    # the most of each of them it sees
 
@@ -555,17 +559,27 @@ def ask_to_talk(text: str, make_model: Callable[[], Any] | None, *, label: str, 
     600-character cut leaves."""
     if make_model is None or label not in TALK_LABELS:
         return None
-    try:
-        words = recent_words(earlier_words)
-        prompt = talk_prompt(label=label, source=source, reference=reference, earlier_words=words, coverage_said=coverage_said,
-                             introduced=introduced)
-        reply = _within_time_limit(_complete(make_model(), prompt, text), TALK_TIMEOUT_S)
-    except ModelProviderError as exc:
-        if exc.code == "quota":      # the model budget is used up: the chat says so (app.budget_reply)
-            raise
-        return None
-    except Exception:  # settings, provider, timeout: the line written by code, never a crash
-        return None
+    words = recent_words(earlier_words)
+    for _ in range(TALK_ATTEMPTS):                   # a reply that breaks the format is asked for once more
+        try:
+            prompt = talk_prompt(label=label, source=source, reference=reference, earlier_words=words,
+                                 coverage_said=coverage_said, introduced=introduced)
+            reply = _within_time_limit(_complete(make_model(), prompt, text), TALK_TIMEOUT_S)
+        except ModelProviderError as exc:
+            if exc.code == "quota":      # the model budget is used up: the chat says so (app.budget_reply)
+                raise
+            return None
+        except Exception:  # settings, provider, timeout: the line written by code, never a crash (and no second try)
+            return None
+        talk = _usable_talk(reply, label=label, text=text, source=source, reference=reference, words=words)
+        if talk is not None:
+            return talk
+    return None
+
+
+def _usable_talk(reply: Any, *, label: str, text: str, source: str, reference: str, words: Sequence[str]) -> TalkReply | None:
+    """The talk reply when it may be shown: exactly the JSON object, for this label, with a letter or digit that shows, and
+    no number that is not in the message, the person's earlier words, the source's name or the reference."""
     talk = parse_talk(reply)
     if talk is None or talk.label != label or not any(char.isalnum() and char not in _BLANK_LETTERS for char in talk.reply):
         return None
@@ -629,7 +643,14 @@ def greeting_line(text: str) -> str:
     return "I can help you explore public breeding data."      # "ok", "no", "sure": no greeting to return
 
 
+APP_SHORT = "I can't answer that here. More answers about the app are in the **FAQ & How to use** tab."
+
+
 def app_answer(topic: str | None, faq: list[tuple[str, str]]) -> str:
+    """The line written by code for an app question. topic None: the label call (not the rules) chose app_question and the
+    talk reply failed; a short pointer, not the whole quick-start page (live 2026-10-19: "your thoughts on profanity")."""
+    if topic is None:
+        return APP_SHORT
     answers = dict(faq)
     title = FAQ_TITLES.get(topic or "")
     if title in answers:

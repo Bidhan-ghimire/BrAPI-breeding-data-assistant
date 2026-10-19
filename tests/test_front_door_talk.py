@@ -227,9 +227,10 @@ def test_the_talk_call_writes_only_for_messages_that_start_nothing_and_that_code
 ], ids=["not-json", "unknown-label", "extra-field", "no-reason", "offer-as-text", "too-long", "fenced", "cut-off",
         "tool-call", "provider-error", "other-label", "empty", "blank", "invisible", "blank-letters"])
 def test_an_invalid_failed_or_mislabelled_talk_reply_is_not_used(reply):
-    model = FakeModelClient([reply])
+    """Since 2026-10-19 a reply that breaks the format is asked for once more (TALK_ATTEMPTS); a provider error is not."""
+    model = FakeModelClient([reply, reply])
     assert ask_talk("bkla bkla", lambda: model) is None
-    assert len(model.requests) == 1
+    assert len(model.requests) == (1 if isinstance(reply, ModelProviderError) else 2)
 
 
 def test_no_model_or_unusable_settings_give_no_talk_reply():
@@ -483,10 +484,11 @@ def test_the_talk_reply_is_escaped_and_cut_like_the_first_calls_reply(chat, no_r
 ], ids=["provider-error", "invalid", "other-label", "empty", "own-number", "cut-off", "script-used-up"])
 def test_without_a_usable_talk_reply_the_line_written_by_code_is_shown(chat, no_runs, second):
     seed_catalog(chat.cache, SOURCE)
-    model, _, factory = model_factory(reply_text(decision("greeting_or_smalltalk")), *([second] if second else []))
+    retried = second is not None and not isinstance(second, ModelProviderError)      # a format error: asked once more
+    model, _, factory = model_factory(reply_text(decision("greeting_or_smalltalk")), *([second] * (2 if retried else 1) if second else []))
     history, state = chat.turn("hola amigo", triage_model=factory)
     assert history[-1]["content"] == "I can help you explore public breeding data.\n\n" + QUESTION_GUIDE
-    assert len(model.requests) == 2 and no_runs == [] and "pending_question" not in state
+    assert len(model.requests) == (3 if retried else 2) and no_runs == [] and "pending_question" not in state
 
 
 def test_a_slow_talk_call_gives_the_line_written_by_code_at_its_limit(chat, no_runs, monkeypatch):
@@ -623,8 +625,8 @@ def test_what_the_app_covers_is_said_once_per_tab(chat, no_runs, monkeypatch):
 
 
 def test_a_code_out_of_scope_line_says_what_the_app_covers_once(chat, no_runs):
-    model, _, factory = model_factory(reply_text(decision("out_of_scope")), reply_text("not json"),
-                                      reply_text(decision("out_of_scope")), reply_text("not json"))
+    model, _, factory = model_factory(reply_text(decision("out_of_scope")), reply_text("not json"), reply_text("not json"),
+                                      reply_text(decision("out_of_scope")), reply_text("not json"), reply_text("not json"))
     history, state = chat.turn("I hate you", triage_model=factory)
     assert history[-1]["content"].startswith("I can help only with public breeding records") and state["coverage_said"] is True
     history, state = chat.turn("I hate you.", history, state, triage_model=factory)
@@ -670,9 +672,9 @@ def test_a_used_up_budget_in_the_talk_call_ends_the_turn_without_a_catalog(chat,
 
 # Review of the draft (2026-10-19): three coverage-flag behaviours had no test.
 def test_a_failed_greeting_reply_does_not_set_the_coverage_flag(chat, no_runs):
-    model, _, factory = model_factory(reply_text("not json"))                          # "hello": the talk call fails
+    model, _, factory = model_factory(reply_text("not json"), reply_text("not json"))   # "hello": the talk call fails twice
     history, state = chat.turn("hello", triage_model=factory)
-    assert len(model.requests) == 1 and "coverage_said" not in state                  # the greeting line said no coverage
+    assert len(model.requests) == 2 and "coverage_said" not in state                  # the greeting line said no coverage
 
 
 def test_a_message_the_rules_sort_sees_the_coverage_flag(chat, no_runs):
@@ -760,10 +762,11 @@ def test_a_catalog_answer_a_code_line_or_the_budget_line_also_count(chat, no_run
     history, state = chat.turn("tell me about Clinton", triage_model=factory)
     history, state = chat.turn("hello", history, state, triage_model=factory)
     assert triage.NOT_FIRST_RULE in talk_prompts(model)[-1]
-    model, _, factory = model_factory(reply_text("not json"), reply_text(talk_json("greeting_or_smalltalk", "Hi again.")))
+    model, _, factory = model_factory(reply_text("not json"), reply_text("not json"),
+                                      reply_text(talk_json("greeting_or_smalltalk", "Hi again.")))
     history, state = chat.turn("thanks", [], {}, triage_model=factory)              # the code line ("You're welcome!")
     history, state = chat.turn("hello", history, state, triage_model=factory)
-    assert triage.NOT_FIRST_RULE not in talk_prompts(model)[0] and triage.NOT_FIRST_RULE in talk_prompts(model)[1]
+    assert triage.NOT_FIRST_RULE not in talk_prompts(model)[0] and triage.NOT_FIRST_RULE in talk_prompts(model)[2]
     model, _, factory = model_factory(ModelProviderError("quota", BUDGET_MESSAGE), reply_text(talk_json("greeting_or_smalltalk", "Hi.")))
     history, state = chat.turn("hello", [], {}, triage_model=factory)              # the code line + the budget line
     history, state = chat.turn("hello", history, state, triage_model=factory)
@@ -792,3 +795,36 @@ def test_unsure_after_the_first_reply_keeps_its_yes_line(chat, no_runs):
     assert "Reply **yes** to look up" in history[-1]["content"] and state["pending_question"] == "tell me something interesting"
     prompt = talk_prompts(model)[-1]
     assert triage.NOT_FIRST_RULE in prompt and triage.NO_CLOSING_INVITE not in prompt
+
+
+
+# Live 2026-10-19 (Luna): one talk reply came as plain text and one with another label; the person got the line written by
+# code (for the second, the whole quick-start page). Now such a reply is asked for once more.
+def test_a_talk_reply_that_breaks_the_format_is_asked_for_once_more(chat, no_runs):
+    model, _, factory = model_factory(reply_text(decision("unsure")), reply_text("You said your name is Bidhan."),
+                                      reply_text(talk_json("unsure", "You said your name is Bidhan.", offer_lookup=False)))
+    history, state = chat.turn("who am i?", [{"role": "user", "content": "I'm Bidhan"}, {"role": "assistant", "content": "Hi."}],
+                               {}, triage_model=factory)
+    assert plain(history[-1]["content"]) == "You said your name is Bidhan." and len(model.requests) == 3
+    assert model.requests[1]["messages"] == model.requests[2]["messages"]               # the same request, sent again
+
+
+def test_a_model_sorted_app_question_without_a_reply_gets_a_short_pointer_not_the_help_page(chat, no_runs):
+    model, _, factory = model_factory(reply_text(decision("app_question")),
+                                      reply_text(talk_json("out_of_scope", "I have no views.")),     # another label, twice
+                                      reply_text(talk_json("out_of_scope", "I have no views.")))
+    history, _ = chat.turn("your thoughts on profanity", triage_model=factory)
+    assert history[-1]["content"] == triage.APP_SHORT and "Your first question" not in history[-1]["content"]
+    assert len(model.requests) == 3
+
+
+def test_a_timeout_is_not_retried(monkeypatch):
+    class Slow:
+        calls = 0
+
+        async def complete(self, messages, tools, *, max_tokens):
+            Slow.calls += 1
+            await asyncio.sleep(30)
+
+    monkeypatch.setattr(triage, "TALK_TIMEOUT_S", 0.05)
+    assert ask_talk("bkla bkla", Slow) is None and Slow.calls == 1

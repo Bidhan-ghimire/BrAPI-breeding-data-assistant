@@ -295,7 +295,7 @@ def test_code_adds_the_yes_line_for_unsure_and_the_examples_only_when_asked():
     ("greeting_or_smalltalk", "no", None, "I can help you explore public breeding data."),
     ("greeting_or_smalltalk", "bye", None, "Goodbye! Come back any time."),
     ("app_question", "what can you do?", "capabilities", "**What can I use this assistant for?**"),
-    ("app_question", "what's your name?", None, "### Your first question"),
+    ("app_question", "what's your name?", None, triage.APP_SHORT),                  # model-sorted: a short pointer (2026-10-19)
     ("unsure", "bla bla bla", None, "Do you want me to look this up in front-door.invalid? Reply **yes**"),
     ("out_of_scope", "i hate you", None, "I can help only with public breeding records in front-door.invalid: studies, trials, "
                                          "traits, locations, seasons and recorded measurements. For example: “Which studies "
@@ -418,10 +418,10 @@ def test_greetings_and_app_questions_get_one_model_reply_and_start_nothing(chat,
     ("hello", "out_of_scope", "Hello! I can help you explore public breeding data."),
 ], ids=["greeting-data", "greeting-follow-up", "greeting-unsure", "greeting-app", "help-data", "approve-greeting", "greeting-oos"])
 def test_a_reply_written_for_another_label_is_not_shown_and_starts_nothing(chat, no_runs, message, label, expected):
-    model, _, factory = model_factory(reply_text(decision(label, "I'll search those records now; just say yes.")))
+    model, _, factory = model_factory(*[reply_text(decision(label, "I'll search those records now; just say yes."))] * 2)
     history, state = chat.turn(message, triage_model=factory)
     assert history[-1]["content"].startswith(expected) and "search those records" not in history[-1]["content"]
-    assert len(model.requests) == 1 and no_runs == [] and "job" not in state and "pending_question" not in state
+    assert len(model.requests) == 2 and no_runs == [] and "job" not in state and "pending_question" not in state   # + retry
     assert chat.requests == [] and not chat.out.exists()
 
 
@@ -565,9 +565,10 @@ def test_out_of_scope_forgets_an_earlier_unsure_question(chat, no_runs):
 
 
 def test_out_of_scope_without_model_text_gets_the_line_written_by_code(chat, no_runs):
-    model, _, factory = model_factory(reply_text(decision("out_of_scope", "")), reply_text("not json"))   # the talk call fails
+    model, _, factory = model_factory(reply_text(decision("out_of_scope", "")), reply_text("not json"),  # the talk call fails,
+                                      reply_text("not json"))                                          # twice
     history, state = chat.turn("i hate you", triage_model=factory)
-    assert len(model.requests) == 2
+    assert len(model.requests) == 3
     assert history[-1]["content"] == ("I can help only with public breeding records in front-door.invalid: studies, trials, traits, "
                                       "locations, seasons and recorded measurements. For example: “Which studies have a 2026 season?”")
     assert "pending_question" not in state and no_runs == []
@@ -712,7 +713,7 @@ NEVER_SHOWN = pytest.mark.parametrize("label, reply, expected", [
     ("unsure", "Kinston has nine studies.", "Do you want me to look this up in front-door.invalid?"),
     ("unsure", "Kinston tem doze estudos.", "Do you want me to look this up in front-door.invalid?"),
     ("out_of_scope", "Florida is not in this catalog.", "I can help only with public breeding records in front-door.invalid"),
-    ("app_question", "The catalog holds three locations: Clinton, Kinston and Namulonge.", "### Your first question"),
+    ("app_question", "The catalog holds three locations: Clinton, Kinston and Namulonge.", triage.APP_SHORT),
     ("greeting_or_smalltalk", "Hi! Clinton has the most studies.", "I can help you explore public breeding data."),
 ], ids=["unsure-digits", "unsure-number-words", "unsure-portuguese", "out-of-scope-place", "app-question-places", "greeting"])
 TALK_REPLY = "Thanks for your message; I can look up public breeding records for you."     # no number, no place
