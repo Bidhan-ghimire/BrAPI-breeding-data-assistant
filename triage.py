@@ -31,7 +31,9 @@ own message has, as a whole word, ignoring case (coach, 2026-10-16: rules read o
 up would show a wrong list). A catalog_list decision that fails the check counts as no decision: the message carries on as
 without one. Eval baseline 20261016T150241Z: these three questions got the catalog summary, or a run ended "Question blocked".
 "Which studies have a 2026 season?" is the sixth list, "studies", whose word is the season (coach check 3, 2026-10-19); the
-list keeps only the studies one of whose seasons is exactly that word, and a "studies" decision without a word fails the check.
+list keeps only the studies one of whose seasons is exactly that word, and a "studies" decision without a word fails the check,
+as does one whose message has any other word than plain list words (catalog_lists.STUDY_LIST_WORDS): "not", a place,
+a second season.
 follow_up continues the last earlier question of this chat (chat_memory.py); the earlier questions are shown to the model.
 The label call returns one strict JSON object with the label (its reply is left empty and never shown). The talk reply
 is escaped like database text and cut to REPLY_MAX_CHARS; a reply written for another label is not shown. If the label
@@ -368,6 +370,8 @@ def catalog_list_request(decision: TriageDecision | None, text: str) -> catalog_
         return None
     if word and not (catalog_lists.is_one_word(word) and word in catalog_lists.words(text)):
         return None
+    if entity == "studies" and any(w != word and w not in catalog_lists.STUDY_LIST_WORDS for w in catalog_lists.words(text)):
+        return None                    # "not", a place, a second season, a trait: not the plain list (review, 2026-10-19)
     return catalog_lists.ListRequest(entity, word or None)
 
 

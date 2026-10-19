@@ -21,10 +21,12 @@ commands itself, from the same checked catalog every run loads first (the cached
   list and the word are checked by code (triage.catalog_list_request); the list run itself is the same.
 
 * "list studies in season 2026" (also "with season 2026", "with a 2026 season", "from 2026"): the studies whose seasons
-  name that season exactly, ignoring case (coach check 3, 2026-10-19: the most common demo question, answered with no
-  run of the planner). The season is required; "list studies with yield" is not this command. A study is listed only
-  when one of its recorded seasons IS that season: "12026" or "2026 rainy" is not "2026". The count of the same
-  question (catalog_answers) checks the same exact membership.
+  name that season (coach check 3, 2026-10-19: the most common demo question, answered with no run of the planner).
+  The season is required; "list studies with yield" is not this command. The person's word (read in lower case, as
+  every list command) is first matched to ONE recorded season name, ignoring case; then a study is listed only when
+  one of its recorded seasons is exactly that text, as the count of the same question checks it (catalog_answers:
+  exact JSON membership). "12026" or "2026 rainy" is not "2026"; two recorded names that differ only in capitals
+  ("Fall", "FALL") are not merged: the list names both and lists neither (review, 2026-10-19).
 
 Traits are the trait catalog's variables, one entry per variable. Locations, seasons, programs and study types come from the
 study catalog: each is listed with the number of studies that name it, and only those named by at least one study are known.
@@ -78,13 +80,21 @@ _REQUEST = re.compile(
     r"(?: please)?")
 # "list studies in season 2026": the season is named as a season ("season 2026", "a 2026 season"), or is a year ("from
 # 2026"). "list studies with yield" is not this command: a word that is neither goes to the planner as before.
+_NOT_A_SEASON = r"(?!(?:a|an|the|please|seasons?|studies|all|any|every)(?: |$))"    # "list studies with a season"
 _STUDIES = re.compile(
     _LEAD + r"studies(?: (?:in|from) (?:the )?catalogs?)? "
-    r"(?:(?:with|in|from|for|of|that have|having|that had)(?: (?:a|an|the))? season (?P<named>\S+)"
-    r"|(?:with|in|from|for|of|that have|having|that had)(?: (?:a|an|the))? (?P<before>\S+) season"
+    r"(?:(?:with|in|from|for|of|that have|having|that had)(?: (?:a|an|the))? season " + _NOT_A_SEASON + r"(?P<named>\S+)"
+    r"|(?:with|in|from|for|of|that have|having|that had)(?: (?:a|an|the))? " + _NOT_A_SEASON + r"(?P<before>\S+) season"
     r"|(?:in|from|for|of) (?P<year>1[89]\d\d|2\d\d\d))"
     r"(?: please)?")
 _YEAR = re.compile(r"(?<!\d)(1[89]\d\d|2\d\d\d)(?!\d)")
+# The front door's "studies" list: besides the season, the person's message may have only these words (review,
+# 2026-10-19). "not", "Clinton", "or 2025", "yield" are not among them: such a question is not this list, it goes on as
+# a data question ("Which studies do not have a 2026 season?" must never get the 2026 list).
+STUDY_LIST_WORDS = frozenset(
+    "a all an any are can catalog could did do does every for from give had has have having held i in is it list me "
+    "of please ran run saved season seasons see show studies study tell that the there these those to trials was were "
+    "what which with would you".split())
 # "refresh catalogs" (Item 5): download the saved study and trait catalogs again, with the catalog setup's approval.
 _REFRESH = re.compile(r"(?:please )?(?:refresh|update|reload|re download|redownload)(?: the)?(?: saved)?(?: study and trait)? "
                       r"catalogs?(?: again)?(?: now)?(?: please)?")
@@ -126,6 +136,7 @@ class CatalogList:
     source: CatalogTable
     unrecorded: int = 0              # studies that name no location / season / program
     hints: tuple[str, ...] = ()      # studies list with no match: season names that contain the word (at most SEASON_HINTS)
+    season: str = ""                 # studies list: the recorded season name the word was matched to ("" when none or several)
 
 
 # --------------------------------------------------------------------------
@@ -264,15 +275,20 @@ def _study_types(metadata: Any) -> tuple[list[ListItem], int]:
     return [ListItem(name, name, len(ids), name) for name, ids in studies.items()], unrecorded
 
 
+def season_names(metadata: Any, season: str) -> list[str]:
+    """The recorded season names that are the person's word, ignoring case only ("fall" -> "Fall"): exactly one, or
+    several written with different capitals, or none. Recorded text is compared as it is, as the count path does."""
+    wanted = (season or "").casefold()
+    return sorted({s for study in metadata.studies for s in study.seasons if wanted and s.casefold() == wanted})
+
+
 def _studies(metadata: Any, season: str) -> tuple[list[ListItem], int]:
-    """The studies one of whose recorded seasons is exactly the season, ignoring case; how many studies name no season."""
-    wanted = _clean(season).casefold()
+    """The studies one of whose recorded seasons is exactly this recorded season name; how many studies name no season."""
     items, unrecorded = [], 0
     for study in metadata.studies:
-        seasons = {_clean(s).casefold() for s in study.seasons if _clean(s)}
-        if not seasons:
+        if not any(_clean(s) for s in study.seasons):
             unrecorded += 1
-        if wanted in seasons:
+        if season in study.seasons:
             name = _clean(study.name)
             items.append(ListItem(name or f"(no name) · {study.study_id}", study.study_id, None, name))
     return _distinct_labels(items), unrecorded
@@ -298,11 +314,13 @@ def _order(entity: str, items: list[ListItem]) -> list[ListItem]:
 
 def build(request: ListRequest, metadata: Any, tables: dict[str, CatalogTable]) -> CatalogList:
     """The whole list from the catalog, then only the names containing the word (ignoring case; the name alone, not an ID)."""
-    if request.entity == "studies":               # the word is the season, matched exactly; the total is every study
-        matching, unrecorded = _studies(metadata, request.word or "")
+    if request.entity == "studies":               # the word is the season: one recorded name, matched exactly
+        names = season_names(metadata, request.word or "")
+        matching, unrecorded = _studies(metadata, names[0]) if len(names) == 1 else ([], _studies(metadata, "")[1])
         return CatalogList(request=request, items=tuple(_order("studies", matching)), total=len(metadata.studies),
-                           source=tables["studies"], unrecorded=unrecorded,
-                           hints=_season_hints(metadata, request.word or "") if not matching else ())
+                           source=tables["studies"], unrecorded=unrecorded, season=names[0] if len(names) == 1 else "",
+                           hints=tuple(names) if len(names) > 1 else
+                           _season_hints(metadata, request.word or "") if not matching else ())
     make = {"traits": _traits, "seasons": _seasons, "locations": lambda m: _grouped(m, "location"),
             "programs": lambda m: _grouped(m, "program"), "study_types": _study_types}[request.entity]
     every, unrecorded = make(metadata)
@@ -335,7 +353,7 @@ def _heading(listing: CatalogList, *, escape) -> str:
     one, many = _NOUNS[listing.request.entity]
     word, matches, total = listing.request.word, len(listing.items), listing.total
     if listing.request.entity == "studies":
-        head = (f"**Studies with season “{escape(word or '')}”: {'none' if not matches else matches} of the "
+        head = (f"**Studies with season “{escape(listing.season or word or '')}”: {'none' if not matches else matches} of the "
                 f"{_count(total, 'study', 'studies')} in the catalog.**")
         if not matches:
             return head
@@ -377,9 +395,14 @@ def _study_notes(listing: CatalogList) -> list[str]:
     """Locations, seasons, programs and study types come from the study records: what that means, in plain sentences."""
     one, many = _NOUNS[listing.request.entity]
     if listing.request.entity == "studies":
-        season = _escaped(listing.request.word or "", LABEL_MAX_CHARS)
-        notes = [f"A study is listed when one of its recorded seasons is exactly “{season}” (ignoring case)."]
-        if listing.hints:
+        season = _escaped(listing.season or listing.request.word or "", LABEL_MAX_CHARS)
+        notes = [f"A study is listed when one of its recorded seasons is exactly “{season}”."]
+        if listing.hints and not listing.season and len(listing.hints) > 1 and all(
+                h.casefold() == (listing.request.word or "").casefold() for h in listing.hints):
+            notes.append("More than one recorded season is written this way: "
+                         + ", ".join(_escaped(h, LABEL_MAX_CHARS) for h in listing.hints)
+                         + ". This list cannot tell them apart; ask about one of them as a data question.")
+        elif listing.hints:
             notes.append("Season names that contain “" + season + "”: "
                          + ", ".join(_escaped(h, LABEL_MAX_CHARS) for h in listing.hints) + ".")
         elif not listing.items:
@@ -434,7 +457,7 @@ def report_lines(listing: CatalogList) -> list[str]:
     """answer.md (the Full report): every name with its ID, and the exact table it was read from. Plain text."""
     one, many = _NOUNS[listing.request.entity]
     table, word = listing.source, listing.request.word
-    head = (f'Studies with season "{word}": {len(listing.items)} of {listing.total}' if listing.request.entity == "studies"
+    head = (f'Studies with season "{listing.season or word}": {len(listing.items)} of {listing.total}' if listing.request.entity == "studies"
             else f'{one.capitalize()} names containing "{word}": {len(listing.items)} of {listing.total}' if word
             else f"{many.capitalize()} in the catalog: {listing.total}")
     lines = ["## Catalog list (written by code from the cached catalog)", "",
@@ -491,11 +514,12 @@ def evidence(listing: CatalogList, registry: Any) -> tuple[RetrievalReport, Anal
                                 warnings=["read from the cached catalog by controller code: no Retriever agent, no model call, "
                                           "no measurements"])
     studies = listing.request.entity == "studies"
+    word = listing.season or word if studies else word
     claim = Claim(claim_id=f"clm_catalog_list_{listing.request.entity}", kind="count", value=len(listing.items),
                   denominator=Denominator(name=f"{many} in the {_CATALOG_WORD[manifest.kind]}", n=listing.total),
                   source_artifact_hashes=[manifest.sha256],
                   filters={"season": word} if studies else {"name contains": word} if word else {},
-                  transformation=(f"number of studies one of whose recorded seasons is exactly '{word}' (ignoring case)"
+                  transformation=(f"number of studies one of whose recorded seasons is exactly '{word}'"
                                   if studies else f"number of {many}" + (f" whose name contains '{word}' (ignoring case)" if word else "")))
     caveats = [f"The list shows the catalog as fetched {_when(listing.source)}; records added later are not in it."]
     if studies:
@@ -512,7 +536,7 @@ def evidence(listing: CatalogList, registry: Any) -> tuple[RetrievalReport, Anal
 def run_note(listing: CatalogList) -> str:
     many = _NOUNS[listing.request.entity][1]
     table, word = listing.source, listing.request.word
-    which = (f"{len(listing.items)} of {listing.total} studies with season '{word}'" if listing.request.entity == "studies"
+    which = (f"{len(listing.items)} of {listing.total} studies with season '{listing.season or word}'" if listing.request.entity == "studies"
              else f"{len(listing.items)} of {listing.total} {many}" + (f" containing '{word}'" if word else ""))
     return (f"catalog list: {which}, read by code from the {_CATALOG_WORD[table.export]} of {table.base_url} "
             f"({table.artifact_id}, {table.rows} rows), fetched {_when(table)}"

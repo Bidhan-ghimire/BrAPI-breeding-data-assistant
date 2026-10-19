@@ -616,11 +616,13 @@ def test_a_study_is_listed_only_when_one_of_its_seasons_is_exactly_that_season()
     listing = studies_of("2026")
     assert [item.key for item in listing.items] == ["S2", "S6", "S1"]           # A to Z; "12026" and "2026 rainy" are other seasons
     assert listing.total == 7 and listing.unrecorded == 1 and listing.source == TABLES["studies"]
-    assert [item.key for item in studies_of("fall").items] == ["S7"]              # ignoring case
+    fall = studies_of("fall")                                                     # the word, read in lower case, finds "Fall"
+    assert [item.key for item in fall.items] == ["S7"] and fall.season == "Fall"
+    assert catalog_lists.chat_message(fall, in_report=True).startswith("**Studies with season “Fall”: 1 of the 7")
     message = catalog_lists.chat_message(listing, in_report=True)
     assert message.startswith("**Studies with season “2026”: 3 of the 7 studies in the catalog.** A to Z:\n\n"
                               "- Alpha trial · S2\n- Alpha trial · S6\n- Beta trial\n")
-    assert "A study is listed when one of its recorded seasons is exactly “2026” (ignoring case). 1 study names no season." in message
+    assert "A study is listed when one of its recorded seasons is exactly “2026”. 1 study names no season." in message
     report = "\n".join(catalog_lists.report_lines(listing))
     assert 'Studies with season "2026": 3 of 7, A to Z.' in report and "- Beta trial · S1" in report
 
@@ -631,6 +633,37 @@ def test_no_exact_season_offers_the_season_names_that_contain_the_word():
     assert "Season names that contain “202”: 2026, 2026 rainy, 2025, 12026." in message     # newest first, as the seasons list
     assert "No season name contains it" in catalog_lists.chat_message(studies_of("1880"), in_report=False)
     assert "(no matching studies)" in catalog_lists.report_lines(studies_of("1880"))
+
+
+def test_the_list_and_the_count_of_one_season_agree_on_the_same_rows():
+    """Review 2026-10-19: the list ignored case and spaces, the count (catalog_answers) matches the recorded text exactly.
+    Now the list matches one recorded name exactly too; the same rows give the same studies."""
+    import json as _json
+    import catalog_answers
+    rows = [{"studyDbId": f"S{i}", "studyName": f"T{i}", "seasons": _json.dumps(seasons)} for i, seasons in enumerate(
+        [["2026"], ["2025", "2026"], [" 2026"], ["12026"], ["Fall"], ["FALL"], ["fall"], ["2026 rainy"], ["Wet"]])]
+    metadata = KnownMetadata.from_rows(rows, [], base_url=LIVE, complete=True)
+    for season in ("2026", "2025", "Wet", " 2026"):
+        listed = {item.key for item in studies_of(season.strip().lower(), metadata).items}
+        recorded = catalog_lists.season_names(metadata, season.strip().lower())
+        counted = catalog_answers._exact_season_ids(rows, recorded[0]) if len(recorded) == 1 else set()
+        assert listed == counted, season
+    assert {item.key for item in studies_of("2026", metadata).items} == {"S0", "S1"}      # " 2026" is another recorded text
+
+
+def test_seasons_that_differ_only_in_capitals_are_named_and_not_merged():
+    metadata = KnownMetadata(base_url=LIVE, complete=True, studies=[
+        KnownStudy(study_id="S1", name="One", seasons=["Fall"]), KnownStudy(study_id="S2", name="Two", seasons=["FALL"])])
+    listing = studies_of("fall", metadata)
+    assert listing.items == () and listing.hints == ("FALL", "Fall")
+    message = catalog_lists.chat_message(listing, in_report=True)
+    assert "More than one recorded season is written this way: FALL, Fall." in message and "- One" not in message
+
+
+@pytest.mark.parametrize("typed", ["list studies with a season", "list studies in the season", "list studies in season please",
+                                   "list studies with season the", "list studies with any season"])
+def test_a_filler_word_is_never_read_as_the_season(typed):
+    assert catalog_lists.parse_request(typed) is None
 
 
 def test_a_long_season_list_shows_30_in_the_chat_and_every_study_in_the_report():
@@ -674,3 +707,17 @@ def test_which_studies_have_a_season_reaches_the_studies_list_through_the_label(
     assert len(model.requests) == 1 and lists.models.asked() == 0 and lists.server.calls == [] and "job" not in state
     assert triage.catalog_list_request(triage.TriageDecision.model_validate(list_label("studies", "2027")),
                                        "Which studies have a 2026 season?") is None              # a season they did not write
+
+
+@pytest.mark.parametrize("message, accepted", [
+    ("Which studies have a 2026 season?", True), ("which studies are in season 2026?", True),
+    ("Show me the studies from the 2026 season", True), ("Can you list all studies that had a 2026 season, please?", True),
+    ("Which studies do not have a 2026 season?", False), ("Which studies don't have a 2026 season?", False),
+    ("Which studies had a 2026 season in Clinton?", False), ("Which studies have a 2025 or 2026 season?", False),
+    ("Which 2026 studies measure yield?", False), ("Which studies without a 2026 season?", False),
+])
+def test_the_studies_label_is_taken_only_for_the_plain_list_question(message, accepted):
+    """Review 2026-10-19: the label check only looked for the season word, so a negation, a place or a second season
+    reached the plain list (a wrong list). Now every other word must be a plain list word."""
+    request = triage.catalog_list_request(triage.TriageDecision.model_validate(list_label("studies", "2026")), message)
+    assert (request == catalog_lists.ListRequest("studies", "2026")) is accepted
