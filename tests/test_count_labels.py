@@ -65,6 +65,15 @@ def test_the_catalog_season_filter_shows_its_quoted_value_once(registry):
     assert claim.value == 2 and claim.denominator.name == 'rows matching seasons contains "2026" in the complete studies table'
 
 
+def test_the_tests_that_take_no_value_are_named_in_words(registry):
+    """Eval 20261019T170352Z (Opus, q14): "rows matching value is_valid_number '' in the complete observations table"."""
+    art = register(registry, "duplicate_plots.json", "repeated_measurements")
+    [valid] = counted(registry, filtered(registry, art, "value", "is_valid_number", ""))
+    [missing] = counted(registry, filtered(registry, art, "value", "is_missing", ""))
+    assert valid.denominator.name == "rows matching value is a valid number in the complete observations table"
+    assert missing.denominator.name == "rows matching value is missing in the complete observations table"
+
+
 def test_a_filter_on_a_filtered_table_names_both_oldest_first(registry):
     first = filtered(registry, studies(registry), "seasons", "contains", "2026")
     [claim] = counted(registry, filtered(registry, first, "locationDbId", "eq", "L1"))

@@ -272,6 +272,9 @@ def _filters_applied(manifest: Any) -> list[str]:
     """The filter_rows filters that made this table, oldest first ("seasons contains '2026'"); [] for a source table. A
     quoted JSON value (the catalog season filter, '"2026"') is shown once in double quotes: seasons contains "2026"."""
     found = [m[1] for m in (_FILTER_LINEAGE.fullmatch(note) for note in manifest.quality_notes) if m]
+    # the two tests that take no value, in words (eval 20261019T170352Z, q14: "value is_valid_number ''")
+    found = [re.sub(r"^(\S+) is_valid_number '.*'$", r"\1 is a valid number", re.sub(r"^(\S+) is_missing '.*'$", r"\1 is missing", text))
+             for text in found]
     return [re.sub(r"""'"([^'"]*)"'$""", r'"\1"', text) for text in found]
 
 
