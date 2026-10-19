@@ -61,6 +61,40 @@ def materialize_metadata(plan: Plan, tools: Any, ctx: Any) -> None:
         record.result = materialize_metadata_result(ctx, record.name, record.args, record.result)
 
 
+# The chat's plain line for each _clarify message below (coach check 2b, 2026-10-19); the exact wording stays in the
+# report's caveats and the Full report. tests/test_plain_stops.py reads every _clarify message and requires a line here.
+_PLAIN = [
+    (r"This plan includes analysis beyond supported study or variable metadata lookup\.",
+     "This lookup can only show study or trait records, and the plan asked for more."),
+    (r"No source-backed study or variable record was retrieved\..*",
+     "No study or trait record came back. Give its exact ID or full name; this does not show the record is missing."),
+    (r"Please specify an exact study or variable ID/name for this metadata lookup.*",
+     "Give an exact study or trait ID or name for this lookup."),
+    (r"The source contains missing or duplicate entity IDs.*",
+     "The source has missing or repeated record IDs, so one record cannot be chosen."),
+    (r"Retrieved sources disagree about metadata for (\S+) (.+?); please verify the source record\.",
+     "The sources disagree about {0} {1}; please check that record in the database."),
+    (r"Requested (\S+) IDs were not uniquely established by the retrieved records: (.+?)\. This is not evidence.*",
+     "These {0} IDs could not be matched to exactly one record: {1}. This does not show they are missing."),
+    (r"No exact requested study or variable was identified in the retrieved records\..*",
+     "No study or trait matching your words was found in the records that came back. Give its exact ID or full name; "
+     "this does not show it is missing."),
+    (r"More than one (\S+) record matches the supplied name\..*",
+     "More than one {0} has that name. Please give its database ID."),
+    (r"This metadata lookup selected more than (\d+) records\..*",
+     "This lookup found more than {0} records. Please name fewer studies or traits."),
+]
+
+
+def plain_reason(message: str) -> str | None:
+    """The chat's plain line for a _clarify message; None for any other text."""
+    for pattern, plain in _PLAIN:
+        found = re.fullmatch(pattern, message, re.S)
+        if found:
+            return plain.format(*[{"variable": "trait", "variables": "trait"}.get(g, g) for g in found.groups()])
+    return None
+
+
 def _clarify(message: str) -> AnalysisReport:
     return AnalysisReport(status="needs_clarification", methods=["metadata: read exact source rows without statistical analysis"],
                           caveats=["analyst asks: " + message])

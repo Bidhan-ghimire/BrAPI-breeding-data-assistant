@@ -7,8 +7,9 @@ import re
 from collections import defaultdict
 from typing import Any
 
+from catalog_answers import plain_reason as catalog_plain
 from contracts import Claim
-from metadata_answers import render_metadata_facts
+from metadata_answers import plain_reason as metadata_plain, render_metadata_facts
 from agents.coordinator import person_words
 from run import approval_lead, carried_over_line, required_fetches, scope_needs_a_check
 
@@ -227,9 +228,16 @@ def _numeric_blocks(claims: list[Claim], sources: _Sources, source_labels: dict[
     return lines
 
 
+_CODE_STOP = "analyst asks: "      # catalog_answers.stop and metadata_answers._clarify
+_CODE_STOP_OTHER = "The app's own checks stopped this answer before a number was given."   # a stop text with no plain line
+
+
 def _human_note(note: str) -> str:
     """Translate specific internal phrases without guessing the cause of a failed run."""
     text = note.strip()
+    if text.startswith(_CODE_STOP):     # a stop written by code (catalog_answers, metadata_answers): its plain line;
+        asked = text[len(_CODE_STOP):].strip()                                 # the exact check stays in the Full report
+        return catalog_plain(asked) or metadata_plain(asked) or _CODE_STOP_OTHER
     text = re.sub(r"^(?:(?:numeric_summary|group_stats|count_records|analysis target|model(?: note)?)\s*:\s*)+", "", text, flags=re.I)
     if "no complete artifact is eligible for analysis" in text.lower():
         return re.sub("no complete artifact is eligible for analysis", "No complete data table was available for analysis, so an answer could not be calculated.", text, flags=re.I)

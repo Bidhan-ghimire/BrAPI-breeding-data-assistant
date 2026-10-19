@@ -13,6 +13,74 @@ from agents.retriever import catalog_export_key
 from contracts import AnalysisReport, Claim, Plan, RetrievalReport, ToolResult
 from llm import Budget, ToolInterface
 
+# The chat's plain line for each stop written in run_catalog_plan (coach check 2b, 2026-10-19): a breeder reads why no
+# number was given, never the check's own wording ("The bounded plan did not apply every approved scope filter:
+# season_id"). The exact check stays in the report's caveats and the Full report. tests/test_plain_stops.py reads every
+# stop message and every error message raised for stop(str(exc)) from this file and requires a line here.
+_NOT_TIED = "The count could not be tied to one complete saved data table, so no count was made."
+_BAD_FILTER = "The plan asked for a filter the app cannot check on this table, so no count was made."
+_BAD_SEASON = "The season information in the saved table did not check out, so no count was made."
+_NOT_APPROVED = "The rows the plan picked did not match the studies you approved, so no count was made."
+PLAIN_STOPS = {
+    "The required catalog retrieval is incomplete.": "Not all of the list data arrived, so no count was made.",
+    "Catalog operations need one unambiguous export/filter/count lineage.": _NOT_TIED,
+    "The catalog export has an unsupported dependency.": _NOT_TIED,
+    "A planned export handle was not supplied by this retrieval.": _NOT_TIED,
+    "The approved export does not match a complete registered catalog and hash.": _NOT_TIED,
+    "No complete artifact is bound to the exact approved export arguments.": _NOT_TIED,
+    "Different complete tables were returned for the same export; the source is ambiguous.":
+        "Two different tables came back for the same list, so the app cannot tell which is right; no count was made.",
+    "Filters on this exported entity are unsupported.": _BAD_FILTER,
+    "The exported filter differs from the approved scope filter.":
+        "The filter on the data that came back is not the one you approved, so no count was made.",
+    "The filtered export contains rows outside its exact JSON season constraint.": _BAD_SEASON,
+    "The filtered export contains missing or contradictory filter metadata.": _BAD_SEASON,
+    "A catalog filter needs only explicit column, op, and value arguments.": _BAD_FILTER,
+    "Only explicit nonempty text filters are supported by this bounded catalog path.": _BAD_FILTER,
+    "Some catalog rows lack the requested filter metadata; a complete matching count is unknown.":
+        "Some rows do not carry the information the filter needs, so a complete count is not known.",
+    "The fixed filter result differs from exact JSON season membership; no count was produced.": _BAD_SEASON,
+    "An approved scope from another entity was not represented by the catalog operations.":
+        "The plan's steps did not cover everything you approved, so no count was made.",
+    "The filtered catalog rows differ from the exact approved entity IDs.": _NOT_APPROVED,
+    "The filtered study count differs from the code-approved scope count.": _NOT_APPROVED,
+    "The count step contains unsupported arguments; artifact handles come only from the validated lineage.":
+        "The plan's counting step was not in a form the app can check, so no count was made.",
+    "The fixed count did not provide claims linked to the selected table hash.": _NOT_TIED,
+    "The shared time budget was exhausted.": "The time set for this question ran out before the count was finished.",
+    # the errors below reach stop(str(exc))
+    "seasons is missing or malformed JSON; exact season membership is unknown": _BAD_SEASON,
+    "seasons must be a nonempty JSON list of recorded string IDs; membership is unknown otherwise": _BAD_SEASON,
+    "the requested filter column is not in the catalog; no arbitrary column alias is permitted": _BAD_FILTER,
+    "season filter does not agree with the approved season scope":
+        "The plan's season is not the season you approved, so no count was made.",
+    "the season value is not stated in the person's question":
+        "The plan's season is not one named in your question, so no count was made.",
+    "exact JSON season membership differs from the code-approved study IDs or count": _NOT_APPROVED,
+    "the shared tool or time budget is exhausted": "The time set for this question ran out before the count was finished.",
+    "fixed tool failed": "A counting step failed, so no count was made.",
+    "a planned catalog operation returned incomplete evidence": _NOT_TIED,
+}
+_FILTER_WORDS = {"location_id": "location", "season_id": "season", "study_type": "study type", "program_id": "program",
+                 "name_contains": "name", "location_name": "location name", "season_name": "season name"}
+
+
+def plain_reason(message: str) -> str | None:
+    """The chat's plain line for a stop written in run_catalog_plan; None for any other text."""
+    if message in PLAIN_STOPS:
+        return PLAIN_STOPS[message]
+    missing = re.fullmatch(r"The bounded plan did not apply every approved scope filter: (.+)", message)
+    if missing:
+        names = [_FILTER_WORDS.get(name.strip(), name.strip().replace("_", " ")) for name in missing[1].split(",")]
+        return f"The plan did not apply the {' and '.join(names)} filter you approved, so no count was made."
+    if message.startswith("The registered source could not be verified: "):
+        return "The saved data table could not be checked, so no count was made."
+    if re.fullmatch(r"The \S+ column is absent from the selected complete catalog\.", message):
+        return "The table that came back lacks a column the count needs, so no count was made."
+    if re.fullmatch(r"\S+ must identify each source row uniquely; missing or duplicate IDs require review", message):
+        return "Some rows in the saved table have missing or repeated IDs, so no count was made."
+    return None
+
 ENTITY_IDS = {"studies": "studyDbId", "variables": "observationVariableDbId", "locations": "locationDbId",
               "programs": "programDbId", "seasons": "seasonDbId"}
 SCOPE_FIELDS = {"location_id": ("locationDbId", "eq"), "location_name": ("locationName", "eq"),
