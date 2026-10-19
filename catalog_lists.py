@@ -94,10 +94,32 @@ _YEAR = re.compile(r"(?<!\d)(1[89]\d\d|2\d\d\d)(?!\d)")
 # a data question ("Which studies do not have a 2026 season?" must never get the 2026 list). No word that points back
 # to earlier messages (it, that, these, those, there): "Which of these studies have a 2026 season?" is a follow-up, not
 # the whole list (skeptic, 2026-10-19).
+# Narrowed on Bidhan's word (coach, 2026-10-20; skeptic 2, review3/SKEPTIC2.md): no "seasons" ("What seasons are in
+# 2026?" is the seasons list) and no "i" ("Which studies did i save?"). "me" and "you" stay, on his word of 2026-10-20:
+# without them "Show me the 2026 studies", "Which studies do you have from 2026?" and 21 more phrasings that both models
+# labelled catalog_list started a planner run instead of the list (live probe, studies_label_narrowing_20261020: 23 of
+# 26 on Luna, 24 of 26 on Opus). Accepted cost: "Which studies from 2026 did you show me?" gets the 2026 list, whose
+# first line says exactly what it lists.
 STUDY_LIST_WORDS = frozenset(
-    "a all an any are can catalog could did do does every for from give had has have having held i in is list me "
-    "of please ran run saved season seasons see show studies study tell the to trials was were "
+    "a all an any are can catalog could did do does every for from give had has have having held in is list me "
+    "of please ran run saved season see show studies study tell the to trials was were "
     "what which with would you".split())
+_STUDY_NOUNS = frozenset({"studies", "study", "trials"})
+
+
+def plain_studies_question(text: str, season: str) -> bool:
+    """The front door's "studies" list (triage.catalog_list_request) only for the plain question "which studies have
+    season <season>": the season is one word of the message and not itself a list word; it names studies (studies,
+    study or trials); every other word is a plain list word; and the season is not next to the singular "study" ("study
+    ibadan2026", "the ibadan2026 study": one study's name, not a season; review4, 2026-10-20). The plural "the 2026
+    studies" stays a list."""
+    said = words(text)
+    if not season or season in STUDY_LIST_WORDS or season not in said or not _STUDY_NOUNS & set(said):
+        return False
+    if any(w != season and w not in STUDY_LIST_WORDS for w in said):
+        return False
+    beside = {said[i + step] for i, w in enumerate(said) if w == season for step in (-1, 1) if 0 <= i + step < len(said)}
+    return "study" not in beside
 # "refresh catalogs" (Item 5): download the saved study and trait catalogs again, with the catalog setup's approval.
 _REFRESH = re.compile(r"(?:please )?(?:refresh|update|reload|re download|redownload)(?: the)?(?: saved)?(?: study and trait)? "
                       r"catalogs?(?: again)?(?: now)?(?: please)?")

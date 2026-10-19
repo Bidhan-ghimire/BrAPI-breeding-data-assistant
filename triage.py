@@ -370,9 +370,8 @@ def catalog_list_request(decision: TriageDecision | None, text: str) -> catalog_
         return None
     if word and not (catalog_lists.is_one_word(word) and word in catalog_lists.words(text)):
         return None
-    if entity == "studies" and (word in catalog_lists.STUDY_LIST_WORDS or
-                                any(w != word and w not in catalog_lists.STUDY_LIST_WORDS for w in catalog_lists.words(text))):
-        return None                    # "not", a place, a second season, a trait: not the plain list (review, 2026-10-19)
+    if entity == "studies" and not catalog_lists.plain_studies_question(text, word):
+        return None                    # "not", a place, a second season, "seasons", a study's name: not the plain list
     return catalog_lists.ListRequest(entity, word or None)
 
 

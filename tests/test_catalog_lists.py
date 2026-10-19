@@ -717,9 +717,35 @@ def test_a_list_word_is_never_the_season_of_the_studies_label():
         assert triage.catalog_list_request(decision, "Which studies i have in all seasons?") is None
 
 
+def test_a_study_name_is_never_taken_as_the_season():
+    """Skeptic 2: "What seasons did study ibadan2026 have?" with word "ibadan2026" was a dead-end list."""
+    for message in ("Which study ibadan2026 had a season?", "Did study ibadan2026 have a season?",
+                    "What season did the ibadan2026 study have?", "Which season was the ibadan2026 study in?"):   # review4
+        decision = triage.TriageDecision.model_validate(list_label("studies", "ibadan2026"))
+        assert triage.catalog_list_request(decision, message) is None
+
+
+@pytest.mark.parametrize("typed", ["Show me the studies from the 2026 season", "Can you list all studies with a 2026 season, please?"])
+def test_these_request_frames_are_also_typed_commands(typed):
+    assert catalog_lists.parse_request(typed) == catalog_lists.ListRequest("studies", "2026")
+
+
 @pytest.mark.parametrize("message, accepted", [
     ("Which studies have a 2026 season?", True), ("which studies are in season 2026?", True),
+    ("Which trials ran in season 2026?", True), ("Which study had a 2026 season?", True),
+    ("Which were the 2026 studies?", True),                                   # the plural is still the list (review4)
+    ("What is the 2026 study?", False),                                       # one study, not the list (review4)
+    # "me" and "you" stay (Bidhan, 2026-10-20): phrasings both models labelled catalog_list in the live probe
     ("Show me the studies from the 2026 season", True), ("Can you list all studies with a 2026 season, please?", True),
+    ("Show me the 2026 studies", True), ("Tell me which studies have a 2026 season", True),
+    ("Which studies do you have from 2026?", True), ("Give me all 2026 studies", True),
+    ("Which studies do I have in 2026?", False),                              # "i" stays out
+    ("Which studies have seasons from 2026?", False),                         # "seasons" stays out (it reads "since 2026")
+    # skeptic 2 (review3/SKEPTIC2.md): seasons questions, a study's name, first person
+    ("What seasons are in 2026?", False), ("Which seasons from 2026 are in the catalog?", False),
+    ("What seasons do the 2026 studies have?", False), ("Is 2026 a season in the catalog?", False),
+    ("What is the 2026 season?", False),
+    ("Which studies from 2026 did you show me?", True),                       # accepted cost: it gets the 2026 list
     ("Which of these studies have a 2026 season?", False), ("Which of those trials ran in 2026?", False),   # skeptic
     ("Did it run in season 2026?", False), ("Is that study from 2026?", False), ("Which studies ran there in 2026?", False),
     ("Which studies do not have a 2026 season?", False), ("Which studies don't have a 2026 season?", False),
