@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import asyncio
+import gc
 import json
 import threading
 import time
@@ -172,6 +173,10 @@ def test_memory_listing_is_bounded_by_remaining_work_and_cannot_fallback(tmp_pat
         await anyio.sleep(1)
 
     monkeypatch.setattr(srv, "build_server", lambda ctx: server)
+    # The 0.03 s budget covers the MCP initialization too. In the full suite (2026-10-19, 2023 tests) a garbage-collection
+    # pause landed inside it, so the initialization timed out instead of the slow listing; with collection off, every test
+    # passed. Collecting first keeps the check the same: the listing, not a pause, must use up the budget.
+    gc.collect()
 
     async def scenario():
         async with McpTools.memory(ctx, remaining_time=lambda: 0.03) as bridge:
