@@ -187,11 +187,19 @@ def _catalog_plan_steps(plan: Plan, retrieval: RetrievalReport, registry: Any, *
                 return stop("Only explicit nonempty text filters are supported by this bounded catalog path.")
             exact_ids = None
             original_args = dict(args)
-            if args["column"] not in manifest.columns:
-                args, exact_ids = _season_filter(plan, args, manifest, rows)
+            # The same season request in its text form ("seasons contains 2026", the approved season exactly): it goes
+            # through the exact JSON-membership check too, never on text alone. Live 2026-10-19 (Opus 5.5): the planner
+            # wrote this form and the run stopped, asking the person, although only the plan's form differed.
+            season_text = (manifest.kind == "studies" and args["column"] == "seasons" and args["op"] == "contains"
+                           and plan.scope.filters.season_id is not None and args["value"] == plan.scope.filters.season_id)
+            if args["column"] not in manifest.columns or season_text:
+                alias = {"column": "seasonDbId", "op": "eq", "value": args["value"]} if season_text else args
+                args, exact_ids = _season_filter(plan, alias, manifest, rows)
                 used_scope_filters.add("season_id")
                 applied_scope_values["season_id"] = original_args["value"]
-                methods.append("validated seasonDbId alias using exact JSON seasons membership and the approved study IDs/count")
+                methods.append("validated seasonDbId alias using exact JSON seasons membership and the approved study IDs/count"
+                               if not season_text else "validated the seasons text filter as exact JSON seasons membership "
+                               "and the approved study IDs/count")
             for name, (column, operator) in SCOPE_FIELDS.items():
                 scoped = getattr(plan.scope.filters, name)
                 if (original_args["column"], original_args["op"]) == (column, operator):

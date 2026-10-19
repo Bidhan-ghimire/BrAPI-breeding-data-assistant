@@ -89,6 +89,30 @@ def test_season_alias_uses_exact_json_membership_and_derived_lineage(registry):
     assert any(source.sha256 in note for note in derived.quality_notes)
 
 
+@pytest.mark.parametrize("value", ["2026"])
+def test_the_season_filter_in_its_text_form_uses_the_same_exact_membership(registry, value):
+    """Live 2026-10-19 (Opus 5.5): the planner wrote "seasons contains 2026" instead of "seasonDbId eq 2026"; the run
+    stopped and asked the person ("did not apply every approved scope filter: season_id"). The text form now goes through
+    the same exact check: "12026" and "year 2026" contain the text but are not the season."""
+    source = saved(registry, season_rows(), kind="studies")
+    proposed = plan("studies", filters=[{"column": "seasons", "op": "contains", "value": value}], studies=("S1", "S2"),
+                    scope_season=value, question=f"Which studies have a {value} season?")
+    answer = run(registry, proposed, [source], budget=Budget())
+    assert answer.status == "completed"
+    assert next(c.value for c in answer.claims if c.transformation.startswith("number of distinct")) == 2
+    derived, rows = registry.load(answer.result_artifact_ids[0])
+    assert {r["studyDbId"] for r in rows} == {"S1", "S2"}
+    assert any("seasons text filter as exact JSON seasons membership" in m for m in answer.methods)
+
+
+def test_a_season_text_filter_that_is_not_the_approved_season_still_stops(registry):
+    source = saved(registry, season_rows(), kind="studies")
+    proposed = plan("studies", filters=[{"column": "seasons", "op": "contains", "value": "202"}], studies=("S1", "S2"),
+                    scope_season="2026", question="Which studies have a 2026 season?")
+    answer = run(registry, proposed, [source], budget=Budget())
+    assert answer.status != "completed" and not answer.claims
+
+
 def test_narrower_first_export_cannot_satisfy_approved_full_export(registry):
     narrow = saved(registry, season_rows()[:2], kind="studies")
     full = saved(registry, season_rows(), kind="studies")
