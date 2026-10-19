@@ -796,8 +796,11 @@ def test_the_catalog_list_label_is_offered_with_or_without_the_saved_catalog(cat
     for words in (" ".join(triage.CATALOG_LIST_LABEL.split()), 'For catalog_list, add "list" and "word" to that object',
                   '"which seasons are in the catalog?"', '"how many studies are there of each study type?"',
                   '"how many trait names contain the word yield?"',
-                  'one of "traits", "locations", "seasons", "programs" or "study types"',
-                  "A list for a particular study, place, season or program, or with two or more words to match, is data_question"):
+                  '"which studies have a 2026 season?"',
+                  'one of "traits", "locations", "seasons", "programs", "study types" or "studies"',
+                  'for "studies", the season as their message writes it',
+                  "A list for a particular study, place or program, studies in a season named in two or more words, or two or "
+                  "more words to match, is data_question"):
         assert words in prompt
     if catalog:                                         # the catalog label sends whole lists to catalog_list
         assert "A whole list, or the names that contain a word, is catalog_list" in prompt
@@ -815,7 +818,10 @@ def test_the_catalog_list_label_is_offered_with_or_without_the_saved_catalog(cat
     ("How many traits mention yields?", "traits", "yield", None),                   # the message says "yields"
     ("How many trait names contain root yield?", "traits", "root yield", None),     # two words
     ("How many trait names contain the word yield?", "traits", "yield?", None),     # not one word as a typed command reads one
-    ("Which studies are in the catalog?", "studies", "", None),                     # not one of the five lists
+    ("Which studies are in the catalog?", "studies", "", None),                     # the studies list needs its season
+    ("Which studies have a 2026 season?", "studies", "2026", ("studies", "2026")),  # coach check 3, 2026-10-19
+    ("Which studies have a 2026 season?", "study", "2025", None),                   # a season the person did not write
+    ("Which studies are in the catalog?", "plots", "", None),                       # not one of the six lists
     ("Which seasons are in the catalog?", "", "", None),                            # no list named
     ("Which study types are there?", "study_type", "", ("study_types", None)),       # singular, underscore
     ("How many traits contain dry-matter?", "traits", "dry", None),                 # a part of the person's word (review)
@@ -825,7 +831,8 @@ def test_the_catalog_list_label_is_offered_with_or_without_the_saved_catalog(cat
     ("How many trait names contain " + "İ" * 31 + "?", "traits", "İ" * 31, None),   # 62 characters once in lower case
     ("Which locations contain O’Brien?", "locations", "O’Brien", ("locations", "o'brien")),   # a curly apostrophe, as typed
 ], ids=["seasons", "study-types", "trait-names-with-yield", "case-and-spaces", "a-word-with-a-hyphen", "word-not-in-the-message",
-        "part-of-a-word", "plural-in-the-message", "two-words", "not-one-word", "not-a-list", "no-list", "singular-underscore",
+        "part-of-a-word", "plural-in-the-message", "two-words", "not-one-word", "studies-without-a-season",
+        "studies-of-a-season", "a-season-not-written", "not-a-list", "no-list", "singular-underscore",
         "part-of-a-hyphenated-word", "a-letter-of-n.c.", "n.c-as-typed", "dotless-i", "too-long-in-lower-case", "curly-apostrophe"])
 def test_the_list_and_the_word_of_a_catalog_list_decision_are_checked_by_code(message, entity, word, expected):
     decision = triage.parse_decision(reply_text(list_decision(entity, word)))

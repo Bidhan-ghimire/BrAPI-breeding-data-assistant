@@ -20,6 +20,12 @@ commands itself, from the same checked catalog every run loads first (the cached
   word yield?" (eval baseline 20261016T150241Z: they got the catalog summary, or a run that ended "Question blocked"). The
   list and the word are checked by code (triage.catalog_list_request); the list run itself is the same.
 
+* "list studies in season 2026" (also "with season 2026", "with a 2026 season", "from 2026"): the studies whose seasons
+  name that season exactly, ignoring case (coach check 3, 2026-10-19: the most common demo question, answered with no
+  run of the planner). The season is required; "list studies with yield" is not this command. A study is listed only
+  when one of its recorded seasons IS that season: "12026" or "2026 rainy" is not "2026". The count of the same
+  question (catalog_answers) checks the same exact membership.
+
 Traits are the trait catalog's variables, one entry per variable. Locations, seasons, programs and study types come from the
 study catalog: each is listed with the number of studies that name it, and only those named by at least one study are known.
 Study types are listed most studies first, each name as the catalog writes it ("Specialty trial" and "Specialty Trial" stay two).
@@ -40,20 +46,21 @@ __all__ = ["ListEntity", "ENTITIES", "SHOWN", "WORD_MAX_CHARS", "TRAIT_HINT", "L
            "CatalogList", "parse_request", "words", "is_one_word", "config_problems", "catalog_tables", "build", "chat_message", "report_lines",
            "fixed_plan", "evidence", "run_note", "setup_plan", "setup_evidence", "is_refresh_request", "setup_message"]
 
-ListEntity = Literal["traits", "locations", "seasons", "programs", "study_types"]
-ENTITIES: tuple[str, ...] = ("traits", "locations", "seasons", "programs", "study_types")
+ListEntity = Literal["traits", "locations", "seasons", "programs", "study_types", "studies"]
+ENTITIES: tuple[str, ...] = ("traits", "locations", "seasons", "programs", "study_types", "studies")
+SEASON_HINTS = 5              # season names containing the word, offered when no season is exactly that word
 SHOWN = 30                    # names shown in the chat (as run.ANSWER_LIST_SHOWN); the report keeps all of them
 WORD_MAX_CHARS = 60           # a longer filter word is not one of these commands
 LABEL_MAX_CHARS = 200         # the most of one database name shown in the chat
 TRAIT_HINT = "To see the trait names, ask **list all traits**, or add a word: **list traits with yield**."
 
 _NOUNS = {"traits": ("trait", "traits"), "locations": ("location", "locations"), "seasons": ("season", "seasons"),
-          "programs": ("program", "programs"), "study_types": ("study type", "study types")}
+          "programs": ("program", "programs"), "study_types": ("study type", "study types"), "studies": ("study", "studies")}
 _EXPORT = {"traits": "variables", "locations": "studies", "seasons": "studies", "programs": "studies",
-           "study_types": "studies"}                                                       # the table each is read from
+           "study_types": "studies", "studies": "studies"}                                 # the table each is read from
 _CATALOG_WORD = {"variables": "trait catalog", "studies": "study catalog"}
 _ORDER = {"traits": "A to Z", "locations": "A to Z", "seasons": "newest first", "programs": "A to Z",
-          "study_types": "most studies first"}
+          "study_types": "most studies first", "studies": "A to Z"}
 _ALIASES = {"trait": "traits", "traits": "traits", "variable": "traits", "variables": "traits", "location": "locations",
             "locations": "locations", "season": "seasons", "seasons": "seasons", "program": "programs", "programs": "programs",
             "programme": "programs", "programmes": "programs", "study type": "study_types", "study types": "study_types"}
@@ -61,12 +68,21 @@ _ALIASES = {"trait": "traits", "traits": "traits", "variable": "traits", "variab
 # A word: letters and digits, with - _ . ' / : allowed inside ("dry-matter", "CO_331:0000217"). Quotes and a closing "?" or "."
 # are not part of it. The whole message must be one command, nothing more.
 _TOKEN = re.compile(r"[^\W_]+(?:[-_.'/:][^\W_]+)*")
+_LEAD = (r"(?:(?:please|can you|could you|would you)(?: please)? )?"
+         r"(?:(?:list|show|give)(?: me)?(?: (?:a|the) list of)?|(?:a|the) list of)(?: all| every)?(?: of)?(?: the)?(?: available)? ")
 _REQUEST = re.compile(
-    r"(?:(?:please|can you|could you|would you)(?: please)? )?"
-    r"(?:(?:list|show|give)(?: me)?(?: (?:a|the) list of)?|(?:a|the) list of)(?: all| every)?(?: of)?(?: the)?(?: available)? "
+    _LEAD +
     r"(?P<entity>traits?|variables?|locations?|seasons?|programs?|programmes?|study types?)(?: names?)?"
     r"(?: (?:in|from) (?:the )?catalogs?)?"
     r"(?: (?:with|containing|that contains?|matching) (?P<word>\S+))?"
+    r"(?: please)?")
+# "list studies in season 2026": the season is named as a season ("season 2026", "a 2026 season"), or is a year ("from
+# 2026"). "list studies with yield" is not this command: a word that is neither goes to the planner as before.
+_STUDIES = re.compile(
+    _LEAD + r"studies(?: (?:in|from) (?:the )?catalogs?)? "
+    r"(?:(?:with|in|from|for|of|that have|having|that had)(?: (?:a|an|the))? season (?P<named>\S+)"
+    r"|(?:with|in|from|for|of|that have|having|that had)(?: (?:a|an|the))? (?P<before>\S+) season"
+    r"|(?:in|from|for|of) (?P<year>1[89]\d\d|2\d\d\d))"
     r"(?: please)?")
 _YEAR = re.compile(r"(?<!\d)(1[89]\d\d|2\d\d\d)(?!\d)")
 # "refresh catalogs" (Item 5): download the saved study and trait catalogs again, with the catalog setup's approval.
@@ -109,6 +125,7 @@ class CatalogList:
     total: int                       # names in the whole list, before the filter
     source: CatalogTable
     unrecorded: int = 0              # studies that name no location / season / program
+    hints: tuple[str, ...] = ()      # studies list with no match: season names that contain the word (at most SEASON_HINTS)
 
 
 # --------------------------------------------------------------------------
@@ -126,7 +143,12 @@ def _normal(text: str) -> str:
 
 def parse_request(text: str) -> ListRequest | None:
     """The whole message is one of the five list commands (with an optional filter word), or None."""
-    match = _REQUEST.fullmatch(_normal(text or ""))
+    normal = _normal(text or "")
+    studies = _STUDIES.fullmatch(normal)
+    if studies is not None:
+        season = studies.group("named") or studies.group("before") or studies.group("year")
+        return ListRequest("studies", season) if len(season) <= WORD_MAX_CHARS else None
+    match = _REQUEST.fullmatch(normal)
     if match is None:
         return None
     word = match.group("word")
@@ -149,6 +171,8 @@ def config_problems(entity: str | None, word: str | None) -> list[str]:
     problems = [] if entity in ENTITIES else [f"catalog_list must be one of {', '.join(ENTITIES)}"]
     if word is not None and (not word or len(word) > WORD_MAX_CHARS or any(c.isspace() for c in word)):
         problems.append(f"catalog_list_word must be one word of at most {WORD_MAX_CHARS} characters")
+    if entity == "studies" and word is None:
+        problems.append("catalog_list studies needs catalog_list_word: the season")
     return problems
 
 
@@ -240,6 +264,27 @@ def _study_types(metadata: Any) -> tuple[list[ListItem], int]:
     return [ListItem(name, name, len(ids), name) for name, ids in studies.items()], unrecorded
 
 
+def _studies(metadata: Any, season: str) -> tuple[list[ListItem], int]:
+    """The studies one of whose recorded seasons is exactly the season, ignoring case; how many studies name no season."""
+    wanted = _clean(season).casefold()
+    items, unrecorded = [], 0
+    for study in metadata.studies:
+        seasons = {_clean(s).casefold() for s in study.seasons if _clean(s)}
+        if not seasons:
+            unrecorded += 1
+        if wanted in seasons:
+            name = _clean(study.name)
+            items.append(ListItem(name or f"(no name) · {study.study_id}", study.study_id, None, name))
+    return _distinct_labels(items), unrecorded
+
+
+def _season_hints(metadata: Any, season: str) -> tuple[str, ...]:
+    """Season names that contain the word, newest first: "2026" finds "2026A" when no season is exactly "2026"."""
+    word = _clean(season).casefold()
+    named = [item for item in _order("seasons", _seasons(metadata)[0]) if word and word in item.name.casefold()]
+    return tuple(item.name for item in named[:SEASON_HINTS])
+
+
 def _order(entity: str, items: list[ListItem]) -> list[ListItem]:
     if entity == "study_types":                                  # most studies first; the same number, A to Z
         return sorted(items, key=lambda item: (-(item.studies or 0), item.label.casefold(), item.label))
@@ -253,6 +298,11 @@ def _order(entity: str, items: list[ListItem]) -> list[ListItem]:
 
 def build(request: ListRequest, metadata: Any, tables: dict[str, CatalogTable]) -> CatalogList:
     """The whole list from the catalog, then only the names containing the word (ignoring case; the name alone, not an ID)."""
+    if request.entity == "studies":               # the word is the season, matched exactly; the total is every study
+        matching, unrecorded = _studies(metadata, request.word or "")
+        return CatalogList(request=request, items=tuple(_order("studies", matching)), total=len(metadata.studies),
+                           source=tables["studies"], unrecorded=unrecorded,
+                           hints=_season_hints(metadata, request.word or "") if not matching else ())
     make = {"traits": _traits, "seasons": _seasons, "locations": lambda m: _grouped(m, "location"),
             "programs": lambda m: _grouped(m, "program"), "study_types": _study_types}[request.entity]
     every, unrecorded = make(metadata)
@@ -284,7 +334,12 @@ def _when(table: CatalogTable) -> str:
 def _heading(listing: CatalogList, *, escape) -> str:
     one, many = _NOUNS[listing.request.entity]
     word, matches, total = listing.request.word, len(listing.items), listing.total
-    if word:                                     # "names": a filter word is not a data question ("locations with yield")
+    if listing.request.entity == "studies":
+        head = (f"**Studies with season “{escape(word or '')}”: {'none' if not matches else matches} of the "
+                f"{_count(total, 'study', 'studies')} in the catalog.**")
+        if not matches:
+            return head
+    elif word:                                   # "names": a filter word is not a data question ("locations with yield")
         if not matches:
             return (f"**{one.capitalize()} names containing “{escape(word)}”: none of {total}.** Only the names are searched; "
                     f"try another word, or ask **list all {many}**.")
@@ -321,6 +376,17 @@ def _example(listing: CatalogList, every: tuple[ListItem, ...]) -> str | None:
 def _study_notes(listing: CatalogList) -> list[str]:
     """Locations, seasons, programs and study types come from the study records: what that means, in plain sentences."""
     one, many = _NOUNS[listing.request.entity]
+    if listing.request.entity == "studies":
+        season = _escaped(listing.request.word or "", LABEL_MAX_CHARS)
+        notes = [f"A study is listed when one of its recorded seasons is exactly “{season}” (ignoring case)."]
+        if listing.hints:
+            notes.append("Season names that contain “" + season + "”: "
+                         + ", ".join(_escaped(h, LABEL_MAX_CHARS) for h in listing.hints) + ".")
+        elif not listing.items:
+            notes.append("No season name contains it; ask **list all seasons** to see them.")
+        if listing.unrecorded:
+            notes.append(f"{_count(listing.unrecorded, 'study names', 'studies name')} no season.")
+        return notes
     notes = [f"Only {many} named by at least one study are listed."] if listing.total else []
     if listing.unrecorded:
         notes.append(f"{_count(listing.unrecorded, 'study names', 'studies name')} no {one}.")
@@ -368,7 +434,8 @@ def report_lines(listing: CatalogList) -> list[str]:
     """answer.md (the Full report): every name with its ID, and the exact table it was read from. Plain text."""
     one, many = _NOUNS[listing.request.entity]
     table, word = listing.source, listing.request.word
-    head = (f'{one.capitalize()} names containing "{word}": {len(listing.items)} of {listing.total}' if word
+    head = (f'Studies with season "{word}": {len(listing.items)} of {listing.total}' if listing.request.entity == "studies"
+            else f'{one.capitalize()} names containing "{word}": {len(listing.items)} of {listing.total}' if word
             else f"{many.capitalize()} in the catalog: {listing.total}")
     lines = ["## Catalog list (written by code from the cached catalog)", "",
              f"{head}, {_ORDER[listing.request.entity]}.",
@@ -378,14 +445,16 @@ def report_lines(listing: CatalogList) -> list[str]:
                  + (" by the operator's standing approval." if table.operator_approved else "."))
                 if table.fetched_in_this_run else "a saved copy, nothing new was requested.")
              + " No planner, no model call, no measurements."]
-    if listing.request.entity != "traits":
+    if listing.request.entity == "studies":
+        lines.append(" ".join(_study_notes(listing)).replace("**", ""))
+    elif listing.request.entity != "traits":
         lines.append(" ".join([f"{many.capitalize()} come from the study records.", *_study_notes(listing)]))
     lines.append("")
     for item in listing.items:
         label = item.label if item.key in (item.label, "") or item.label.endswith(f" · {item.key}") else f"{item.label} · {item.key}"
         lines.append(_item_line(item, label))
     if not listing.items:
-        lines.append("(no matching names)")
+        lines.append("(no matching studies)" if listing.request.entity == "studies" else "(no matching names)")
     return lines
 
 
@@ -397,10 +466,13 @@ def fixed_plan(request: ListRequest, question: str, base_url: str, now: datetime
     """The plan for a list run, written by code (never by the planner): read the cached export, list its names."""
     many = _NOUNS[request.entity][1]
     export = _EXPORT[request.entity]
-    containing = f" that contain '{request.word}'" if request.word else ""
+    studies = request.entity == "studies"
+    containing = (f" whose seasons include '{request.word}' exactly (ignoring case)" if studies else
+                  f" that contain '{request.word}'" if request.word else "")
     steps = [PlanStep(step_id="step_catalog", agent="retriever", action="export_metadata", inputs={"entity": export}, max_tool_calls=1),
              PlanStep(step_id="step_list", agent="analyst", action="list_catalog_names",
-                      inputs={"entity": request.entity, **({"contains": request.word} if request.word else {})},
+                      inputs={"entity": request.entity, **({"season": request.word} if studies else
+                                                           {"contains": request.word} if request.word else {})},
                       depends_on=["step_catalog"], max_tool_calls=1)]
     return Plan(plan_id=f"plan_catalog_list_{uuid.uuid4().hex[:6]}", question=question,
                 interpretation=(f"List the {many} in the cached {_CATALOG_WORD[export]}{containing}: a fixed list written by code "
@@ -418,12 +490,18 @@ def evidence(listing: CatalogList, registry: Any) -> tuple[RetrievalReport, Anal
     retrieval = RetrievalReport(status="completed", complete=True, artifacts=[manifest], request_ids=list(manifest.source_request_ids),
                                 warnings=["read from the cached catalog by controller code: no Retriever agent, no model call, "
                                           "no measurements"])
+    studies = listing.request.entity == "studies"
     claim = Claim(claim_id=f"clm_catalog_list_{listing.request.entity}", kind="count", value=len(listing.items),
                   denominator=Denominator(name=f"{many} in the {_CATALOG_WORD[manifest.kind]}", n=listing.total),
-                  source_artifact_hashes=[manifest.sha256], filters={"name contains": word} if word else {},
-                  transformation=f"number of {many}" + (f" whose name contains '{word}' (ignoring case)" if word else ""))
+                  source_artifact_hashes=[manifest.sha256],
+                  filters={"season": word} if studies else {"name contains": word} if word else {},
+                  transformation=(f"number of studies one of whose recorded seasons is exactly '{word}' (ignoring case)"
+                                  if studies else f"number of {many}" + (f" whose name contains '{word}' (ignoring case)" if word else "")))
     caveats = [f"The list shows the catalog as fetched {_when(listing.source)}; records added later are not in it."]
-    if listing.request.entity != "traits":
+    if studies:
+        caveats.append(f"A study is listed when one of its recorded seasons is exactly '{word}'; a season name that only "
+                       "contains it is another season.")
+    elif listing.request.entity != "traits":
         caveats.append(f"{many.capitalize()} come from the study records: only those named by at least one study are listed.")
     analysis = AnalysisReport(status="completed", claims=[claim], caveats=caveats,
                               methods=[f"catalog list: {many} read by code from the hash-checked {manifest.kind} table "
@@ -434,7 +512,8 @@ def evidence(listing: CatalogList, registry: Any) -> tuple[RetrievalReport, Anal
 def run_note(listing: CatalogList) -> str:
     many = _NOUNS[listing.request.entity][1]
     table, word = listing.source, listing.request.word
-    which = f"{len(listing.items)} of {listing.total} {many}" + (f" containing '{word}'" if word else "")
+    which = (f"{len(listing.items)} of {listing.total} studies with season '{word}'" if listing.request.entity == "studies"
+             else f"{len(listing.items)} of {listing.total} {many}" + (f" containing '{word}'" if word else ""))
     return (f"catalog list: {which}, read by code from the {_CATALOG_WORD[table.export]} of {table.base_url} "
             f"({table.artifact_id}, {table.rows} rows), fetched {_when(table)}"
             + (" in this run" if table.fetched_in_this_run else " (saved copy)") + "; no planner, no model call, no measurements")

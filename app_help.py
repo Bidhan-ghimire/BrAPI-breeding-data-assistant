@@ -36,7 +36,8 @@ def faq_items(source_details: str, *, data_sharing_policy: str = "") -> list[tup
          "Ask about one clear task at a time. Use a study name or ID and the exact trait name when you know them. "
          "Add a season, year or location to narrow a search. If you are unsure what is available, "
          "ask **list all traits**, or list all locations, seasons, programs or study types. Add one word to see fewer, "
-         "for example **list traits with yield**. These lists come from the saved catalog; no measurements are fetched. "
+         "for example **list traits with yield**. To see the studies of one season, ask **list studies in season 2026**. "
+         "These lists come from the saved catalog; no measurements are fetched. "
          "Type **refresh catalogs** to download the study and trait catalogs again; that download is approved like the "
          "first one, and it fetches no measurements."),
         ("What do Approve, Continue and Accept mean?",

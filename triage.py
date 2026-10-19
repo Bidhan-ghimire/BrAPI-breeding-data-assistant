@@ -26,10 +26,12 @@ fails, the line written by code for the label is shown. For unsure it also says 
 catalog_list ("Which seasons are in the catalog?", "How many studies are there of each study type?", "How many trait names
 contain the word yield?") starts the short list run that the typed command ("list all seasons", "list traits with yield")
 starts (catalog_lists.py): no planner and no model-written answer. The label call also names the list and at most one filter
-word, and code checks both (catalog_list_request): the list must be one of the five, and the word one word that the person's
+word, and code checks both (catalog_list_request): the list must be one of the six, and the word one word that the person's
 own message has, as a whole word, ignoring case (coach, 2026-10-16: rules read only the person's words; a word the model made
 up would show a wrong list). A catalog_list decision that fails the check counts as no decision: the message carries on as
 without one. Eval baseline 20261016T150241Z: these three questions got the catalog summary, or a run ended "Question blocked".
+"Which studies have a 2026 season?" is the sixth list, "studies", whose word is the season (coach check 3, 2026-10-19); the
+list keeps only the studies one of whose seasons is exactly that word, and a "studies" decision without a word fails the check.
 follow_up continues the last earlier question of this chat (chat_memory.py); the earlier questions are shown to the model.
 The label call returns one strict JSON object with the label (its reply is left empty and never shown). The talk reply
 is escaped like database text and cut to REPLY_MAX_CHARS; a reply written for another label is not shown. If the label
@@ -141,12 +143,14 @@ CATALOG_LABEL = ("- catalog_question: a question the saved catalog below answers
 # without it, the list run asks for the catalog setup first, as the typed command does. Code checks "list" and "word"
 # (catalog_list_request); nothing the model writes here is shown.
 CATALOG_LIST_LABEL = ("- catalog_list: they ask to see one whole list of the catalog, or its names that contain one word: the "
-                      "trait names, or the locations, seasons, programs or study types (these with their number of studies). "
-                      "For example \"which seasons are in the catalog?\", \"how many studies are there of each study type?\" or "
-                      "\"how many trait names contain the word yield?\". Then also give \"list\": one of \"traits\", "
-                      "\"locations\", \"seasons\", \"programs\" or \"study types\"; and \"word\": the one word of their message "
-                      "that the names must contain, or \"\" for the whole list. A list for a particular study, place, season or "
-                      "program, or with two or more words to match, is data_question.\n")
+                      "trait names, or the locations, seasons, programs or study types (these with their number of studies); "
+                      "or which studies have one season. "
+                      "For example \"which seasons are in the catalog?\", \"how many studies are there of each study type?\", "
+                      "\"how many trait names contain the word yield?\" or \"which studies have a 2026 season?\". Then also give "
+                      "\"list\": one of \"traits\", \"locations\", \"seasons\", \"programs\", \"study types\" or \"studies\"; "
+                      "and \"word\": the one word of their message that the names must contain, or \"\" for the whole list; for "
+                      "\"studies\", the season as their message writes it. A list for a particular study, place or program, "
+                      "studies in a season named in two or more words, or two or more words to match, is data_question.\n")
 # The label call's reply is never shown (app._reply_without_run): the talk call (Step 2c), which sees neither the saved
 # catalog nor the earlier questions, or code writes every reply, so no count, place or name that this call saw can reach
 # the person in a model's words ("front door, one path", 2026-10-19: with or without them in view).
@@ -347,19 +351,20 @@ def parse_decision(reply: Any) -> TriageDecision | None:
 # The lists a catalog_list decision may name, as the label call writes them (plural or singular) -> catalog_lists' name.
 CATALOG_LISTS = {"traits": "traits", "trait": "traits", "locations": "locations", "location": "locations",
                  "seasons": "seasons", "season": "seasons", "programs": "programs", "program": "programs",
-                 "programmes": "programs", "programme": "programs", "study types": "study_types", "study type": "study_types"}
+                 "programmes": "programs", "programme": "programs", "study types": "study_types", "study type": "study_types",
+                 "studies": "studies", "study": "studies"}
 
 
 def catalog_list_request(decision: TriageDecision | None, text: str) -> catalog_lists.ListRequest | None:
     """The list a catalog_list decision asks for, checked by code. None for any other decision, and when a field fails:
-    "list" must name one of the five lists, and "word", in lower case, must be empty or one whole word of the person's own
+    "list" must name one of the six lists, and "word", in lower case, must be empty or one whole word of the person's own
     message as the typed command reads words (catalog_lists.words): "dry" is not a word of "dry-matter", nor "n" of
-    "n.c." (review, 2026-10-16). The model's reply text is never used."""
+    "n.c." (review, 2026-10-16). The studies list needs its word: the season. The model's reply text is never used."""
     if decision is None or decision.label != "catalog_list":
         return None
     entity = CATALOG_LISTS.get(" ".join((decision.list_name or "").replace("_", " ").split()).casefold())
     word = (decision.word or "").strip().lower().replace("’", "'")          # as catalog_lists.words reads a message
-    if entity is None:
+    if entity is None or (entity == "studies" and not word):
         return None
     if word and not (catalog_lists.is_one_word(word) and word in catalog_lists.words(text)):
         return None

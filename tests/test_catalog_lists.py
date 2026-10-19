@@ -190,7 +190,8 @@ def test_anything_else_is_not_a_list_command(typed):
 
 
 @pytest.mark.parametrize("entity, word, problem", [
-    ("studies", None, "catalog_list must be one of traits, locations, seasons, programs, study_types"),
+    ("plots", None, "catalog_list must be one of traits, locations, seasons, programs, study_types, studies"),
+    ("studies", None, "catalog_list studies needs catalog_list_word"),
     ("traits", "two words", "catalog_list_word must be one word"), ("traits", "", "catalog_list_word must be one word"),
     (None, "yield", "catalog_list_word needs catalog_list")])
 def test_a_list_run_names_one_list_and_at_most_one_word(tmp_path, entity, word, problem):
@@ -556,13 +557,14 @@ def test_the_three_baseline_questions_reach_the_lists_written_by_code(lists, que
 
 
 @pytest.mark.parametrize("decision", [
-    list_label("studies"),                              # not one of the five lists
+    list_label("plots"),                                # not one of the six lists
+    list_label("studies"),                              # the studies list without its season
     list_label("traits", "potato"),                     # a word the person did not write (coach, 2026-10-16)
     list_label("traits", "yields"),                     # not as a whole word: the message says "yield"
     list_label("traits", "trait names"),                # two words
     list_label("traits", "yield?"),                     # not one word as the typed command reads one
     {**list_label("traits", "yield"), "list": None},    # no list named
-], ids=["not-a-list", "word-not-in-the-message", "not-a-whole-word", "two-words", "not-one-word", "no-list"])
+], ids=["not-a-list", "studies-without-a-season", "word-not-in-the-message", "not-a-whole-word", "two-words", "not-one-word", "no-list"])
 def test_a_list_label_whose_fields_fail_the_check_carries_on_as_without_a_decision(lists, decision):
     lists.cache_the_catalog()
     models = Models(({"status": "needs_clarification", "question": "Which trait is meant?"},))
@@ -574,3 +576,101 @@ def test_a_list_label_whose_fields_fail_the_check_carries_on_as_without_a_decisi
     lists.turn("cancel", history, state, models_=models)
     job.thread.join(timeout=60)
     assert [r.execution_status for r in lists.runs()] == ["canceled"] and lists.server.calls == []
+
+
+# --------------------------------------------------------------------------
+# The studies of one season (coach check 3, 2026-10-19): exact season membership, written by code
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("typed, season", [
+    ("list studies in season 2026", "2026"), ("show me all studies with a 2026 season", "2026"),
+    ("list the studies from 2026", "2026"), ("list studies with season wet-2025", "wet-2025"),
+    ("can you list studies that have season fall?", "fall"), ("List Studies In Season 2026 please", "2026"),
+    ("give me a list of studies for the season 2019", "2019"),
+])
+def test_the_studies_of_one_season_are_a_list_command(typed, season):
+    assert catalog_lists.parse_request(typed) == catalog_lists.ListRequest("studies", season)
+
+
+@pytest.mark.parametrize("typed", ["list studies with yield", "list all studies", "list studies in Clinton", "list studies from season",
+                                   "list studies in season 2026 at Clinton", "list studies in 2026 and 2025"])
+def test_a_studies_list_needs_a_season_named_as_one(typed):
+    assert catalog_lists.parse_request(typed) is None
+
+
+SEASONED = KnownMetadata(base_url=LIVE, complete=True, studies=[
+    KnownStudy(study_id="S1", name="Beta trial", seasons=["2026"]),
+    KnownStudy(study_id="S2", name="Alpha trial", seasons=["2025", "2026"]),
+    KnownStudy(study_id="S3", name="Not this one", seasons=["12026"]),
+    KnownStudy(study_id="S4", name="Nor this", seasons=["2026 rainy"]),
+    KnownStudy(study_id="S5", name="No season"),
+    KnownStudy(study_id="S6", name="Alpha trial", seasons=["2026"]),
+    KnownStudy(study_id="S7", name="Fall one", seasons=["Fall"])])
+
+
+def studies_of(season, metadata=SEASONED):
+    return catalog_lists.build(catalog_lists.ListRequest("studies", season), metadata, TABLES)
+
+
+def test_a_study_is_listed_only_when_one_of_its_seasons_is_exactly_that_season():
+    listing = studies_of("2026")
+    assert [item.key for item in listing.items] == ["S2", "S6", "S1"]           # A to Z; "12026" and "2026 rainy" are other seasons
+    assert listing.total == 7 and listing.unrecorded == 1 and listing.source == TABLES["studies"]
+    assert [item.key for item in studies_of("fall").items] == ["S7"]              # ignoring case
+    message = catalog_lists.chat_message(listing, in_report=True)
+    assert message.startswith("**Studies with season “2026”: 3 of the 7 studies in the catalog.** A to Z:\n\n"
+                              "- Alpha trial · S2\n- Alpha trial · S6\n- Beta trial\n")
+    assert "A study is listed when one of its recorded seasons is exactly “2026” (ignoring case). 1 study names no season." in message
+    report = "\n".join(catalog_lists.report_lines(listing))
+    assert 'Studies with season "2026": 3 of 7, A to Z.' in report and "- Beta trial · S1" in report
+
+
+def test_no_exact_season_offers_the_season_names_that_contain_the_word():
+    message = catalog_lists.chat_message(studies_of("202"), in_report=True)
+    assert message.startswith("**Studies with season “202”: none of the 7 studies in the catalog.**\n\n")
+    assert "Season names that contain “202”: 2026, 2026 rainy, 2025, 12026." in message     # newest first, as the seasons list
+    assert "No season name contains it" in catalog_lists.chat_message(studies_of("1880"), in_report=False)
+    assert "(no matching studies)" in catalog_lists.report_lines(studies_of("1880"))
+
+
+def test_a_long_season_list_shows_30_in_the_chat_and_every_study_in_the_report():
+    many = KnownMetadata(base_url=LIVE, complete=True,
+                         studies=[KnownStudy(study_id=f"S{i:02d}", name=f"Trial {i:02d}", seasons=["2026"]) for i in range(1, 36)])
+    listing = studies_of("2026", many)
+    message = catalog_lists.chat_message(listing, in_report=True)
+    assert "35 of the 35 studies in the catalog.** The first 30, A to Z:" in message
+    assert len(shown_items(message)) == 31 and "- … and 5 more in the Full report below." in message
+    assert "To see fewer" not in message
+    assert sum(line.startswith("- Trial ") for line in catalog_lists.report_lines(listing)) == 35
+
+
+def test_the_studies_list_claim_and_plan_name_the_season():
+    listing = studies_of("2026")
+    plan = catalog_lists.fixed_plan(listing.request, "Which studies have a 2026 season?", LIVE, FETCHED)
+    assert plan.steps[1].inputs == {"entity": "studies", "season": "2026"} and "'2026' exactly" in plan.interpretation
+    note = catalog_lists.run_note(listing)
+    assert note.startswith("catalog list: 3 of 7 studies with season '2026'")
+
+
+def test_list_studies_in_a_season_typed_at_the_front_door_is_a_short_run_with_no_model(lists):
+    lists.cache_the_catalog()
+    history, state = lists.turn("list studies in season 2026")
+    content = history[-1]["content"]
+    assert content.startswith("**Studies with season “2026”: 1 of the 40 studies in the catalog.** A to Z:\n\n- SYNTHETIC study 36\n")
+    assert lists.front_door == [] and lists.models.asked() == 0 and lists.server.calls == [] and "job" not in state
+    [result] = lists.runs()
+    assert result.execution_status == "completed" and result.analysis.claims[0].value == 1
+    assert result.analysis.claims[0].filters == {"season": "2026"} and result.analysis.claims[0].denominator.n == 40
+    assert result.plan.steps[1].inputs == {"entity": "studies", "season": "2026"}
+    [report] = lists.out.glob("run_*/answer.md")
+    assert "- SYNTHETIC study 36 · S036" in report.read_text(encoding="utf-8")
+
+
+def test_which_studies_have_a_season_reaches_the_studies_list_through_the_label(lists):
+    lists.cache_the_catalog()
+    model, factory = front_door_model(list_label("studies", "2026"))
+    history, state = lists.turn("Which studies have a 2026 season?", triage_model=factory)
+    assert history[-1]["content"].startswith("**Studies with season “2026”: 1 of the 40 studies in the catalog.**")
+    assert len(model.requests) == 1 and lists.models.asked() == 0 and lists.server.calls == [] and "job" not in state
+    assert triage.catalog_list_request(triage.TriageDecision.model_validate(list_label("studies", "2027")),
+                                       "Which studies have a 2026 season?") is None              # a season they did not write
