@@ -60,7 +60,7 @@ def test_different_count_statistics_are_not_suppressed(ctx):
     shown = cp.answer_summary(controller(ctx, claims))
     assert "1 distinct IDs" in shown and "Records" in shown
     assert "row count of a complete table" in shown
-    assert "| Count | 2 |" in shown
+    assert "| Rows | 2 |" in shown          # a row count is labelled Rows (count labels, open item 6)
 
 
 def test_location_frequency_uses_descending_study_count_and_hides_catalog_internal_notes(ctx):

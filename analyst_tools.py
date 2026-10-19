@@ -260,6 +260,30 @@ def _exclusions(classified: Classified) -> list[Exclusion]:
     return out
 
 
+# Count labels say exactly what n counts (coach, 2026-10-17, count_layout_plan RECOMMENDATION item 2). The method texts
+# (transformation) stay as they are: chat_presenter matches them. Before: "rows in the complete studies table" also after a
+# filter cut the table down (zero matches read as an empty catalog), and "valid numeric values" also when each unit's
+# values were averaged first (n then counts units).
+_FILTER_LINEAGE = re.compile(r"lineage: filter_rows: (.+) on \S+ sha256=\S+")
+PER_UNIT = "valid values averaged per unit first"
+
+
+def _filters_applied(manifest: Any) -> list[str]:
+    """The filter_rows filters that made this table, oldest first ("seasons contains '2026'"); [] for a source table. A
+    quoted JSON value (the catalog season filter, '"2026"') is shown once in double quotes: seasons contains "2026"."""
+    found = [m[1] for m in (_FILTER_LINEAGE.fullmatch(note) for note in manifest.quality_notes) if m]
+    return [re.sub(r"""'"([^'"]*)"'$""", r'"\1"', text) for text in found]
+
+
+def _rows_label(manifest: Any) -> str:
+    """What a row count of this table counts: its rows, and the filters that kept them."""
+    filters = _filters_applied(manifest)
+    complete = "complete " if manifest.complete else ""
+    if not filters:
+        return f"rows in the {complete}{manifest.kind} table"
+    return f"rows matching {' and '.join(filters)} in the {complete}{manifest.kind} table"
+
+
 def _numeric_claims(table: Table, classified: Classified, used: list[tuple[dict[str, str], float]], transformation: str,
                     *, grouping: list[str], filters: dict[str, str], unit: str | None, denominator_name: str,
                     label_parts: tuple[str, ...] = (), claim_namespace: str | None = None) -> tuple[dict[str, float | None], list[Claim]]:
@@ -420,7 +444,12 @@ def tool_numeric_summary(registry: ArtifactRegistry, a: NumericSummaryArgs) -> T
     if caveat:
         transformation = f"{caveat}; {transformation}"
     unit = table.manifest.measurement.unit
-    denominator_name = ("valid numeric values, one per observation unit" if classified.units_known else "valid numeric values (rows; independence unknown)")
+    averaged = len(used) != len(classified.valid)                       # duplicate_policy=mean_per_unit merged rows
+    denominator_name = (f"observation units ({PER_UNIT})" if averaged else
+                        "valid numeric values, one per observation unit" if classified.units_known else "valid numeric values (rows; independence unknown)")
+    filters_note = _filters_applied(table.manifest)
+    if filters_note:
+        denominator_name += f", from rows matching {' and '.join(filters_note)}"
     stats, claims = _numeric_claims(table, classified, used, transformation, grouping=[], filters={}, unit=unit,
                                    denominator_name=denominator_name,
                                    label_parts=() if a.value == VALUE_COL else (a.value,),
@@ -527,7 +556,9 @@ def tool_group_stats(registry: ArtifactRegistry, a: GroupStatsArgs) -> ToolResul
     shown = included[:a.top_n]
     claims: list[Claim] = []
     for g in shown:
-        denominator = Denominator(name=f"valid numeric values in group {g['group_id']}" + ("" if classified.units_known else " (rows; independence unknown)"),
+        averaged = len(used) != len(classified.valid)
+        denominator = Denominator(name=(f"observation units in group {g['group_id']} ({PER_UNIT})" if averaged else
+                                        f"valid numeric values in group {g['group_id']}" + ("" if classified.units_known else " (rows; independence unknown)")),
                                   n=g["n_valid_values"])
         claims.append(Claim(claim_id=_claim_id(table.manifest.artifact_id, "mean", a.by, g["group_id"],
                                                  *(() if a.value == VALUE_COL else (a.value,)),
@@ -597,7 +628,8 @@ def tool_filter_rows(registry: ArtifactRegistry, a: FilterRowsArgs) -> ToolResul
         if keep:
             kept.append(row)
     description = f"filter_rows: {a.column} {a.op} {needle!r}"
-    lineage = [f"lineage: {description} on {table.manifest.artifact_id} sha256={table.manifest.sha256}",
+    earlier = [note for note in table.manifest.quality_notes if _FILTER_LINEAGE.fullmatch(note)]   # a filter on a filtered table
+    lineage = [*earlier, f"lineage: {description} on {table.manifest.artifact_id} sha256={table.manifest.sha256}",
                f"rows in: {len(table.rows)}, rows kept: {len(kept)}, rows without a valid number to compare: {dropped_non_numeric}"]
     membership_incomplete = bool(unknown_cells and a.column in {"programDbId", "programName"})
     warnings = ([f"{unknown_cells} of {len(table.rows)} catalog rows have no {a.column}; {len(kept)} known matches were found, "
@@ -734,7 +766,7 @@ def tool_count_records(registry: ArtifactRegistry, a: CountRecordsArgs) -> ToolR
     if not table.manifest.complete:
         raise AnalystError("incomplete_data", f"{table.manifest.artifact_id} is not a complete collection; a count from it would not be a count of the catalog")
     hashes = [table.manifest.sha256]
-    denominator = Denominator(name=f"rows in the complete {table.manifest.kind} table", n=table.manifest.row_count)
+    denominator = Denominator(name=_rows_label(table.manifest), n=table.manifest.row_count)   # rows, after any filter
     claims: list[Claim] = []
     data: dict[str, Any] = {"artifact_id": table.manifest.artifact_id, "kind": table.manifest.kind, "total_rows": table.manifest.row_count,
                             "null_group_policy": f"empty cells are counted under {MISSING_GROUP!r}, never dropped", "value_policy": VALUE_POLICY["ids"]}

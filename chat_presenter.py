@@ -206,12 +206,17 @@ def _numeric_blocks(claims: list[Claim], sources: _Sources, source_labels: dict[
             lines += [f"**{_text(title)}{source_labels.get(hashes, '')}**", ""]
         rendered = []
         for claim in group:
+            label = labels.get(claim.kind, claim.kind.title())
+            if claim.transformation == DISTINCT and len(claim.grouping) == 1:          # not a row count (count labels, item 6)
+                label = f"Distinct {claim.grouping[0]} values"
+            elif claim.transformation in (ROW_COUNT, FREQUENCY):
+                label = "Rows"
             value = _number(claim.value)
             if claim.value is None:
                 value += ": " + (claim.missing_reason or "reason not provided")
             if claim.kind != "count":
                 value += " " + (claim.unit or "(unit not stated)")
-            rendered.append([labels.get(claim.kind, claim.kind.title()), value])
+            rendered.append([label, value])
         if focus_mean and len(rendered) == 1:
             lines += [f"**Mean: {_text(rendered[0][1])}**"]
         else:
