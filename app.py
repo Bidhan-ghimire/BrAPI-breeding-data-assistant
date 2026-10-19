@@ -407,10 +407,18 @@ def _ask_to_talk(text: str, triage_model: Callable[[], Any], label: str, history
     """The talk call: the reply to every message that starts nothing and has a talk label (sorted by the rules or by the
     label call, with or without a saved catalog or earlier questions: "front door, one path", 2026-10-19), written with no
     saved catalog, none of the app's earlier questions and no answer of the app in view; only the message, the person's
-    own last messages, the help reference and whether the tab already said what the app covers. None: the line written by
-    code is shown (triage.ask_to_talk says when)."""
+    own last messages, the help reference, whether the tab already said what the app covers, and whether a reply of the
+    app is already in this chat (_introduced). None: the line written by code is shown (triage.ask_to_talk says when)."""
     return triage.ask_to_talk(text, triage_model, label=label, source=_source_name(), reference=triage.reference_text(_faq()),
-                              earlier_words=_earlier_words(history, text), coverage_said=bool(state.get("coverage_said")))
+                              earlier_words=_earlier_words(history, text), coverage_said=bool(state.get("coverage_said")),
+                              introduced=_introduced(history))
+
+
+def _introduced(history: list[Message]) -> bool:
+    """Whether a reply of the app is already in this chat (front-door replies, catalog answers, lists, a run's screens): read
+    from the chat itself, so "New question" (which clears it) starts again and a drop (which keeps it) does not. The
+    progress line shown while the model is asked is not a reply. Live chat 2026-10-19: replies kept re-introducing the app."""
+    return any(isinstance(m, dict) and m.get("role") == "assistant" and _said(m.get("content")) != WORKING for m in history)
 
 
 def _saved_catalog(config_for: Callable[[str], RunConfig], text: str) -> catalog_summary.CatalogSummary | None:

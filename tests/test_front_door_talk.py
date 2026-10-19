@@ -109,6 +109,9 @@ def test_the_talk_prompt_never_gives_advice_and_carries_the_reply_rules(label):
                  "say that the app gives descriptive numbers only and does not rank or recommend",
                  "When the message asks which variety, clone, line or parent is best or should be chosen (advice or a "
                  "ranking), set offer_lookup to false",
+                 "You do not learn from these chats, and for this reply you see only the person's last few messages",
+                 "to a question about your own opinions, feelings or private life, say simply that you have no personal "
+                 "views or life of that kind",
                  "It does not make parental-selection or line-advancement recommendations",          # the reference
                  "front-door.invalid"):
         assert rule in one_line(prompt)
@@ -606,7 +609,9 @@ def test_what_the_app_covers_is_said_once_per_tab(chat, no_runs, monkeypatch):
     history, state = chat.turn("who is the president of united states?", triage_model=factory)
     assert state["coverage_said"] is True
     history, state = chat.turn("you're stupid.", history, state, triage_model=factory)
-    assert triage.COVERAGE_SAID_RULE in one_line(model.requests[3]["messages"][0]["content"])   # do not say it again
+    second = one_line(model.requests[3]["messages"][0]["content"])           # a reply is on screen: not the first reply
+    assert triage.NOT_FIRST_RULE in second and triage.NO_CLOSING_INVITE in second   # (since 2026-10-19, replaces the
+    assert triage.COVERAGE_SAID_RULE not in second                                  # coverage rule once introduced)
     assert history[-1]["content"] == triage.OUT_OF_SCOPE_SHORT                               # the code line, short
     monkeypatch.setattr(app, "Job", RecordingJob)
     RecordingJob.started = []
@@ -683,3 +688,107 @@ def test_the_coverage_flag_survives_a_drop(chat, no_runs):
     history, state = chat.turn("drop", [], state, triage_model=factory)
     assert job.closed and state.get("coverage_said") is True and history[-1]["content"] == "Sorry."
     assert " ".join(triage.COVERAGE_SAID_RULE.split()) in one_line(model.requests[1]["messages"][0]["content"])
+
+
+
+# --------------------------------------------------------------------------
+# Front-door follow-up (2026-10-19): from the second reply in a chat on, the talk prompt says not to introduce the app
+# again (NOT_FIRST_RULE). Code decides it from the chat itself (app._introduced). Live chat 2026-10-19 (Opus 5.5): about
+# 9 of 12 replies re-introduced the app, and "your thoughts on profanity" got the general-knowledge line.
+# --------------------------------------------------------------------------
+
+def talk_prompts(model):
+    return [one_line(r["messages"][0]["content"]) for r in model.requests if '"said_coverage"' in r["messages"][0]["content"]]
+
+
+def test_bidhans_chat_of_the_19th_introduces_the_app_only_in_the_first_reply(chat, no_runs):
+    script = [("was up?", "greeting_or_smalltalk"), ("was up my bitch?", "greeting_or_smalltalk"),
+              ("hello unreliable ai, can you do pushuops ?", "out_of_scope"), ("have you visited any country?", "out_of_scope"),
+              ("your thoughts on profanity", "out_of_scope"), ("bkla bkla", "unsure"),
+              ("Hello I'm bidhan. who are you?", "app_question")]                        # the rules sort it as app_question
+    replies = []
+    for message, label in script:
+        if triage.sort_by_rules(message) is None:
+            replies.append(reply_text(decision(label)))
+        replies.append(reply_text(talk_json(label, f"A reply to: {label}.", offer_lookup=False)))
+    model, _, factory = model_factory(*replies)
+    history, state = [], {}
+    for message, label in script:
+        history, state = chat.turn(message, history, state, triage_model=factory)
+        assert plain(history[-1]["content"]).startswith(f"A reply to: {label}.")              # every talk reply was shown
+    prompts = talk_prompts(model)
+    assert len(prompts) == len(script)
+    assert triage.NOT_FIRST_RULE not in prompts[0] and all(triage.NOT_FIRST_RULE in p for p in prompts[1:])
+    assert " ".join(triage.OUT_OF_SCOPE_RULE_LATER.split()) in prompts[4]               # the opinion question
+    assert "since you have only the breeding records" not in prompts[4]
+    assert "say simply that you have no personal views or life of that kind" in prompts[4]
+    assert "unless they ask who you are or what the app can do" in prompts[6]            # "who are you?" may still answer
+    assert triage.NO_CLOSING_INVITE not in prompts[5] and triage.NO_CLOSING_INVITE in prompts[1]   # unsure keeps its ending
+    assert triage.NO_CLOSING_INVITE not in prompts[0] and triage.NO_CLOSING_INVITE in prompts[6]   # first reply; app_question
+    assert "If it asks for data, invite them" in prompts[0] and "If it asks for data, invite them" not in prompts[1]
+    assert "If it asks for data, invite them" not in prompts[6]                          # app_question after the first reply
+    assert "Offer one example question only when it helps" in prompts[0]
+    assert all("Offer one example question" not in p for p in prompts[1:])
+    assert all("Set said_coverage to true only when your reply says what the app covers" in p for p in prompts[1:])
+
+
+def test_any_reply_on_screen_counts_and_the_progress_line_does_not():
+    assert not app._introduced([]) and not app._introduced([{"role": "user", "content": "hi"}])
+    assert not app._introduced([{"role": "user", "content": "hi"}, {"role": "assistant", "content": app.WORKING}])
+    assert app._introduced([{"role": "user", "content": "x"}, {"role": "assistant", "content": "**Catalog answer**"}])
+    shown = as_gradio_hands_it_back([{"role": "user", "content": "x"}, {"role": "assistant", "content": "Hello!"}])
+    assert app._introduced(shown)                                                   # as Gradio 6 hands it back: text blocks
+    stale = as_gradio_hands_it_back([{"role": "user", "content": "x"}, {"role": "assistant", "content": app.WORKING}])
+    assert not app._introduced(stale)                                               # a left-over progress line, as blocks
+
+
+def test_whats_your_name_after_the_first_reply_still_gets_the_name_rule(chat, no_runs):
+    model, _, factory = model_factory(reply_text(talk_json("greeting_or_smalltalk", "Hi.")), reply_text(decision("greeting_or_smalltalk")),
+                                      reply_text(talk_json("greeting_or_smalltalk", "I'm the Breeding data assistant.")))
+    history, state = chat.turn("hello", [], {}, triage_model=factory)
+    history, state = chat.turn("what's your name?", history, state, triage_model=factory)
+    prompt = talk_prompts(model)[-1]
+    assert "say who you are (the Breeding data assistant) if they ask your name" in prompt
+    assert "unless they ask who you are or what the app can do" in prompt and plain(history[-1]["content"]) == "I'm the Breeding data assistant."
+
+
+def test_a_catalog_answer_a_code_line_or_the_budget_line_also_count(chat, no_runs):
+    from llm import BUDGET_MESSAGE
+
+    seed_catalog(chat.cache, SOURCE)                                                # a catalog answer written by code
+    model, _, factory = model_factory(reply_text(decision("catalog_question")), reply_text(talk_json("greeting_or_smalltalk", "Hi.")))
+    history, state = chat.turn("tell me about Clinton", triage_model=factory)
+    history, state = chat.turn("hello", history, state, triage_model=factory)
+    assert triage.NOT_FIRST_RULE in talk_prompts(model)[-1]
+    model, _, factory = model_factory(reply_text("not json"), reply_text(talk_json("greeting_or_smalltalk", "Hi again.")))
+    history, state = chat.turn("thanks", [], {}, triage_model=factory)              # the code line ("You're welcome!")
+    history, state = chat.turn("hello", history, state, triage_model=factory)
+    assert triage.NOT_FIRST_RULE not in talk_prompts(model)[0] and triage.NOT_FIRST_RULE in talk_prompts(model)[1]
+    model, _, factory = model_factory(ModelProviderError("quota", BUDGET_MESSAGE), reply_text(talk_json("greeting_or_smalltalk", "Hi.")))
+    history, state = chat.turn("hello", [], {}, triage_model=factory)              # the code line + the budget line
+    history, state = chat.turn("hello", history, state, triage_model=factory)
+    assert triage.NOT_FIRST_RULE in one_line(model.requests[1]["messages"][0]["content"])
+
+
+def test_new_question_starts_again_and_a_drop_keeps_it(chat, no_runs):
+    model, _, factory = model_factory(reply_text(talk_json("greeting_or_smalltalk", "Hi.")),
+                                      reply_text(talk_json("greeting_or_smalltalk", "Hi.")))
+    history, state = chat.turn("hello", [], {}, triage_model=factory)
+    history, state, _ = app.start_over(state)                                         # New question clears the chat
+    chat.turn("hello", history, state, triage_model=factory)
+    assert all(triage.NOT_FIRST_RULE not in p for p in talk_prompts(model))
+    job = WaitingJob(FINAL_REVIEW)
+    model, _, factory = model_factory(reply_text(decision("out_of_scope")), reply_text(talk_json("out_of_scope", "Sorry.")))
+    on_screen = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a run's screen"}]
+    chat.turn("drop", on_screen, {"job": job, "new_question": "you're stupid."}, triage_model=factory)
+    assert job.closed and triage.NOT_FIRST_RULE in talk_prompts(model)[0]
+
+
+def test_unsure_after_the_first_reply_keeps_its_yes_line(chat, no_runs):
+    model, _, factory = model_factory(reply_text(talk_json("greeting_or_smalltalk", "Hi.")), reply_text(decision("unsure")),
+                                      reply_text(talk_json("unsure", "What would you like to know?")))
+    history, state = chat.turn("hello", [], {}, triage_model=factory)
+    history, state = chat.turn("tell me something interesting", history, state, triage_model=factory)
+    assert "Reply **yes** to look up" in history[-1]["content"] and state["pending_question"] == "tell me something interesting"
+    prompt = talk_prompts(model)[-1]
+    assert triage.NOT_FIRST_RULE in prompt and triage.NO_CLOSING_INVITE not in prompt
