@@ -99,8 +99,8 @@ def test_the_talk_prompt_never_gives_advice_and_carries_the_reply_rules(label):
                  "Set offer_lookup to true only when the message may be a question about breeding records",
                  "Otherwise set it to false; when its words mean nothing you can read (random letters or keys), say kindly "
                  "that you did not catch that", triage.OUT_OF_SCOPE_RULE, f"already sorted this message as {label}",
-                 f'{{"label": "{label}", "reason": "<one short sentence>", "reply": "<your reply>", "offer_lookup": <true or false>, '
-                 '"said_coverage": <true or false>}',
+                 '{"reason": "<one short sentence>", "reply": "<your reply>", "offer_lookup": <true or false>, '
+                 '"said_coverage": <true or false>}',          # no "label": the app's label is told, never asked back
                  triage.COVERAGE_ONCE_RULE,
                  # the out_of_scope rule's own words (a deliberate bug that put back the old formula passed, 2026-10-19)
                  "answer in kind and briefly, without restating what they asked, and never offer to look their message up",
@@ -116,7 +116,7 @@ def test_the_talk_prompt_never_gives_advice_and_carries_the_reply_rules(label):
                  "front-door.invalid"):
         assert rule in one_line(prompt)
     for fact in ("Saved catalog", "- catalog_question:", triage.REPLY_BY_APP_RULE, "Earlier questions in this chat",
-                 "Choose the label", "Locations with the most studies", "then offer one example question"):
+                 "Choose the label", "Locations with the most studies", "then offer one example question", '"label"'):
         assert fact not in prompt
     invitation = "If it asks for data, invite them to send the data question as a new message."
     assert (invitation in one_line(prompt)) == (label in ("greeting_or_smalltalk", "app_question"))   # not for unsure
@@ -186,8 +186,8 @@ def test_the_earlier_messages_are_read_from_the_history_as_gradio_hands_it_back(
 def test_one_more_call_without_tools_returns_the_reply_for_the_label(label):
     model = FakeModelClient([reply_text(talk(label, "Hello Bidhan, I am the Breeding data assistant.", offer_lookup=False))])
     result = ask_talk("hello, i am bidhan", lambda: model, label=label, earlier=["hi", "x" * 300])
-    assert result is not None and (result.label, result.reply, result.offer_lookup) == (
-        label, "Hello Bidhan, I am the Breeding data assistant.", False)
+    assert result is not None and (result.reply, result.offer_lookup) == ("Hello Bidhan, I am the Breeding data assistant.", False)
+    assert not hasattr(result, "label")                    # the label is the app's own, never the reply's (2026-10-20)
     [request] = model.requests                                                  # exactly one call, never retried
     assert request["tools"] == [] and request["max_tokens"] == triage.TRIAGE_MAX_TOKENS
     assert request["messages"] == [
@@ -202,6 +202,31 @@ def test_offer_lookup_left_out_keeps_the_yes_line():
     assert result is not None and result.offer_lookup is True
 
 
+@pytest.mark.parametrize("stray", [None, "unsure", "out_of_scope", "greeting_or_smalltalk", "maybe", ""])
+def test_a_stray_talk_label_or_other_text_is_ignored_and_the_reply_is_used(stray):
+    """Live 2026-10-19 (Luna): the talk call wrote "label": "out_of_scope" where the app had app_question or unsure, and
+    its good reply was dropped (3 of 12 messages; the retry rescued none). The call is told the label and no longer asked
+    to write it back (coach, 2026-10-20, option a: a stray label of any text is accepted and ignored)."""
+    body = {"reason": "scripted for this test", "reply": "I don't have a family or personal life.", "offer_lookup": False}
+    model = FakeModelClient([reply_text(json.dumps(body if stray is None else {"label": stray, **body}))])
+    result = ask_talk("who is your daddy?", lambda: model, label="unsure")
+    assert result is not None and result.reply == "I don't have a family or personal life." and result.offer_lookup is False
+    assert len(model.requests) == 1                                             # used at once, not asked for again
+
+
+@pytest.mark.parametrize("stray", ["data_question", "follow_up", "catalog_question", "catalog_list", "new_data_question",
+                                   "Data_Question", " follow-up ",
+                                   # review6: spellings a text match let through
+                                   "data_\u200bquestion", "ｄａｔａ_ｑｕｅｓｔｉｏｎ", "data__question", "data_question.",
+                                   "'data_question'"])
+def test_a_reply_that_still_writes_a_data_label_is_not_used(stray):
+    """Bidhan, 2026-10-20: such a reply was written for a data request and may promise a lookup that never happens."""
+    body = {"label": stray, "reason": "scripted for this test", "reply": "I'll search those records now; just say yes."}
+    model = FakeModelClient([reply_text(json.dumps(body))] * 2)
+    assert ask_talk("hello", lambda: model, label="greeting_or_smalltalk") is None
+    assert len(model.requests) == 2                                             # asked once more, as a format error
+
+
 @pytest.mark.parametrize("label", ["data_question", "follow_up", "catalog_question"])
 def test_the_talk_call_writes_only_for_messages_that_start_nothing_and_that_code_does_not_answer(label):
     model = FakeModelClient([reply_text(talk(label, "Hello"))])
@@ -210,7 +235,7 @@ def test_the_talk_call_writes_only_for_messages_that_start_nothing_and_that_code
 
 @pytest.mark.parametrize("reply", [
     reply_text("not json"),
-    reply_text(json.dumps({"label": "maybe", "reason": "an unknown label", "reply": "Hi"})),
+    reply_text(json.dumps({"label": 3, "reason": "a label that is not text", "reply": "Hi"})),
     reply_text(json.dumps({"label": "unsure", "reason": "x", "reply": "Hi", "extra": "a field the reply does not have"})),
     reply_text(json.dumps({"label": "unsure", "reply": "Hi"})),                                # the reason is required
     reply_text(json.dumps({"label": "unsure", "reason": "x", "reply": "Hi", "offer_lookup": "false"})),   # strict: a word
@@ -219,14 +244,13 @@ def test_the_talk_call_writes_only_for_messages_that_start_nothing_and_that_code
     reply_text(talk("unsure", "Hi"), finish_reason="length"),                                  # cut off at the limit
     reply_tools([("search_studies", "{}")]),                                                   # the talk call has no tools
     ModelProviderError("http_error", "provider returned HTTP 500"),
-    reply_text(talk("greeting_or_smalltalk", "Hi there")),                                     # written for another label
     reply_text(talk("unsure", "")),                                                            # empty
     reply_text(talk("unsure", "  \n ")),                                                       # blank
     reply_text(talk("unsure", "\u200b\u2060")),                                                # invisible characters only
     reply_text(talk("unsure", "\u3164\uffa0")),                                                # letters that show as nothing
-], ids=["not-json", "unknown-label", "extra-field", "no-reason", "offer-as-text", "too-long", "fenced", "cut-off",
-        "tool-call", "provider-error", "other-label", "empty", "blank", "invisible", "blank-letters"])
-def test_an_invalid_failed_or_mislabelled_talk_reply_is_not_used(reply):
+], ids=["not-json", "label-not-text", "extra-field", "no-reason", "offer-as-text", "too-long", "fenced", "cut-off",
+        "tool-call", "provider-error", "empty", "blank", "invisible", "blank-letters"])
+def test_an_invalid_or_failed_talk_reply_is_not_used(reply):
     """Since 2026-10-19 a reply that breaks the format is asked for once more (TALK_ATTEMPTS); a provider error is not."""
     model = FakeModelClient([reply, reply])
     assert ask_talk("bkla bkla", lambda: model) is None
@@ -476,12 +500,12 @@ def test_the_talk_reply_is_escaped_and_cut_like_the_first_calls_reply(chat, no_r
 @pytest.mark.parametrize("second", [
     ModelProviderError("connection", "could not reach the model"),
     reply_text("not json"),
-    reply_text(talk("out_of_scope", "I only look up breeding records.")),            # written for another label
+    reply_text(talk("data_question", "I'll look up those studies now.")),            # written for a data request
     reply_text(talk("greeting_or_smalltalk", "")),                                   # empty
     reply_text(talk("greeting_or_smalltalk", "Hola! There are 2039 studies here.")),  # a number of its own
     reply_text(talk("greeting_or_smalltalk", "Hola"), finish_reason="length"),
     None,                                                                            # nothing scripted: no reply left
-], ids=["provider-error", "invalid", "other-label", "empty", "own-number", "cut-off", "script-used-up"])
+], ids=["provider-error", "invalid", "data-label", "empty", "own-number", "cut-off", "script-used-up"])
 def test_without_a_usable_talk_reply_the_line_written_by_code_is_shown(chat, no_runs, second):
     seed_catalog(chat.cache, SOURCE)
     retried = second is not None and not isinstance(second, ModelProviderError)      # a format error: asked once more
@@ -531,11 +555,29 @@ def test_at_most_two_model_calls_per_message(chat, monkeypatch):
     assert count == 1 and RecordingJob.started[-1] == "Which studies have a 2026 season?"          # a data run
 
 
-def test_a_talk_reply_for_another_label_never_reaches_the_screen(chat):
-    """The app checks the label again where the reply is written (triage.ask_to_talk already refuses such a reply)."""
-    other = triage.TalkReply(label="greeting_or_smalltalk", reason="scripted for this test", reply="Hi there")
-    content, state = app._reply_without_run("unsure", None, "bkla bkla", {}, talk=other)
-    assert content == triage.unsure_line("front-door.invalid") and state["pending_question"] == "bkla bkla"
+@pytest.mark.parametrize("offer_lookup", [False, True])
+def test_the_apps_own_label_decides_everything_around_the_talk_reply(chat, offer_lookup):
+    """Until 2026-10-20 a talk reply whose own label differed never reached the screen. The talk reply has no label
+    now: the app's label decides what code adds around it. For unsure, only offer_lookup brings the "yes" line."""
+    reply = triage.TalkReply(reason="scripted for this test", reply="Hi there", offer_lookup=offer_lookup)
+    content, state = app._reply_without_run("unsure", None, "bkla bkla", {}, talk=reply)
+    assert plain(content).startswith("Hi there")
+    assert ("Reply **yes** to look up" in content) is offer_lookup and ("pending_question" in state) is offer_lookup
+
+
+@pytest.mark.parametrize("message, label, reply", [
+    ("have you visited any country?", "app_question", "I don't have a personal life or travel experiences."),
+    ("who is your daddy?", "unsure", "I don't have a family or personal life."),
+    ("your thoughts on profanity", "unsure", "I don't have personal views or feelings about profanity."),
+], ids=["country", "daddy", "profanity"])
+def test_lunas_three_label_disagreements_of_the_19th_now_show_its_reply(chat, no_runs, message, label, reply):
+    """Live 2026-10-19 (Luna, open_items_20261019/live/LIVE_CHECK.md): the label call said app_question or unsure, the
+    talk call wrote "label": "out_of_scope" with these replies and offer_lookup false; each fell back to a code line."""
+    model, _, factory = model_factory(reply_text(decision(label)),
+                                      reply_text(talk_json("out_of_scope", reply, offer_lookup=False)))
+    history, state = chat.turn(message, triage_model=factory)
+    assert plain(history[-1]["content"]) == reply                         # its reply, not the line written by code
+    assert "pending_question" not in state and len(model.requests) == 2  # no "yes" line; one label and one talk call
 
 
 def test_without_the_catalog_or_earlier_questions_the_talk_call_still_writes_the_reply(chat, no_runs):
@@ -811,8 +853,8 @@ def test_a_talk_reply_that_breaks_the_format_is_asked_for_once_more(chat, no_run
 
 def test_a_model_sorted_app_question_without_a_reply_gets_a_short_pointer_not_the_help_page(chat, no_runs):
     model, _, factory = model_factory(reply_text(decision("app_question")),
-                                      reply_text(talk_json("out_of_scope", "I have no views.")),     # another label, twice
-                                      reply_text(talk_json("out_of_scope", "I have no views.")))
+                                      reply_text(talk_json("data_question", "I have no views.")),    # a data label, twice
+                                      reply_text(talk_json("data_question", "I have no views.")))
     history, _ = chat.turn("your thoughts on profanity", triage_model=factory)
     assert history[-1]["content"] == triage.APP_SHORT and "Your first question" not in history[-1]["content"]
     assert len(model.requests) == 3

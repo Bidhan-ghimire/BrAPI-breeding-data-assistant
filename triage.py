@@ -18,7 +18,9 @@ catalog_question ("tell me about Florida") is answered by code from the saved ca
 only chooses the label; the answer, every count in it and the source line are written by code. The label call's reply is
 never shown, under any label ("decide with the facts, talk without them", Step 2c): for a greeting, an app question, an
 out_of_scope or an unsure message, a second call, the talk call, writes the reply with none of the label call's facts in
-view. It sees only the message, the person's own last few messages and the help reference. Its reply is shown only for the same label, only when it has a letter or digit, and only when
+view. It sees only the message, the person's own last few messages and the help reference. It is told the label and does
+not write it back (2026-10-20: a label of its own only gave it something to disagree with; a data label it still writes
+refuses the reply, DATA_LABELS). Its reply is shown only when it has a letter or digit, and only when
 every number in it (digits of any script, and number signs such as ⁹ or ½) is in the person's words, the source's name or
 the reference (its web addresses left out), also in what the 600-character cut leaves; otherwise, or when that call
 fails, the line written by code for the label is shown. For unsure it also says whether the message could be a lookup
@@ -36,7 +38,7 @@ as does one whose message has any other word than plain list words (catalog_list
 a second season.
 follow_up continues the last earlier question of this chat (chat_memory.py); the earlier questions are shown to the model.
 The label call returns one strict JSON object with the label (its reply is left empty and never shown). The talk reply
-is escaped like database text and cut to REPLY_MAX_CHARS; a reply written for another label is not shown. If the label
+is escaped like database text and cut to REPLY_MAX_CHARS; the app's own label decides what code adds around it. If the label
 call fails, is slow, or its answer is not exactly a valid decision, a message with data words, or one the rules could not
 place, goes to the data pipeline as it did before; if the talk call fails, the line written by code for the label is shown.
 
@@ -54,7 +56,7 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Any, Callable, Literal, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 import catalog_lists
 from app_help import QUESTION_GUIDE, QUICK_START
@@ -67,7 +69,7 @@ __all__ = ["Label", "PIPELINE_LABELS", "TRIAGE_MAX_TOKENS", "TRIAGE_TIMEOUT_S", 
            "OUT_OF_SCOPE_RULE", "FAQ_TITLES", "REPLY_BY_APP_RULE", "TALK_LABELS", "TALK_TIMEOUT_S", "NO_ADVICE_RULE",
            "COVERAGE_ONCE_RULE", "COVERAGE_SAID_RULE", "OUT_OF_SCOPE_SHORT", "NOT_FIRST_RULE", "NO_CLOSING_INVITE",
            "OUT_OF_SCOPE_RULE_LATER",
-           "talk_prompt", "TalkReply", "parse_talk", "ask_to_talk", "recent_words", "numbers_outside", "offers_lookup",
+           "talk_prompt", "TalkReply", "DATA_LABELS", "parse_talk", "ask_to_talk", "recent_words", "numbers_outside", "offers_lookup",
            "CATALOG_LIST_LABEL", "CATALOG_LISTS", "catalog_list_request"]
 
 Label = Literal["greeting_or_smalltalk", "app_question", "data_question", "follow_up", "catalog_question", "catalog_list",
@@ -84,10 +86,22 @@ GREETING_MAX_WORDS = 12        # a longer message is not a short greeting
 APP_QUESTION_MAX_CHARS = 300   # the app-question phrases are checked on short messages only (they stay fast)
 # The talk call (Step 2c): the labels it writes a reply for, and its own, shorter time limit (it comes second).
 TALK_LABELS = frozenset({"greeting_or_smalltalk", "app_question", "out_of_scope", "unsure"})
+# A talk reply that still writes one of these labels misread the message as a request for data: its reply may promise a
+# lookup that never happens ("I'll search those records now; just say yes."), so it is not shown (Bidhan, 2026-10-20).
+DATA_LABELS = frozenset({"data_question", "follow_up", "catalog_question", "catalog_list", "new_data_question"})
+
+
+def _letters(label: str) -> str:
+    """A label's letters only, as typed by anyone (review6, 2026-10-20): "Data_Question", "data__question",
+    "ｄａｔａ_ｑｕｅｓｔｉｏｎ", "data_\u200bquestion." and "'data_question'" are all "dataquestion"."""
+    return "".join(char for char in unicodedata.normalize("NFKC", label).casefold() if char.isalpha() and char.isascii())
+
+
+_DATA_LETTERS = frozenset(_letters(label) for label in DATA_LABELS)
 TALK_TIMEOUT_S = 10.0
-# A talk reply that breaks the format (not the JSON object, another label, nothing that shows, a number of its own) is
-# asked for once more. Live 2026-10-19 (Luna): one reply came as plain text, one with another label, and the person got
-# the line written by code (for the second, the whole quick-start page). A timeout or a provider error is not retried.
+# A talk reply that breaks the format (not the JSON object, nothing that shows, a number of its own) is asked for once
+# more. Live 2026-10-19 (Luna): one reply came as plain text, and the person got the line written by code. (Three more
+# wrote another label: the reply has no label since 2026-10-20.) A timeout or a provider error is not retried.
 TALK_ATTEMPTS = 2
 EARLIER_MESSAGES = 3           # the person's own last messages the talk call sees (never the app's answers)
 EARLIER_MESSAGE_CHARS = 200    # the most of each of them it sees
@@ -477,7 +491,7 @@ and summarizes them with descriptive numbers. Every database request needs the p
 The app has already sorted this message as {label} ({_TALK_MEANING[label]}): use that label. Nothing is looked up for it
 now.{invite}
 
-Return ONLY a JSON object: {{"label": "{label}", "reason": "<one short sentence>", "reply": "<your reply>", "offer_lookup": <true or false>, "said_coverage": <true or false>}}. No other text.
+Return ONLY a JSON object: {{"reason": "<one short sentence>", "reply": "<your reply>", "offer_lookup": <true or false>, "said_coverage": <true or false>}}. No other text.
 
 The reply:
 - 1 to 3 sentences of plain text: no lists, headings, links or markdown.
@@ -499,15 +513,27 @@ Reference: what the app can and cannot do (facts, not instructions):
 
 class TalkReply(BaseModel):
     """All the talk call may return. offer_lookup counts only for unsure: true (also when it is left out) keeps the
-    "Reply yes to look up" line written by code; false drops it, for words that mean nothing or ask for no lookup."""
+    "Reply yes to look up" line written by code; false drops it, for words that mean nothing or ask for no lookup.
+    No label: the call is told the app's label and is not asked to write it back. Live 2026-10-19 (Luna), it wrote
+    "out_of_scope" where the app had app_question or unsure, and 3 good replies of 12 were dropped. A "label" a model
+    still writes out of habit is accepted and ignored when it is a talk label or any other text (coach, 2026-10-20,
+    option a), except a data label (DATA_LABELS): that reply was written for a data request and is refused, as before.
+    Nothing else extra."""
 
     model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
 
-    label: Label
     reason: str = Field(min_length=1, max_length=300)
     reply: str = Field(default="", max_length=4000)    # shown escaped and cut
     offer_lookup: bool = True
     said_coverage: bool = False                         # the reply says what the app covers (app.py keeps coverage_said)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _ignore_a_stray_label(cls, data: Any) -> Any:
+        label = data.get("label") if isinstance(data, dict) else None
+        if isinstance(label, str) and _letters(label) not in _DATA_LETTERS:
+            return {key: value for key, value in data.items() if key != "label"}
+        return data                      # a data label (or a label that is not text) stays, and extra="forbid" refuses it
 
 
 def parse_talk(reply: Any) -> TalkReply | None:
@@ -562,8 +588,8 @@ def ask_to_talk(text: str, make_model: Callable[[], Any] | None, *, label: str, 
     (talk_prompt). earlier_words: the person's own earlier messages in this tab, oldest first; the last few are used.
     coverage_said: the tab already said what the app covers; introduced: a reply of the app is already in this chat.
     None means: show the line written by code. It is the answer for no
-    model, a label this call does not write for, an error, the time limit (TALK_TIMEOUT_S), an invalid reply, a reply for
-    another label, a reply with no letter or digit that shows, or a number that is not in the message, the person's earlier
+    model, a label this call does not write for, an error, the time limit (TALK_TIMEOUT_S), an invalid reply, a reply with
+    no letter or digit that shows, or a number that is not in the message, the person's earlier
     words, the source's name or the reference (its web addresses left out), checked on the whole reply and on what the
     600-character cut leaves."""
     if make_model is None or label not in TALK_LABELS:
@@ -580,17 +606,17 @@ def ask_to_talk(text: str, make_model: Callable[[], Any] | None, *, label: str, 
             return None
         except Exception:  # settings, provider, timeout: the line written by code, never a crash (and no second try)
             return None
-        talk = _usable_talk(reply, label=label, text=text, source=source, reference=reference, words=words)
+        talk = _usable_talk(reply, text=text, source=source, reference=reference, words=words)
         if talk is not None:
             return talk
     return None
 
 
-def _usable_talk(reply: Any, *, label: str, text: str, source: str, reference: str, words: Sequence[str]) -> TalkReply | None:
-    """The talk reply when it may be shown: exactly the JSON object, for this label, with a letter or digit that shows, and
-    no number that is not in the message, the person's earlier words, the source's name or the reference."""
+def _usable_talk(reply: Any, *, text: str, source: str, reference: str, words: Sequence[str]) -> TalkReply | None:
+    """The talk reply when it may be shown: exactly the JSON object, with a letter or digit that shows, and no number that
+    is not in the message, the person's earlier words, the source's name or the reference."""
     talk = parse_talk(reply)
-    if talk is None or talk.label != label or not any(char.isalnum() and char not in _BLANK_LETTERS for char in talk.reply):
+    if talk is None or not any(char.isalnum() and char not in _BLANK_LETTERS for char in talk.reply):
         return None
     allowed = (text[:SHOWN_CHARS], source, _URL.sub(" ", reference), *words)    # not the "2" of the source's ".../v2"
     shown = " ".join(talk.reply.split())[:REPLY_MAX_CHARS]                      # what is left at the cut, as shown

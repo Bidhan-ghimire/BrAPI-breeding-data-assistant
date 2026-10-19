@@ -411,17 +411,28 @@ def test_greetings_and_app_questions_get_one_model_reply_and_start_nothing(chat,
 @pytest.mark.parametrize("message, label, expected", [
     ("hello", "data_question", "Hello! I can help you explore public breeding data."),
     ("hello", "follow_up", "Hello! I can help you explore public breeding data."),
-    ("hello", "unsure", "Hello! I can help you explore public breeding data."),
-    ("hello", "app_question", "Hello! I can help you explore public breeding data."),
     ("can you help me?", "data_question", "### Your first question"),                         # the rules say app question
-    ("What does approve mean?", "greeting_or_smalltalk", "**What do Approve, Continue and Accept mean?**"),
-    ("hello", "out_of_scope", "Hello! I can help you explore public breeding data."),
-], ids=["greeting-data", "greeting-follow-up", "greeting-unsure", "greeting-app", "help-data", "approve-greeting", "greeting-oos"])
-def test_a_reply_written_for_another_label_is_not_shown_and_starts_nothing(chat, no_runs, message, label, expected):
+], ids=["greeting-data", "greeting-follow-up", "help-data"])
+def test_a_reply_written_for_a_data_request_is_not_shown_and_starts_nothing(chat, no_runs, message, label, expected):
+    """Since 2026-10-20 the talk reply has no label; one that still writes a data label is refused (triage.DATA_LABELS)."""
     model, _, factory = model_factory(*[reply_text(decision(label, "I'll search those records now; just say yes."))] * 2)
     history, state = chat.turn(message, triage_model=factory)
     assert history[-1]["content"].startswith(expected) and "search those records" not in history[-1]["content"]
     assert len(model.requests) == 2 and no_runs == [] and "job" not in state and "pending_question" not in state   # + retry
+    assert chat.requests == [] and not chat.out.exists()
+
+
+@pytest.mark.parametrize("message, label", [
+    ("hello", "unsure"), ("hello", "app_question"), ("What does approve mean?", "greeting_or_smalltalk"),
+    ("hello", "out_of_scope"),
+], ids=["greeting-unsure", "greeting-app", "approve-greeting", "greeting-oos"])
+def test_a_reply_with_another_talk_label_is_shown_and_still_starts_nothing(chat, no_runs, message, label):
+    """Until 2026-10-20 these fell back to the line written by code (the reply's own label differed from the app's). The
+    app's label now decides everything around the reply; nothing starts, nothing waits for a yes, nothing is fetched."""
+    model, _, factory = model_factory(reply_text(decision(label, "I'll search those records now; just say yes.")))
+    history, state = chat.turn(message, triage_model=factory)
+    assert html.unescape(history[-1]["content"]).startswith("I'll search those records now; just say yes.")
+    assert len(model.requests) == 1 and no_runs == [] and "job" not in state and "pending_question" not in state
     assert chat.requests == [] and not chat.out.exists()
 
 

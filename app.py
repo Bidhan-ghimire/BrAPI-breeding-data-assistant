@@ -489,7 +489,6 @@ def _reply_without_run(label: str, topic: str | None, text: str, state: dict[str
                                         kind="catalog_answer")
             return catalog.answer(text), {**state, "memory": _memory(state).add(turn)}
         label = "unsure"
-    talk = talk if talk is not None and talk.label == label else None
     model_text, offer_lookup = (talk.reply, talk.offer_lookup) if talk is not None else ("", True)
     show_guide = label == "greeting_or_smalltalk" and not state.get("guide_shown")     # "Questions to try" once per tab
     said = bool(state.get("coverage_said"))
