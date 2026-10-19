@@ -4,9 +4,10 @@ from __future__ import annotations
 import html
 import json
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Any
 
+from analyst_tools import MISSING_GROUP
 from catalog_answers import plain_reason as catalog_plain
 from contracts import Claim
 from metadata_answers import plain_reason as metadata_plain, render_metadata_facts
@@ -18,6 +19,7 @@ LIST_LIMIT = 30
 DISTINCT = "number of distinct non-empty exact text values"
 FREQUENCY = "frequency of exact text values"
 ROW_COUNT = "row count of a complete table"      # analyst_tools.tool_count_records: it counts rows and never checks units
+VALUE_COUNT = "count of valid values"            # analyst_tools._numeric_claims: "count of valid values; <how they were used>"
 NAMES = {
     "studyDbId": ("Studies", (("studyName", "Study"), ("locationName", "Location"), ("seasons", "Season"))),
     "locationDbId": ("Locations", (("locationName", "Location"), ("countryName", "Country"))),
@@ -181,6 +183,56 @@ def _count_focus(controller: Any, claims: list[Claim]) -> bool:
                and claim.grouping == target.grouping
                and sorted(claim.source_artifact_hashes) == sorted(target.source_artifact_hashes)
                and claim.denominator == target.denominator for claim in claims)
+
+
+def _count_lead(controller: Any, claims: list[Claim], in_catalog_titles: set[str],
+                source_labels: dict[tuple[str, ...], str]) -> list[str]:
+    """A count answer leads with its counts (plan v3, lead_with_count_plan_20261020): when the plan's own statistic is a
+    count, "**Counts**" lists every count claim, number first, with exactly what it counted, in a fixed order: valid
+    values or units, then rows, then distinct values, then frequencies. Within one kind, ties keep the claims' order, and
+    the " · source N" labels number the tables in that order too, as the blocks do. The model's tool-call order never
+    decides which kind comes first, and code never picks one. No line for a count a catalog block's title already leads
+    with ("Studies: 18 distinct IDs"), nor for the frequencies of that same table (review7: one match printed "1 rows with
+    studyDbId 1" above "Studies: 1 distinct IDs"), nor for a frequency table of several groups (the ranked table is the
+    answer), nor for a count from an incomplete table (its block below says so); a count of another kind keeps only its
+    block. The blocks below are unchanged."""
+    if getattr(getattr(getattr(controller, "plan", None), "statistic", None), "kind", None) != "count":
+        return []
+    def table(claim: Claim) -> tuple[Any, ...]:
+        return (tuple(sorted(claim.source_artifact_hashes)), tuple(claim.grouping), claim.denominator.name, claim.denominator.n)
+    frequency_groups = Counter(table(c) for c in claims if c.kind == "count" and c.transformation == FREQUENCY)
+    led = {table(c) for c in claims if c.claim_id in in_catalog_titles}        # tables whose count a title already leads with
+    ranked = []
+    for index, claim in enumerate(claims):
+        if claim.kind != "count" or "INCOMPLETE ARTIFACT" in claim.transformation:   # never a finished answer (analyst)
+            continue
+        name, n = claim.denominator.name, claim.denominator.n
+        column = claim.grouping[0] if len(claim.grouping) == 1 else None
+        if claim.transformation == VALUE_COUNT or claim.transformation.startswith(VALUE_COUNT + ";"):
+            order, words = 0, name                      # n is the count itself: values, or units when averaged per unit
+        elif claim.transformation == ROW_COUNT:
+            order, words = 1, name
+        elif claim.transformation == DISTINCT and column and not claim.filters:
+            if claim.claim_id in in_catalog_titles:
+                continue
+            order, words = 2, f"distinct {column} values, in {n} {name}"
+        elif claim.transformation == FREQUENCY and column and set(claim.filters) == {column}:
+            if frequency_groups[table(claim)] != 1 or table(claim) in led:
+                continue
+            value = claim.filters[column]
+            order, words = 3, f"rows with {'no ' + column if value == MISSING_GROUP else f'{column} {value}'}, of {n} {name}"
+        else:
+            continue
+        source = source_labels.get(tuple(sorted(claim.source_artifact_hashes)), "")
+        if claim.value is None:
+            reason = claim.missing_reason or "reason not provided"
+            line = f"- **Not available**: {_text(f'{reason} ({words})')}{source}"
+        else:
+            line = f"- **{_number(claim.value)}** {_text(words)}{source}"
+        ranked.append((order, index, line))
+    if not ranked:
+        return []
+    return ["**Counts**", "", *[line for _, _, line in sorted(ranked)], ""]
 
 
 def _numeric_blocks(claims: list[Claim], sources: _Sources, source_labels: dict[tuple[str, ...], str], *, focus_mean: bool = False) -> list[str]:
@@ -479,13 +531,16 @@ def answer_summary(controller: Any) -> str:
         else:
             other.append(claim)
     lines: list[str] = []
+    in_catalog_titles: set[str] = set()              # distinct counts a catalog block's title already leads with
     for key, group in buckets.items():
         block = _catalog_block(group, sources, source_labels.get(key[0], ""), focus_count=focus_count)
         if block is None:
             other.extend(group)
         else:
             lines += [*block, ""]
+            in_catalog_titles |= {claim.claim_id for claim in group if claim.transformation == DISTINCT}
     lines += _numeric_blocks(other, sources, source_labels, focus_mean=focus_mean)
+    lines = [*_count_lead(controller, claims, in_catalog_titles, source_labels), *lines]
     caveats, model_notes = _caveat_groups(controller, claims)
     caveats += [line for line in _empty_tables(controller) if line not in caveats]
     if focus_mean:

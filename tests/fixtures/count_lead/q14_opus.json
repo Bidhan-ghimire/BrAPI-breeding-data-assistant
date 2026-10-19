@@ -1,0 +1,40 @@
+{
+ "_note": "claims and plan statistic of eval/results/20261019T170352Z/out/run_20261019T170445_830dfa/answer.json (eval run of 2026-10-19, before d30b0e4), for the count lead tests",
+ "question": "In study 05DISE178HFLNO7, how many valid values does 'Reaction to Fusarium Wilt estimating 0-5' have?",
+ "statistic": {
+  "contract_version": "1",
+  "kind": "count",
+  "denominator": "valid plot-level values",
+  "weighting": "none",
+  "grouping": [],
+  "min_independent_n": 2,
+  "duplicate_policy": "reject"
+ },
+ "claims": [
+  {
+   "contract_version": "1",
+   "claim_id": "clm_v2_7b1f8d_0002_frequency_count_observationVariableDbId_76736",
+   "kind": "count",
+   "value": 140,
+   "unit": null,
+   "missing_reason": null,
+   "denominator": {
+    "contract_version": "1",
+    "name": "rows matching value is_valid_number '' in the complete observations table",
+    "n": 140
+   },
+   "n_independent_units": null,
+   "source_artifact_hashes": [
+    "7062222c09fc379f5766f9f35670e9cc2b469e061c5e612dd01ec1c760e0f1c4"
+   ],
+   "filters": {
+    "observationVariableDbId": "76736"
+   },
+   "grouping": [
+    "observationVariableDbId"
+   ],
+   "transformation": "frequency of exact text values",
+   "exclusions": []
+  }
+ ]
+}

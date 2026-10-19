@@ -1,0 +1,162 @@
+{
+ "_note": "claims and plan statistic of eval/results/20261019T170348Z/out/run_20261019T170443_2881cc/answer.json (eval run of 2026-10-19, before d30b0e4), for the count lead tests",
+ "question": "In study 05DISE178HFLNO7, how many valid values does 'Reaction to Fusarium Wilt estimating 0-5' have?",
+ "statistic": {
+  "contract_version": "1",
+  "kind": "count",
+  "denominator": "valid plot-level values",
+  "weighting": "none",
+  "grouping": [],
+  "min_independent_n": 2,
+  "duplicate_policy": "reject"
+ },
+ "claims": [
+  {
+   "contract_version": "1",
+   "claim_id": "clm_255e9b_0001_mean",
+   "kind": "mean",
+   "value": 2.3785714285714286,
+   "unit": null,
+   "missing_reason": null,
+   "denominator": {
+    "contract_version": "1",
+    "name": "valid numeric values, one per observation unit",
+    "n": 140
+   },
+   "n_independent_units": 140,
+   "source_artifact_hashes": [
+    "7062222c09fc379f5766f9f35670e9cc2b469e061c5e612dd01ec1c760e0f1c4"
+   ],
+   "filters": {},
+   "grouping": [],
+   "transformation": "mean of valid values; valid values used as recorded (one row per observation unit)",
+   "exclusions": []
+  },
+  {
+   "contract_version": "1",
+   "claim_id": "clm_255e9b_0001_median",
+   "kind": "median",
+   "value": 3.0,
+   "unit": null,
+   "missing_reason": null,
+   "denominator": {
+    "contract_version": "1",
+    "name": "valid numeric values, one per observation unit",
+    "n": 140
+   },
+   "n_independent_units": 140,
+   "source_artifact_hashes": [
+    "7062222c09fc379f5766f9f35670e9cc2b469e061c5e612dd01ec1c760e0f1c4"
+   ],
+   "filters": {},
+   "grouping": [],
+   "transformation": "median of valid values; valid values used as recorded (one row per observation unit)",
+   "exclusions": []
+  },
+  {
+   "contract_version": "1",
+   "claim_id": "clm_255e9b_0001_min",
+   "kind": "min",
+   "value": 1.0,
+   "unit": null,
+   "missing_reason": null,
+   "denominator": {
+    "contract_version": "1",
+    "name": "valid numeric values, one per observation unit",
+    "n": 140
+   },
+   "n_independent_units": 140,
+   "source_artifact_hashes": [
+    "7062222c09fc379f5766f9f35670e9cc2b469e061c5e612dd01ec1c760e0f1c4"
+   ],
+   "filters": {},
+   "grouping": [],
+   "transformation": "min of valid values; valid values used as recorded (one row per observation unit)",
+   "exclusions": []
+  },
+  {
+   "contract_version": "1",
+   "claim_id": "clm_255e9b_0001_max",
+   "kind": "max",
+   "value": 4.0,
+   "unit": null,
+   "missing_reason": null,
+   "denominator": {
+    "contract_version": "1",
+    "name": "valid numeric values, one per observation unit",
+    "n": 140
+   },
+   "n_independent_units": 140,
+   "source_artifact_hashes": [
+    "7062222c09fc379f5766f9f35670e9cc2b469e061c5e612dd01ec1c760e0f1c4"
+   ],
+   "filters": {},
+   "grouping": [],
+   "transformation": "max of valid values; valid values used as recorded (one row per observation unit)",
+   "exclusions": []
+  },
+  {
+   "contract_version": "1",
+   "claim_id": "clm_255e9b_0001_sd",
+   "kind": "sd",
+   "value": 0.7998907941907057,
+   "unit": null,
+   "missing_reason": null,
+   "denominator": {
+    "contract_version": "1",
+    "name": "valid numeric values, one per observation unit",
+    "n": 140
+   },
+   "n_independent_units": 140,
+   "source_artifact_hashes": [
+    "7062222c09fc379f5766f9f35670e9cc2b469e061c5e612dd01ec1c760e0f1c4"
+   ],
+   "filters": {},
+   "grouping": [],
+   "transformation": "sd of valid values; valid values used as recorded (one row per observation unit)",
+   "exclusions": []
+  },
+  {
+   "contract_version": "1",
+   "claim_id": "clm_255e9b_0001_count",
+   "kind": "count",
+   "value": 140,
+   "unit": null,
+   "missing_reason": null,
+   "denominator": {
+    "contract_version": "1",
+    "name": "valid numeric values, one per observation unit",
+    "n": 140
+   },
+   "n_independent_units": 140,
+   "source_artifact_hashes": [
+    "7062222c09fc379f5766f9f35670e9cc2b469e061c5e612dd01ec1c760e0f1c4"
+   ],
+   "filters": {},
+   "grouping": [],
+   "transformation": "count of valid values; valid values used as recorded (one row per observation unit)",
+   "exclusions": []
+  },
+  {
+   "contract_version": "1",
+   "claim_id": "clm_255e9b_0002_count_rows",
+   "kind": "count",
+   "value": 140,
+   "unit": null,
+   "missing_reason": null,
+   "denominator": {
+    "contract_version": "1",
+    "name": "rows matching value is_valid_number '' in the complete observations table",
+    "n": 140
+   },
+   "n_independent_units": null,
+   "source_artifact_hashes": [
+    "7062222c09fc379f5766f9f35670e9cc2b469e061c5e612dd01ec1c760e0f1c4"
+   ],
+   "filters": {},
+   "grouping": [],
+   "transformation": "row count of a complete table",
+   "exclusions": []
+  }
+ ]
+}
