@@ -78,6 +78,18 @@ def test_continue_button_uses_the_review_reply_and_returns_to_approve_label():
     job.waiting_on = CATALOG_PROMPT
     job.reply("approve")
     assert job.inbox.get_nowait() == "approve catalog"
+
+
+@pytest.mark.parametrize("waiting_on, word", [(DATA_REVIEW_PROMPT, "continue"), ("approve / edit / cancel: ", "approve"),
+                                              (CATALOG_PROMPT, "approve")])
+def test_the_first_button_sends_the_word_its_screen_asks_for(waiting_on, word):
+    """2026-10-19: at the data review the "Continue to analysis" button sent "approve" (code accepted it as continue). Now
+    each screen's button sends the word on that screen; a typed "approve" at the review is still accepted (Job.reply)."""
+    job = waiting_job(waiting_on)
+    assert app.first_button_word({"job": job}) == word and word in waiting_on
+    job.reply(word)
+    assert job.inbox.get_nowait() == {"approve": "approve catalog" if waiting_on == CATALOG_PROMPT else "approve"}.get(word, word)
+    assert app.first_button_word({}) == "approve"                                   # nothing waits: as before
     assert app.after_step({})[2]["value"] == "Approve"
 
 

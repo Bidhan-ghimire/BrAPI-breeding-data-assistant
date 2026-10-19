@@ -874,6 +874,14 @@ def reply_buttons(state: dict[str, Any] | None) -> tuple[bool, bool, bool, bool]
     return approval, approval or question, answer, answer
 
 
+def first_button_word(state: dict[str, Any] | None) -> str:
+    """The word the first quick-reply button sends: the one its screen asks for. At the data review the button reads
+    "Continue to analysis" and the screen says "Reply continue", so it sends "continue" (2026-10-19: it sent "approve",
+    which code also accepts there, Job.reply; the words now match). Elsewhere it reads "Approve" and sends "approve"."""
+    job = (state or {}).get("job")
+    return "continue" if job is not None and getattr(job, "waiting_on", "") == DATA_REVIEW_PROMPT else "approve"
+
+
 def locked():
     """While the app works: the input box (with its arrow), New question and the reply buttons are dimmed, so a message
     cannot overtake another. Order: box, New question, Approve, Cancel, Accept, Reject."""
@@ -947,13 +955,14 @@ def build_ui(*, make_config: Callable[[str], RunConfig] = live_config, make_mode
             yield from respond(message, history or [], current or {}, make_config=make_config, make_models=make_models, preflight=preflight,
                                triage_model=triage_model)
 
-        def pressing(word: str):
+        def pressing(word: str | Callable[[dict[str, Any] | None], str]):
             def on_press(history, current):                                # a button is the same as typing its word ...
                 if not (current or {}).get("job"):                         # ... unless nothing waits any more (e.g. after 15 minutes)
                     yield (list(history or []) + [{"role": "assistant", "content": "Nothing is waiting for that reply now; ask a new question."}],
                            current or {}, "")
                     return
-                yield from respond(word, history or [], current or {}, make_config=make_config, make_models=make_models, preflight=preflight)
+                said = word(current) if callable(word) else word            # the first button: the word its screen asks for
+                yield from respond(said, history or [], current or {}, make_config=make_config, make_models=make_models, preflight=preflight)
             return on_press
 
         # One queue group for state-changing callbacks; hidden API endpoints add no authentication.
@@ -962,7 +971,7 @@ def build_ui(*, make_config: Callable[[str], RunConfig] = live_config, make_mode
             .then(on_submit, inputs=[box, chat, state], outputs=[chat, state, box], **event_options)
             .then(full_report, inputs=[state], outputs=[report], **event_options)
             .then(after_step, inputs=[state], outputs=controls, **event_options))
-        for button, word in ((approve, "approve"), (cancel, "cancel"), (accept, "accept"), (reject, "reject")):
+        for button, word in ((approve, first_button_word), (cancel, "cancel"), (accept, "accept"), (reject, "reject")):
             (button.click(locked, None, controls, **event_options)
                 .then(pressing(word), inputs=[chat, state], outputs=[chat, state, box], **event_options)
                 .then(full_report, inputs=[state], outputs=[report], **event_options)
