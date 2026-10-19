@@ -661,7 +661,8 @@ def test_seasons_that_differ_only_in_capitals_are_named_and_not_merged():
 
 
 @pytest.mark.parametrize("typed", ["list studies with a season", "list studies in the season", "list studies in season please",
-                                   "list studies with season the", "list studies with any season"])
+                                   "list studies with season the", "list studies with any season", "list studies with no season",
+                                   "list studies in the last season", "list studies in this season", "list studies with season names"])
 def test_a_filler_word_is_never_read_as_the_season(typed):
     assert catalog_lists.parse_request(typed) is None
 
@@ -709,9 +710,18 @@ def test_which_studies_have_a_season_reaches_the_studies_list_through_the_label(
                                        "Which studies have a 2026 season?") is None              # a season they did not write
 
 
+def test_a_list_word_is_never_the_season_of_the_studies_label():
+    """Skeptic 2026-10-19: "Which studies are there?" with word "studies" showed 'Studies with season "studies": none'."""
+    for word in ("studies", "all", "i"):
+        decision = triage.TriageDecision.model_validate(list_label("studies", word))
+        assert triage.catalog_list_request(decision, "Which studies i have in all seasons?") is None
+
+
 @pytest.mark.parametrize("message, accepted", [
     ("Which studies have a 2026 season?", True), ("which studies are in season 2026?", True),
-    ("Show me the studies from the 2026 season", True), ("Can you list all studies that had a 2026 season, please?", True),
+    ("Show me the studies from the 2026 season", True), ("Can you list all studies with a 2026 season, please?", True),
+    ("Which of these studies have a 2026 season?", False), ("Which of those trials ran in 2026?", False),   # skeptic
+    ("Did it run in season 2026?", False), ("Is that study from 2026?", False), ("Which studies ran there in 2026?", False),
     ("Which studies do not have a 2026 season?", False), ("Which studies don't have a 2026 season?", False),
     ("Which studies had a 2026 season in Clinton?", False), ("Which studies have a 2025 or 2026 season?", False),
     ("Which 2026 studies measure yield?", False), ("Which studies without a 2026 season?", False),

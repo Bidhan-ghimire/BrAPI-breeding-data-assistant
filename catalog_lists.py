@@ -80,7 +80,8 @@ _REQUEST = re.compile(
     r"(?: please)?")
 # "list studies in season 2026": the season is named as a season ("season 2026", "a 2026 season"), or is a year ("from
 # 2026"). "list studies with yield" is not this command: a word that is neither goes to the planner as before.
-_NOT_A_SEASON = r"(?!(?:a|an|the|please|seasons?|studies|all|any|every)(?: |$))"    # "list studies with a season"
+_NOT_A_SEASON = (r"(?!(?:a|an|the|please|seasons?|studies|all|any|every|no|this|that|these|those|each|some|last|one|"
+                 r"their|its|my|your|which|same|current|next|other|names?|data)(?: |$))")   # "list studies with a season"
 _STUDIES = re.compile(
     _LEAD + r"studies(?: (?:in|from) (?:the )?catalogs?)? "
     r"(?:(?:with|in|from|for|of|that have|having|that had)(?: (?:a|an|the))? season " + _NOT_A_SEASON + r"(?P<named>\S+)"
@@ -90,10 +91,12 @@ _STUDIES = re.compile(
 _YEAR = re.compile(r"(?<!\d)(1[89]\d\d|2\d\d\d)(?!\d)")
 # The front door's "studies" list: besides the season, the person's message may have only these words (review,
 # 2026-10-19). "not", "Clinton", "or 2025", "yield" are not among them: such a question is not this list, it goes on as
-# a data question ("Which studies do not have a 2026 season?" must never get the 2026 list).
+# a data question ("Which studies do not have a 2026 season?" must never get the 2026 list). No word that points back
+# to earlier messages (it, that, these, those, there): "Which of these studies have a 2026 season?" is a follow-up, not
+# the whole list (skeptic, 2026-10-19).
 STUDY_LIST_WORDS = frozenset(
-    "a all an any are can catalog could did do does every for from give had has have having held i in is it list me "
-    "of please ran run saved season seasons see show studies study tell that the there these those to trials was were "
+    "a all an any are can catalog could did do does every for from give had has have having held i in is list me "
+    "of please ran run saved season seasons see show studies study tell the to trials was were "
     "what which with would you".split())
 # "refresh catalogs" (Item 5): download the saved study and trait catalogs again, with the catalog setup's approval.
 _REFRESH = re.compile(r"(?:please )?(?:refresh|update|reload|re download|redownload)(?: the)?(?: saved)?(?: study and trait)? "
