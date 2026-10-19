@@ -201,12 +201,14 @@ def test_after_drop_an_out_of_scope_question_gets_no_lookup_offer(chat):
     """The live chain of 2026-10-15: mid-run the model said new_data_question, the person chose drop, and the front door
     then offered to look the question up. Now the front door's out_of_scope gets the reply only."""
     job = WaitingJob(CLARIFY_PROMPT)
-    model, _, factory = scripted(reply_text(decision("new_data_question")), reply_text(decision("out_of_scope", FRONT_DOOR_REPLY)))
+    model, _, factory = scripted(reply_text(decision("new_data_question")), reply_text(decision("out_of_scope")),
+                                 reply_text(json.dumps({"label": "out_of_scope", "reason": "scripted", "reply": FRONT_DOOR_REPLY})))
     _, state = chat.turn("which country has the largest population?", job, triage_model=factory)
     assert state["new_question"] == "which country has the largest population?"
     history, state = chat.turn("drop", job, state, triage_model=factory)
     assert job.closed and history[-1]["content"] == FRONT_DOOR_REPLY and "look up" not in history[-1]["content"]
-    assert state == {} and RecordingJob.started == [] and len(model.requests) == 2      # no run, no waiting "yes"
+    assert RecordingJob.started == [] and len(model.requests) == 3                     # label + talk call; no run
+    assert state == {}                                                                  # no waiting "yes", no job
 
 
 def test_an_out_of_scope_message_without_model_text_gets_the_line_written_by_code(chat):

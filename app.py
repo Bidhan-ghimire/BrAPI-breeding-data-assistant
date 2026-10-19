@@ -376,11 +376,10 @@ def _source_name() -> str:
         return "the breeding database"
 
 
-def _ask_front_door(text: str, triage_model: Callable[[], Any], known_label: str | None = None, *,
-                    catalog: catalog_summary.CatalogSummary | None = None, earlier: str = "") -> triage.TriageDecision | None:
+def _ask_front_door(text: str, triage_model: Callable[[], Any], *, catalog: catalog_summary.CatalogSummary | None = None,
+                    earlier: str = "") -> triage.TriageDecision | None:
     return triage.ask_model(text, triage_model, source=_source_name(), reference=triage.reference_text(_faq()),
-                            known_label=known_label, catalog=catalog.for_message(text) if catalog is not None else "",
-                            earlier=earlier)
+                            catalog=catalog.for_message(text) if catalog is not None else "", earlier=earlier)
 
 
 def _said(content: Any) -> str | None:
@@ -403,12 +402,15 @@ def _earlier_words(history: list[Message], text: str) -> list[str]:
     return [words for words in said[:-1] if words is not None and " ".join(words.split()) != answered]
 
 
-def _ask_to_talk(text: str, triage_model: Callable[[], Any], label: str, history: list[Message]) -> triage.TalkReply | None:
-    """Step 2c's talk call: the reply to a message that starts nothing, written with no saved catalog, none of the app's
-    earlier questions and no answer of the app in view; only the message, the person's own last messages and the help
-    reference. None: the line written by code is shown (triage.ask_to_talk says when)."""
+def _ask_to_talk(text: str, triage_model: Callable[[], Any], label: str, history: list[Message],
+                 state: dict[str, Any]) -> triage.TalkReply | None:
+    """The talk call: the reply to every message that starts nothing and has a talk label (sorted by the rules or by the
+    label call, with or without a saved catalog or earlier questions: "front door, one path", 2026-10-19), written with no
+    saved catalog, none of the app's earlier questions and no answer of the app in view; only the message, the person's
+    own last messages, the help reference and whether the tab already said what the app covers. None: the line written by
+    code is shown (triage.ask_to_talk says when)."""
     return triage.ask_to_talk(text, triage_model, label=label, source=_source_name(), reference=triage.reference_text(_faq()),
-                              earlier_words=_earlier_words(history, text))
+                              earlier_words=_earlier_words(history, text), coverage_said=bool(state.get("coverage_said")))
 
 
 def _saved_catalog(config_for: Callable[[str], RunConfig], text: str) -> catalog_summary.CatalogSummary | None:
@@ -456,37 +458,39 @@ def _remember_result(state: dict[str, Any], job: Job, event: tuple[str, Any]) ->
                      acceptance=str(getattr(result, "human_acceptance", "pending")))
 
 
-KEPT_FOR_A_NEW_QUESTION = ("guide_shown", "memory")    # what a new question keeps of the tab's state
+KEPT_FOR_A_NEW_QUESTION = ("guide_shown", "memory", "coverage_said")    # what a new question keeps of the tab's state
 CATALOG_ANSWER_ID = "a catalog answer, no run"         # a remembered catalog answer has no run ID
 
 
-def _reply_without_run(label: str, topic: str | None, text: str, model_text: str, state: dict[str, Any], *,
-                       catalog: catalog_summary.CatalogSummary | None = None, context: bool = False,
+def _reply_without_run(label: str, topic: str | None, text: str, state: dict[str, Any], *,
+                       catalog: catalog_summary.CatalogSummary | None = None,
                        talk: triage.TalkReply | None = None) -> tuple[str, dict[str, Any]]:
     """The answer to a message that starts nothing, and the tab's state after it. It only returns text: no run, no request.
     A catalog question is answered by code from the saved catalog (CatalogSummary.answer; the model's text is not used) and
     remembered, so a follow-up can continue it; without a saved catalog the person is asked whether to look it up, as for
-    unsure. context: the saved catalog or the earlier questions were in the prompt, so that call's reply is not shown under
-    any label (no count, place or name it saw reaches the chat in its words). The talk call's reply is shown instead (talk:
-    written without any of them in view and checked by triage.ask_to_talk, Step 2c), or, without one, the line written by
-    code for the label. For unsure, talk.offer_lookup false (words that mean nothing, or no lookup) drops the "yes" line,
-    so nothing waits for a yes."""
+    unsure (the line written by code). The label call's reply is never shown, under any label ("front door, one path",
+    2026-10-19): the talk call's reply is (talk: written without the saved catalog or the earlier questions in view and
+    checked by triage.ask_to_talk), or, without one, the line written by code for the label. For unsure,
+    talk.offer_lookup false (words that mean nothing, no lookup, advice or a ranking) drops the "yes" line, so nothing
+    waits for a yes. coverage_said: set once a shown reply said what the app covers (the talk reply's said_coverage, or
+    the out_of_scope line written by code), so later replies in the tab do not repeat it."""
     if label == "catalog_question":
         if catalog is not None:
             turn = chat_memory.PastTurn(question=text, run_id=CATALOG_ANSWER_ID, status="answered from the saved catalog by code",
                                         acceptance="not asked", scope=None, answer=catalog.mentions_line(text),
                                         kind="catalog_answer")
             return catalog.answer(text), {**state, "memory": _memory(state).add(turn)}
-        label, model_text = "unsure", ""
-    offer_lookup = True
-    if context:
-        talk = talk if talk is not None and talk.label == label else None
-        model_text, offer_lookup = (talk.reply, talk.offer_lookup) if talk is not None else ("", True)
+        label = "unsure"
+    talk = talk if talk is not None and talk.label == label else None
+    model_text, offer_lookup = (talk.reply, talk.offer_lookup) if talk is not None else ("", True)
     show_guide = label == "greeting_or_smalltalk" and not state.get("guide_shown")     # "Questions to try" once per tab
+    said = bool(state.get("coverage_said"))
     content = triage.front_door_reply(label, model_text, text=text, topic=topic, faq=_faq(), source=_source_name(),
-                                      show_guide=show_guide, offer_lookup=offer_lookup)
+                                      show_guide=show_guide, offer_lookup=offer_lookup, coverage_said=said)
     if show_guide:
         state = {**state, "guide_shown": True}
+    if not said and ((talk is not None and talk.said_coverage) or (talk is None and label == "out_of_scope")):
+        state = {**state, "coverage_said": True}                                       # what the app covers: said once
     if triage.offers_lookup(label, model_text, offer_lookup):
         state = {**state, "pending_question": text}                                    # a later "yes" starts it
     return content, state
@@ -618,14 +622,15 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
     out-of-scope message is answered while the run keeps waiting; a new data question asks drop or keep; without a
     decision the message goes to the run as before). A new message passes the front door: a catalog list starts a short
     list run (catalog_lists.py: no rule, model or planner); greetings and app questions found by the rules start nothing and
-    get one triage_model call that writes the reply (the line written by code when there is no model or the call fails).
-    Every other message, with data words or not, gets that one call with the saved catalog's summary and the tab's earlier
-    questions in view, and its label decides (Step 2b): a data question starts a run; a follow-up starts a run that
-    continues the last question; a catalog list starts the short list run, once code accepts its list and word (a refused
-    one counts as no decision); a catalog question, an out-of-scope or an unsure message starts nothing. When the saved
-    catalog or the earlier questions were in view, the reply to a message that starts nothing (except a catalog question,
-    which code answers) comes from a second call that sees neither (Step 2c), or else from code. Without a decision, the
-    message starts a run as before. A question that ends is added to the tab's memory. Yields (history, state, box)."""
+    get one triage_model call, the talk call, that writes the reply (the line written by code when there is no model or the
+    call fails). Every other message, with data words or not, gets the label call with the saved catalog's summary and the
+    tab's earlier questions in view (when there are any), and its label decides (Step 2b): a data question starts a run; a
+    follow-up starts a run that continues the last question; a catalog list starts the short list run, once code accepts
+    its list and word (a refused one counts as no decision); a catalog question, an out-of-scope or an unsure message starts
+    nothing. The label call's reply is never shown: the reply to a message that starts nothing (except a catalog question,
+    which code answers) comes from the talk call, which sees neither the catalog nor the earlier questions but the person's
+    own last messages ("front door, one path", 2026-10-19), or else from code. Without a decision, the message starts a run
+    as before. A question that ends is added to the tab's memory. Yields (history, state, box)."""
     text = (message or "").strip()
     if not text:
         yield history, state, ""
@@ -685,18 +690,16 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
         elif (listing := catalog_lists.parse_request(text)) is None:            # a catalog list: code decides, no rule or model
             by_rules = triage.sort_by_rules(text)
             if by_rules is not None and by_rules.label not in triage.PIPELINE_LABELS:
-                model_text, budget_note = "", ""
-                if triage_model is not None:                                     # one call writes the reply
+                talk, budget_note = None, ""
+                if triage_model is not None:                                     # one call, the talk call, writes the reply
                     history.append({"role": "assistant", "content": WORKING})
                     yield history, state, ""
                     try:
-                        decision = _ask_front_door(text, triage_model, known_label=by_rules.label)
+                        talk = _ask_to_talk(text, triage_model, by_rules.label, history, state)
                     except ModelProviderError as exc:          # the model budget is used up: the line written by code, and why
-                        decision, budget_note = None, budget_reply(exc)
-                    if decision is not None and decision.label == by_rules.label:   # a reply written for another label is not shown
-                        model_text = decision.reply
+                        talk, budget_note = None, budget_reply(exc)
                     history = history[:-1]
-                content, state = _reply_without_run(by_rules.label, by_rules.topic, text, model_text, state)
+                content, state = _reply_without_run(by_rules.label, by_rules.topic, text, state, talk=talk)
                 history.append({"role": "assistant", "content": content + ("\n\n" + budget_note if budget_note else "")})
                 yield history, state, ""                                         # no run and no database request
                 return
@@ -732,17 +735,15 @@ def respond(message: str, history: list[Message], state: dict[str, Any], *, make
             if listed is not None:                                                  # the list run the typed command starts:
                 config_for = _list_config(make_config, listed)                      # no planner, no model-written answer
             elif decision is not None and decision.label not in triage.PIPELINE_LABELS:   # None: no decision, so the run starts
-                context = catalog is not None or bool(earlier_text)
                 try:
-                    talk = (_ask_to_talk(text, triage_model, decision.label, history)      # Step 2c: a second call writes the
-                            if context and decision.label in triage.TALK_LABELS else None)  # reply without those facts in view
+                    talk = (_ask_to_talk(text, triage_model, decision.label, history, state)   # a second call writes the reply,
+                            if decision.label in triage.TALK_LABELS else None)  # with or without a catalog or earlier questions
                 except ModelProviderError as exc:                              # the model budget is used up
                     after = DROPPED_NOTHING_STARTED if dropped else NOTHING_STARTED
                     history[-1] = {"role": "assistant", "content": budget_reply(exc, after)}
                     yield history, state, ""
                     return
-                content, state = _reply_without_run(decision.label, None, text, decision.reply, state, catalog=catalog,
-                                                    context=context, talk=talk)
+                content, state = _reply_without_run(decision.label, None, text, state, catalog=catalog, talk=talk)
                 history[-1] = {"role": "assistant", "content": content}
                 yield history, state, ""
                 return

@@ -61,8 +61,8 @@ def talk(label: str, reply: str, offer_lookup: bool | None = None) -> str:
     return json.dumps(body if offer_lookup is None else {**body, "offer_lookup": offer_lookup})
 
 
-def ask(message: str, factory, known_label: str | None = None):
-    return triage.ask_model(message, factory, source="front-door.invalid", reference=REFERENCE, known_label=known_label)
+def ask(message: str, factory):
+    return triage.ask_model(message, factory, source="front-door.invalid", reference=REFERENCE)
 
 
 # --------------------------------------------------------------------------
@@ -158,26 +158,26 @@ def test_every_app_answer_names_a_question_of_the_help_tab():
 # --------------------------------------------------------------------------
 
 def test_the_prompt_carries_the_rules_the_reference_and_the_examples():
+    """Since "front door, one path" (2026-10-19) the label call only labels: its reply is never shown, so its prompt holds
+    no reply rules (they are the talk call's: test_front_door_talk.py)."""
     prompt = triage.front_door_prompt(source="front-door.invalid", reference=REFERENCE)
-    for rule in ("1 to 3 sentences of plain text", "Mirror the person's greeting and write in the language they used",
-                 "Never claim to have looked anything up", "If they ask about something the reference below does not say "
-                 "the app can do, say that the app does not do that", "Offer one example question only when it helps, "
-                 "and never for unsure", "Do not offer a lookup or suggest a", "leave it empty for data_question and follow_up",
+    for rule in ("The reply: leave it empty for every label. The app writes every reply itself.",
                  "front-door.invalid", "Choose the label", "- out_of_scope: a message this app cannot help with",
                  "an insult or rude remark", "between out_of_scope and unsure choose unsure",       # a doubt keeps the lookup offer
                  "a message about crops, plants, places, programs, seasons or years is data_question or unsure",
-                 "For out_of_scope (this replaces the rules above about saying what the app does not do and about examples): "
-                 "do not repeat or restate what they asked. In one sentence, say what the app covers",
-                 "then offer one example question. Never offer to look their message up."):
+                 "A request to recommend, rank or choose varieties, clones, lines or parents (which is best, which to plant "
+                 "or cross) is out_of_scope, even though it names a crop",
+                 "a question about recorded numbers (for example the highest mean yield in a study) is data_question"):
         assert rule in " ".join(prompt.split())                     # the same words, whatever the line breaks
+    for gone in ("1 to 3 sentences", "Mirror the person's greeting", "For out_of_scope (", "offer one example question"):
+        assert gone not in prompt                                   # the label call writes no shown reply
     assert "geography" not in prompt                                # locations are breeding data
     assert f"- {triage.EXAMPLE_QUESTION}" in triage.QUESTION_GUIDE    # the code line's example is one of the questions to try
     for fact in ("It does not make parental-selection or line-advancement recommendations", "Which studies have a 2026 season?",
                  "synthetic source details", "Approve allows the specific database request"):
         assert fact in prompt
     assert "*" not in REFERENCE and "`" not in REFERENCE           # no markdown for the model to copy
-    known = triage.front_door_prompt(source="front-door.invalid", reference=REFERENCE, known_label="app_question")
-    assert "already sorted this message as app_question: use that label. Nothing will be looked up for this message" in known
+    assert "known_label" not in inspect.signature(triage.front_door_prompt).parameters    # rules-sorted: the talk call writes
 
 
 @pytest.mark.parametrize("label", ["greeting_or_smalltalk", "app_question", "data_question", "follow_up", "out_of_scope", "unsure"])
@@ -426,7 +426,8 @@ def test_a_reply_written_for_another_label_is_not_shown_and_starts_nothing(chat,
 
 
 def test_the_models_text_reaches_the_chat_escaped(chat, no_runs):
-    _, _, factory = model_factory(reply_text(decision("app_question", "<img src=x onerror=alert(1)> [click](http://x.invalid)")))
+    _, _, factory = model_factory(reply_text(talk("app_question", "<img src=x onerror=alert('x')> [click](http://x.invalid)")))
+    # "what can you do?" is sorted by the rules: one call, the talk call, writes the reply
     history, _ = chat.turn("what can you do?", triage_model=factory)
     content = history[-1]["content"]
     assert "<img" not in content and "&lt;img" in content and "](" not in content and no_runs == []
@@ -464,10 +465,14 @@ def test_questions_to_try_appear_once_per_tab(chat, no_runs, monkeypatch):
 
 @pytest.mark.parametrize("label", ["greeting_or_smalltalk", "app_question"])
 def test_one_call_sorts_an_unplaced_message_and_writes_its_reply(chat, no_runs, label):
-    model, _, factory = model_factory(reply_text(decision(label, "My name is the Breeding data assistant")))
+    """Since 2026-10-19 two calls: the label call sorts (its reply is never shown), the talk call writes the reply."""
+    model, _, factory = model_factory(reply_text(decision(label, "THE LABEL CALL'S TEXT IS NEVER SHOWN")),
+                                      reply_text(talk(label, "My name is the Breeding data assistant")))
     history, state = chat.turn("what's your name?", triage_model=factory)
     assert history[-1]["content"].startswith("My name is the Breeding data assistant")
-    assert len(model.requests) == 1 and "Choose the label" in model.requests[0]["messages"][0]["content"]
+    assert "NEVER SHOWN" not in history[-1]["content"]
+    assert len(model.requests) == 2 and "Choose the label" in model.requests[0]["messages"][0]["content"]
+    assert '"said_coverage"' in model.requests[1]["messages"][0]["content"]            # the talk prompt's own field
     assert no_runs == [] and "job" not in state and chat.requests == []
 
 
@@ -536,12 +541,12 @@ OUT_OF_SCOPE_REPLY = ("I can help only with public breeding records such as stud
 @pytest.mark.parametrize("message", ["i hate you", "which country has the largest population?"])
 def test_out_of_scope_gets_the_reply_only_no_lookup_line_and_no_waiting_yes(chat, no_runs, message):
     """2026-10-15 live: "i hate you" got "Reply yes to look up"; the population question got the same lookup offer."""
-    model, _, factory = model_factory(reply_text(decision("out_of_scope", OUT_OF_SCOPE_REPLY)))
+    model, _, factory = model_factory(reply_text(decision("out_of_scope")), reply_text(talk("out_of_scope", OUT_OF_SCOPE_REPLY)))
     history, state = chat.turn(message, triage_model=factory)
     content = history[-1]["content"]
-    assert content == OUT_OF_SCOPE_REPLY                                           # the model's reply only
+    assert content == OUT_OF_SCOPE_REPLY                                           # the talk call's reply only
     assert "Reply **yes**" not in content and "look up" not in content and "Questions to try" not in content
-    assert "pending_question" not in state and "job" not in state and len(model.requests) == 1
+    assert "pending_question" not in state and "job" not in state and len(model.requests) == 2
     assert "Choose the label" in model.requests[0]["messages"][0]["content"]       # the rules could not place it
     history, state = chat.turn("yes", history, state, triage_model=None)           # a later yes starts nothing
     assert no_runs == [] and chat.requests == [] and not chat.out.exists() and "job" not in state
@@ -549,8 +554,8 @@ def test_out_of_scope_gets_the_reply_only_no_lookup_line_and_no_waiting_yes(chat
 
 
 def test_out_of_scope_forgets_an_earlier_unsure_question(chat, no_runs):
-    _, _, factory = model_factory(reply_text(decision("unsure", "What would you like to know?")),
-                                  reply_text(decision("out_of_scope", OUT_OF_SCOPE_REPLY)))
+    _, _, factory = model_factory(reply_text(decision("unsure")), reply_text(talk("unsure", "What would you like to know?")),
+                                  reply_text(decision("out_of_scope")), reply_text(talk("out_of_scope", OUT_OF_SCOPE_REPLY)))
     _, state = chat.turn("tell me something interesting", triage_model=factory)
     assert state["pending_question"] == "tell me something interesting"
     history, state = chat.turn("i hate you", [], state, triage_model=factory)
@@ -560,8 +565,9 @@ def test_out_of_scope_forgets_an_earlier_unsure_question(chat, no_runs):
 
 
 def test_out_of_scope_without_model_text_gets_the_line_written_by_code(chat, no_runs):
-    _, _, factory = model_factory(reply_text(decision("out_of_scope", "")))
+    model, _, factory = model_factory(reply_text(decision("out_of_scope", "")), reply_text("not json"))   # the talk call fails
     history, state = chat.turn("i hate you", triage_model=factory)
+    assert len(model.requests) == 2
     assert history[-1]["content"] == ("I can help only with public breeding records in front-door.invalid: studies, trials, traits, "
                                       "locations, seasons and recorded measurements. For example: “Which studies have a 2026 season?”")
     assert "pending_question" not in state and no_runs == []
@@ -573,18 +579,19 @@ def test_the_page_hands_the_front_door_model_to_the_chat(monkeypatch):
     monkeypatch.setattr(app, "hosted_notice", lambda: "")
     monkeypatch.setattr(app, "Job", RecordingJob)
     RecordingJob.started = []
-    model, built, factory = model_factory(reply_text(decision("unsure", "I did not quite follow")))
+    model, built, factory = model_factory(reply_text(decision("unsure")), reply_text(talk("unsure", "I did not quite follow")))
     ui = app.build_ui(preflight=lambda q: [], triage_model=factory)
     [submit] = [f for f in ui.fns.values() if f.name == "on_submit"]
     history, state, box = list(submit.fn("tell me something interesting", [], {}))[-1]
-    assert built == [model] and len(model.requests) == 1 and history[-1]["content"].startswith("I did not quite follow")
+    assert built == [model, model] and len(model.requests) == 2 and history[-1]["content"].startswith("I did not quite follow")
     assert state["pending_question"] == "tell me something interesting" and RecordingJob.started == [] and box == ""
 
 
 @pytest.mark.parametrize("yes_reply", ["yes", "Yes, go ahead"])
 def test_unsure_asks_first_and_yes_starts_the_original_question(chat, monkeypatch, yes_reply):
     monkeypatch.setattr(app, "Job", RecordingJob)
-    model, _, factory = model_factory(reply_text(decision("unsure", "I am not sure what you would like to know")))
+    model, _, factory = model_factory(reply_text(decision("unsure")),
+                                      reply_text(talk("unsure", "I am not sure what you would like to know")))
     message = "tell me something interesting"
     history, state = chat.turn(message, triage_model=factory)
     assert history[-1]["content"] == ("I am not sure what you would like to know\n\nReply **yes** to look up "
@@ -592,7 +599,7 @@ def test_unsure_asks_first_and_yes_starts_the_original_question(chat, monkeypatc
     assert state["pending_question"] == message and RecordingJob.started == [] and chat.requests == []
     history, state = chat.turn(yes_reply, history, state, triage_model=factory)
     assert RecordingJob.started == [message] and "job" in state and "pending_question" not in state
-    assert len(model.requests) == 1                                # the "yes" itself is never sent to the model
+    assert len(model.requests) == 2                                # label + talk; the "yes" itself is never sent to the model
 
 
 @pytest.mark.parametrize("reply, means_yes", [
@@ -642,13 +649,14 @@ def test_replies_to_a_waiting_run_are_never_sorted(chat):
 def test_which_parents_should_i_cross_gets_a_reply_and_starts_no_run(chat, no_runs):
     """2026-10-15 live: "which parents should I cross?" started a run because "parents" and "cross" are data words."""
     assert triage.sort_by_rules("which parents should I cross?").label == "data_question"      # the rules alone would run it
-    model, _, factory = model_factory(reply_text(decision("out_of_scope", OUT_OF_SCOPE_REPLY)))
+    model, _, factory = model_factory(reply_text(decision("out_of_scope")), reply_text(talk("out_of_scope", OUT_OF_SCOPE_REPLY)))
     history, state = chat.turn("which parents should I cross?", triage_model=factory)
     assert history[-1]["content"] == OUT_OF_SCOPE_REPLY and [m["role"] for m in history] == ["user", "assistant"]
     assert no_runs == [] and chat.requests == [] and not chat.out.exists() and chat.counts["models"] == 0
     assert "job" not in state and "pending_question" not in state
-    [request] = model.requests
-    assert request["tools"] == [] and "Choose the label" in request["messages"][0]["content"]
+    label_call, talk_call = model.requests
+    assert label_call["tools"] == talk_call["tools"] == [] and "Choose the label" in label_call["messages"][0]["content"]
+    assert "does not rank or recommend" in talk_call["messages"][0]["content"]     # the no-advice answer in kind
 
 
 @pytest.mark.parametrize("factory", [
@@ -738,19 +746,24 @@ def test_with_the_catalog_in_the_prompt_and_no_talk_reply_the_line_written_by_co
     assert len(model.requests) == 2 and no_runs == [] and chat.requests == []
 
 
-def test_without_the_catalog_or_earlier_questions_the_model_reply_is_shown(chat, no_runs):
-    model, _, factory = model_factory(reply_text(decision("out_of_scope", "I can help with 5 kinds of records.")))
+def test_without_the_catalog_or_earlier_questions_the_label_calls_reply_is_still_not_shown(chat, no_runs):
+    """Until 2026-10-19 the label call's reply was shown here (live 2026-10-18: "whats my name?" got a stock line); now the
+    talk call writes it, with or without the saved catalog or earlier questions."""
+    model, _, factory = model_factory(reply_text(decision("out_of_scope", "THE LABEL CALL'S TEXT")),
+                                      reply_text(talk("out_of_scope", "That is outside what I know; I only have the breeding records.")))
     history, _ = chat.turn("which country has the largest population?", triage_model=factory)
-    assert history[-1]["content"] == "I can help with 5 kinds of records."
-    prompt = model.requests[0]["messages"][0]["content"]
-    assert triage.REPLY_BY_APP_RULE not in prompt and "1 to 3 sentences of plain text" in prompt
+    assert history[-1]["content"] == "That is outside what I know; I only have the breeding records."
+    label_prompt, talk_prompt = (request["messages"][0]["content"] for request in model.requests)
+    assert triage.REPLY_BY_APP_RULE in label_prompt and "1 to 3 sentences of plain text" not in label_prompt
+    assert "1 to 3 sentences of plain text" in talk_prompt
 
 
 def test_without_a_saved_catalog_the_catalog_label_is_not_offered_and_its_reply_is_not_shown(chat, no_runs):
     model, _, factory = model_factory(reply_text(decision("catalog_question", "Florida is not in the catalog.")))
     history, state = chat.turn("tell me about Florida", triage_model=factory)
-    prompt = model.requests[0]["messages"][0]["content"]
-    assert "- catalog_question:" not in prompt and "Saved catalog" not in prompt and triage.REPLY_BY_APP_RULE not in prompt
+    [request] = model.requests                       # catalog_question is no talk label: the code line, no talk call
+    prompt = request["messages"][0]["content"]
+    assert "- catalog_question:" not in prompt and "Saved catalog" not in prompt and triage.REPLY_BY_APP_RULE in prompt
     assert history[-1]["content"] == triage.unsure_line("front-door.invalid") and state["pending_question"] == "tell me about Florida"
     assert no_runs == [] and chat.requests == []
 
@@ -787,8 +800,7 @@ def test_the_catalog_list_label_is_offered_with_or_without_the_saved_catalog(cat
         assert words in prompt
     if catalog:                                         # the catalog label sends whole lists to catalog_list
         assert "A whole list, or the names that contain a word, is catalog_list" in prompt
-    else:                                               # its reply is never shown: the app writes the list
-        assert "leave it empty for data_question and follow_up, and for catalog_list" in prompt
+    assert triage.REPLY_BY_APP_RULE in prompt           # with or without the catalog: the app writes every reply
 
 
 @pytest.mark.parametrize("message, entity, word, expected", [
