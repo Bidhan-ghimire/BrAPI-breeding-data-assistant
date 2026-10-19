@@ -33,6 +33,20 @@
           "key_claim_ids": []
         }
       }
+    },
+    {
+      "type": "final",
+      "content": {
+        "status": "completed",
+        "payload": {
+          "methods": [
+            "looked at the tables again"
+          ],
+          "caveats": [],
+          "narrative": "The mean is still probably around 18.",
+          "key_claim_ids": []
+        }
+      }
     }
   ]
 }

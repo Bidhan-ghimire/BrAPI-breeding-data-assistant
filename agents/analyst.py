@@ -2,6 +2,7 @@
 
 Guarded tools accept only registered, reviewed tables. The model selects typed
 calculations; code builds claims with their denominators, methods, and evidence.
+A "completed" finish before any tool made a claim is asked once more (NO_CLAIM_NUDGE).
 Explicit synthetic-input and model-script helpers remain for offline tests.
 """
 from __future__ import annotations
@@ -23,7 +24,7 @@ from contracts import AgentResult, AnalysisReport, Claim, Exclusion, TerminalSta
 from llm import Budget, FakeModelClient, ModelClient, ToolInterface, reply_text, reply_tools, run_agent_loop
 
 __all__ = [
-    "ANALYST_SYSTEM_PROMPT", "AnalysisInput", "AnalystPayload", "GuardedAnalystTools", "run_analyst", "build_report",
+    "ANALYST_SYSTEM_PROMPT", "NO_CLAIM_NUDGE", "AnalysisInput", "AnalystPayload", "GuardedAnalystTools", "run_analyst", "build_report",
     "render_report", "synthetic_inputs", "load_analyst_script", "registry_prefix", "FIXTURE_DIR",
 ]
 
@@ -52,6 +53,18 @@ Rules:
 Finish with ONLY this JSON object:
 {"status": "completed", "payload": {"methods": ["<one line per step>"], "caveats": ["<short caveat>"], "narrative": "<2-4 plain sentences reporting the tool numbers>", "key_claim_ids": ["<claim_id from a tool result>"]}}
 or {"status": "needs_clarification", "question": "<one precise question>"}"""
+
+# Asked once when the model finishes "completed" while no claim-making tool has returned a claim. Eval 20261019T203241Z:
+# Luna's analyst took q14's count from missing_report, wrote 140 in its narrative and named no claim, so the run failed.
+# Fixed text that names tools and never a value (analyst_no_claim_20261019). The first wording recovered 25 of 25 replays
+# on Luna but said numeric_summary counts valid values, which is false under mean_per_unit (it counts units; review).
+# This corrected wording recovered 19 of 19 nudged replays through this code on Luna.
+NO_CLAIM_NUDGE = ("No tool has made a claim yet, so nothing can be reported. table_info and missing_report show counts for checking, "
+                  "but they make no claims. Only numeric_summary, group_stats and count_records make claims: numeric_summary's count "
+                  "claim is the number of valid values it used (one per unit under duplicate_policy=mean_per_unit); count_records "
+                  "counts rows (all rows, or the rows kept by filter_rows, e.g. op is_valid_number keeps each row with a valid value). "
+                  "Call the tool that states the number the question asks for, then finish again with the JSON object. If no tool "
+                  "can state it, finish with needs_clarification.")
 
 
 # --------------------------------------------------------------------------
@@ -194,9 +207,16 @@ async def run_analyst(
     agent = await run_agent_loop(
         model, tools, agent_name="analyst", system_prompt=ANALYST_SYSTEM_PROMPT, user_message=_user_message(inputs),
         budget=budget, allowed_tools=set(ANALYST_TOOL_NAMES), log_dir=log_dir, run_id=run_id, model_requested=model_requested,
+        check_completed=lambda _payload: None if _claims_made(tools) else NO_CLAIM_NUDGE,
     )
     report, narrative = build_report(agent, tools, inputs)
     return report, agent, narrative
+
+
+def _claims_made(tools: GuardedAnalystTools) -> bool:
+    """Has a claim-making tool returned at least one claim? The same records _harvest reads."""
+    return any(r.result.ok and r.name in NUMERIC_TOOLS and isinstance(r.result.data, dict) and r.result.data.get("claims")
+               for r in tools.records)
 
 
 def _harvest(tools: GuardedAnalystTools, supplied: set[str]) -> tuple[list[Claim], list[Exclusion], list[str], list[str], bool]:

@@ -234,9 +234,11 @@ def test_invented_claim_ids_and_missing_claims_fail_the_run(tmp_path):
     assert agent.status == "completed" and report.status == "failed" and report.claims == []
     assert any("no tool produced: ['clm_made_up_0001_mean']" in c for c in report.caveats)
     ctx2 = make_ctx(tmp_path / "second")
-    report2, agent2, _, _ = run(ctx2, s1_inputs(ctx2, "no_claims.json"), "no_claims.json")
+    report2, agent2, _, model2 = run(ctx2, s1_inputs(ctx2, "no_claims.json"), "no_claims.json")
     assert agent2.status == "completed" and report2.status == "failed"
     assert any("no tool produced a claim" in c for c in report2.caveats)
+    # the first no-claim final got the one nudge (analyst_no_claim_20261019); the second one still ends the run
+    assert model2._replies == [] and [m["role"] for m in model2.requests[-1]["messages"]].count("user") == 2
 
 
 def test_wrong_payload_shape_and_agent_failures_carry_through(tmp_path):

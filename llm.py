@@ -38,8 +38,13 @@ What is here:
   An empty reply (no text, no tool call, not cut off) is sent again once per
   repair: the same request, nothing appended (Claude Opus 5.5 gave a thinking-only
   reply in the eval of 2026-10-17). Every repair (empty reply, malformed tool
-  arguments, non-JSON final reply) draws on one pool, Budget.max_repairs, which a
-  run's agents share (run.py builds one Budget per run).
+  arguments, non-JSON final reply, a completion check's one question) draws on one
+  pool, Budget.max_repairs, which a run's agents share (run.py builds one Budget per run).
+  A caller may pass check_completed: for a "completed" final that passed its checks it
+  may return one message; the loop keeps that final in the conversation, adds the
+  message as a user turn and asks again, at most once per loop. With no repair, model
+  call or tool call left, the final ends the loop as before. The Analyst uses it when
+  no tool made a claim.
   One reply may use DEFAULT_MAX_TOKENS tokens, thinking included; more room
   does not change the rule that a reply which is still cut off is no answer.
 * compact_tool_result — the summary a tool result becomes for the model: always
@@ -919,6 +924,7 @@ async def run_agent_loop(
     sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
     jitter: Callable[[], float] = random.random,
     repeat_guard: RepeatGuard | None = None,
+    check_completed: Callable[[dict[str, Any]], str | None] | None = None,
 ) -> AgentResult:
     """Drive one agent to a terminal AgentResult. See the module docstring for the rules."""
     budget.start(clock)
@@ -954,6 +960,7 @@ async def run_agent_loop(
     schema_by_name = {s["name"]: s["inputSchema"] for s in schemas}
     model_tools = _to_model_tools([s for s in schemas if allowed_tools is None or s["name"] in allowed_tools])
     repeats: dict[tuple[str, ...], int] = {}                         # exact repeats per saved table (repeat_guard)
+    asked_again = False                                              # check_completed's one question was sent
     emit("start", run_id=run_id, tools=[t["function"]["name"] for t in model_tools], budget=dataclass_public(budget),
          max_tokens=max_tokens,                                      # the reply limit this run used, so a log says what actually ran
          reply_limit_param=getattr(getattr(model, "settings", None), "reply_limit_param", "max_tokens"),   # and the field that carried it
@@ -1124,6 +1131,16 @@ async def run_agent_loop(
                     first = exc.errors()[0]["msg"] if hasattr(exc, "errors") else str(exc)
                     add_error("payload_rejected", str(first)[:300])
                     return finish("failed", None)
+                question = None if asked_again or check_completed is None else check_completed(payload)
+                if (question is not None and budget.repairs < budget.max_repairs     # the caller's evidence check: ask once more,
+                        and budget.exceeded(clock) is None                            # only if another model call
+                        and budget.tool_calls < budget.max_tool_calls):               # and another tool call are allowed
+                    asked_again = True
+                    budget.repairs += 1
+                    state.messages.append(_with_provider_content({"role": "assistant", "content": content}, reply))
+                    state.messages.append({"role": "user", "content": question})
+                    emit("repair", correlation_id=correlation, reason="completion check: " + question[:120])
+                    continue
                 return finish("completed", payload)
             if status == "needs_clarification":
                 question = parsed.get("question")
