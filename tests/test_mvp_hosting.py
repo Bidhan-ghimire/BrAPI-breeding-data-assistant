@@ -27,6 +27,18 @@ def test_hosted_notice_preserves_local_header_and_never_echoes_endpoint_credenti
     assert "configured model provider" in other and "OpenAI" not in other
 
 
+def test_the_hosted_notice_says_how_long_openai_may_keep_messages_and_names_no_model():
+    """v1.1 choice 5 (OpenAI docs, 2026-10-20: abuse-monitoring logs "retained for up to 30 days"). No model name in
+    visitor text (coach, 2026-10-21). No training claim yet: it waits for Bidhan's check of his organisation's setting."""
+    notice = app.hosted_notice({"SPACE_ID": "owner/demo", "LLM_BASE_URL": "https://api.openai.com/v1", "LLM_MODEL": "gpt-6-luna"})
+    assert "OpenAI may keep them for up to 30 days for abuse monitoring." in notice
+    assert notice.endswith("Please do not enter personal or confidential information.")
+    assert "gpt" not in notice.lower() and "luna" not in notice.lower() and "train" not in notice.lower()
+    other = app.hosted_notice({"SPACE_ID": "owner/demo", "LLM_BASE_URL": "https://another.example/v1"})
+    assert other.endswith("Please do not enter personal or confidential information.")
+    assert "30 days" not in other and "OpenAI" not in other
+
+
 def test_configuration_failure_is_readable_and_does_not_echo_values(monkeypatch):
     def invalid(_question):
         raise ValueError("secret-that-must-not-appear")

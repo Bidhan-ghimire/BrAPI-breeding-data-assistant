@@ -363,6 +363,12 @@ class ModelClient(Protocol):
     async def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], *, max_tokens: int) -> ModelReply: ...
 
 
+# OpenAI's docs (checked 2026-10-20, release_v1_1_plan_20261020/DATA_USE_CHECK.md): "Chat completions are stored by default
+# for new accounts." and "To disable storage in either API, set `store: false`." Sent only to OpenAI's own endpoint: an
+# OpenAI-compatible server elsewhere (a local one) may not know the field (v1.1 choice 5, Bidhan's word 2026-10-21).
+OPENAI_HOST = "api.openai.com"
+
+
 class OpenAICompatibleClient:
     """The real adapter on the installed openai async SDK. Use `async with`. No auto-retries, explicit timeout."""
 
@@ -393,6 +399,8 @@ class OpenAICompatibleClient:
         kwargs: dict[str, Any] = {"model": self.settings.model, "messages": messages, self.settings.reply_limit_param: max_tokens}
         if self.settings.reasoning_effort is not None:
             kwargs["reasoning_effort"] = self.settings.reasoning_effort
+        if (urlsplit(self.settings.base_url).hostname or "").lower() == OPENAI_HOST:
+            kwargs["store"] = False                          # not kept in OpenAI's stored completions (see OPENAI_HOST)
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"

@@ -844,9 +844,14 @@ def hosted_notice(environ: Mapping[str, str] | None = None) -> str:
     except ValueError:
         host = ""
     provider = "OpenAI" if host == "api.openai.com" else "the configured model provider"
-    return (f"Your messages and relevant catalog/data excerpts are sent to **{provider}**. "
+    # v1.1 choice 5: OpenAI's docs (2026-10-20) keep abuse-monitoring logs "for up to 30 days". No model name here (a name
+    # goes stale; the Full report records the model of every reply). A training sentence waits for Bidhan's check of his
+    # organisation's data-sharing setting.
+    kept = " OpenAI may keep them for up to 30 days for abuse monitoring." if provider == "OpenAI" else ""
+    return (f"Your messages and relevant catalog/data excerpts are sent to **{provider}**.{kept} "
             "The planner uses the model before database-fetch approval. Run records are saved on this demo's server; "
-            "copy your full report before closing the page. Approval allows database requests; acceptance records your review.")
+            "copy your full report before closing the page. Approval allows database requests; acceptance records your review. "
+            "Please do not enter personal or confidential information.")
 
 
 def full_report(state: dict[str, Any] | None) -> str:

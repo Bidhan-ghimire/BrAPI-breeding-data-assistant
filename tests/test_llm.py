@@ -201,6 +201,46 @@ def test_reasoning_effort_is_sent_only_when_set_and_logged(tmp_path):
     assert [e["reasoning_effort"] for e in log_lines(tmp_path, result) if e["event"] == "start"] == ["none"]
 
 
+@pytest.mark.parametrize("base_url, store", [
+    ("https://api.openai.com/v1", False), ("https://API.OpenAI.com/v1", False),
+    ("http://localhost:11434/v1", None), ("https://api.openai.com.example.net/v1", None),
+    ("https://another.example/v1", None),
+], ids=["openai", "openai-capitals", "local", "look-alike-host", "other-provider"])
+def test_store_false_is_sent_to_openai_only(base_url, store):
+    """v1.1 choice 5. OpenAI's docs (2026-10-20): "Chat completions are stored by default for new accounts." and "To
+    disable storage in either API, set `store: false`." Other OpenAI-compatible servers (a local one) may not know the
+    field, so it goes to api.openai.com only."""
+    sent: list[dict] = []
+
+    class Msg:
+        content, tool_calls, refusal = "done", [], None
+
+    class Choice:
+        message, finish_reason = Msg(), "stop"
+
+    class Resp:
+        choices, model, usage = [Choice()], "m", None
+
+    class Completions:
+        async def create(self, **kwargs):
+            sent.append(kwargs)
+            return Resp()
+
+    class Chat:
+        completions = Completions()
+
+    class Sdk:
+        chat = Chat()
+
+    async def send():
+        client = llm.OpenAICompatibleClient(LlmSettings(model="m", base_url=base_url, allow_remote=True))
+        client._client = Sdk()
+        return await client.complete([{"role": "user", "content": "hi"}], [], max_tokens=5)
+
+    anyio.run(send)
+    assert sent[-1].get("store", None) is store and ("store" in sent[-1]) is (store is not None)
+
+
 def test_real_client_refuses_remote_and_blank_model_before_any_network():
     with pytest.raises(LlmConfigError):
         llm.OpenAICompatibleClient(LlmSettings(base_url="https://api.example.com/v1", model="m"))
