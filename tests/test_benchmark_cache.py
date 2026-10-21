@@ -100,3 +100,17 @@ def test_over_the_fetch_limit_and_over_one_page_are_listed(live, tmp_path, monke
     monkeypatch.setattr(cache_mod.srv, "dispatch", short_page)
     again = cache_mod.build(two, source=source, dest=tmp_path / "bench2", out_dir=tmp_path / "out2", max_fetches=5)
     assert again["studies"]["S1"]["one_page"] is False and again["over_one_page"] == ["S1"]
+
+
+def test_the_fetches_use_the_apps_own_run_settings(live, tmp_path, monkeypatch):
+    """2026-10-21: built with the client's bare default (30 s read), every SweetPotatoBase /observations request timed
+    out; a run uses app.live_config's settings (APP_READ_TIMEOUT, default 90 s; 600 s per question) and gets the data in
+    about 40 s. The cache is built with the same settings a run uses, and says how long each fetch took against the
+    run's budget."""
+    source, _server = live
+    monkeypatch.setenv("APP_READ_TIMEOUT", "77")
+    report = cache_mod.build(SUBS[:2], source=source, dest=tmp_path / "bench", out_dir=tmp_path / "out")
+    assert report["read_timeout"] == 77.0 and report["time_budget_seconds"] == 600 and report["max_fetches"] == 5
+    row = report["subquestions"]["S1.1"]
+    assert row["fetch_seconds"] >= 0 and row["over_time_budget"] is False
+    assert report["studies"]["S1"]["observations"]["V1"]["seconds"] >= 0

@@ -15,9 +15,11 @@ a question without a variable, a design question). It changes no limit.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import shutil
 import sys
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -31,7 +33,7 @@ from brapi_client import load_settings  # noqa: E402
 from contracts import FetchApproval  # noqa: E402
 from run import RunConfig  # noqa: E402
 
-MAX_FETCHES = RunConfig.__dataclass_fields__["max_fetches"].default     # the app's limit per question (not changed here)
+MAX_FETCHES = RunConfig.__dataclass_fields__["max_fetches"].default     # RunConfig's default (app.live_config sets its own)
 _FIELDS = ("status", "complete", "returned", "reported_total")
 
 
@@ -48,7 +50,13 @@ def variable_ids(catalog: Any, name: str, term: str | None) -> list[str]:
     return hits
 
 
-def build(subs: list[dict[str, Any]], *, source: Path, dest: Path, out_dir: Path, max_fetches: int = MAX_FETCHES) -> dict[str, Any]:
+def build(subs: list[dict[str, Any]], *, source: Path, dest: Path, out_dir: Path, max_fetches: int | None = None) -> dict[str, Any]:
+    """max_fetches: the app's run limit (app.live_config) unless given. The fetches use the settings a run uses:
+    app.live_config's read timeout (APP_READ_TIMEOUT, default 90 s) and its operation deadline (run.Controller
+    ._live_settings). 2026-10-21: with the client's bare 30 s default every SweetPotatoBase /observations request timed out,
+    while a run gets them in about 40 s."""
+    cfg = harness.app.live_config("benchmark cache")
+    max_fetches = cfg.max_fetches if max_fetches is None else max_fetches
     if dest.exists() and any(dest.iterdir()):
         raise ValueError(f"{dest} is already built; a benchmark cache is built once")
     catalog = harness.read_catalog(source) if source.is_dir() else None
@@ -72,7 +80,9 @@ def build(subs: list[dict[str, Any]], *, source: Path, dest: Path, out_dir: Path
         per_sub[s["sub_id"]] = {"studies": studies, "variables": found, "fetch_calls": calls,
                                 "fetch_calls_with_rosters": len(studies) * (1 + len(found)), "over_max_fetches": calls > max_fetches}
     shutil.copytree(source, dest, dirs_exist_ok=True)
-    settings = load_settings()
+    base = load_settings()
+    settings = dataclasses.replace(base, read_timeout=cfg.read_timeout,
+                                   operation_deadline=max(base.operation_deadline, 2 * cfg.read_timeout))
     now = datetime.now(timezone.utc)
     run_id = f"benchmark_cache_{now:%Y%m%dT%H%M%S}"
     variables = sorted({v for vs in pairs.values() for v in vs})
@@ -86,21 +96,34 @@ def build(subs: list[dict[str, Any]], *, source: Path, dest: Path, out_dir: Path
     for study in sorted(pairs):
         before = len(list(ctx.client.provenance()))
         record = srv.dispatch(ctx, "get_study", {"study_db_id": study})
+        started = time.monotonic()
         units = srv.dispatch(ctx, "get_observation_units", {"study_db_id": study})
+        roster_seconds = round(time.monotonic() - started, 3)
         row: dict[str, Any] = {"study_record": "ok" if record.ok else str(record.error),
-                               "units": {k: (units.data or {}).get(k) for k in _FIELDS},
+                               "units": {k: (units.data or {}).get(k) for k in _FIELDS}, "roster_seconds": roster_seconds,
                                "error": None if units.ok else str(units.error), "observations": {}}
         for variable in sorted(pairs[study]):
+            started = time.monotonic()
             got = srv.dispatch(ctx, "get_observations", {"study_db_id": study, "variable_db_id": variable})
             row["observations"][variable] = {**{k: (got.data or {}).get(k) for k in _FIELDS},
+                                             "seconds": round(time.monotonic() - started, 3),
                                              "error": None if got.ok else str(got.error)}
         # one page holds the study only when its roster and every variable came back complete (review 10)
         row["one_page"] = bool(row["units"]["complete"]) and all(o["complete"] for o in row["observations"].values())
         records = list(ctx.client.provenance())[before:]
         row["seconds"] = round(sum(r.duration_seconds or 0.0 for r in records), 3)    # request time, vs the run's budget
         studies_report[study] = row
+    for row in per_sub.values():           # a question's fetch time: its own fetches, as a run would make them, vs the budget
+        if row["variables"]:
+            seconds = [studies_report[s]["observations"].get(v, {}).get("seconds", 0) for s in row["studies"] for v in row["variables"]]
+        else:
+            seconds = [studies_report[s]["roster_seconds"] for s in row["studies"] if s in studies_report]
+        row["fetch_seconds"] = round(sum(seconds), 1)
+        row["over_time_budget"] = row["fetch_seconds"] > cfg.max_elapsed_seconds
     return {"built_utc": now.isoformat(), "source": str(source), "dest": str(dest), "base_url": settings.base_url,
             "catalog_fetched": catalog.fetched_at, "max_fetches": max_fetches, "page_size": settings.page_size,
+            "read_timeout": settings.read_timeout, "time_budget_seconds": cfg.max_elapsed_seconds,
+            "over_time_budget": sorted(k for k, r in per_sub.items() if r["over_time_budget"]),
             "studies": studies_report, "subquestions": per_sub, "unresolved_variables": unresolved,
             "over_one_page": sorted(s for s, r in studies_report.items() if not r["one_page"]),
             "over_max_fetches": sorted(k for k, r in per_sub.items() if r["over_max_fetches"])}
