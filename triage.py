@@ -51,6 +51,7 @@ Replies to a run that is waiting (approve, cancel, answers) never come here: con
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -536,14 +537,46 @@ class TalkReply(BaseModel):
         return data                      # a data label (or a label that is not text) stays, and extra="forbid" refuses it
 
 
+def _one_json_object(text: str) -> str | None:
+    """The text of the one JSON object a reply holds, or None when it holds none, two or more, or only other JSON values.
+    A brace that starts no JSON is passed over; braces inside the object (in its strings) are part of it. Nesting so deep
+    that json gives up (RecursionError, about 1000 levels; review 9) makes the whole reply no talk reply."""
+    decoder, found, start = json.JSONDecoder(), [], text.find("{")
+    while start != -1:
+        try:
+            value, end = decoder.raw_decode(text, start)
+        except RecursionError:
+            return None
+        except ValueError:
+            start = text.find("{", start + 1)
+            continue
+        if isinstance(value, dict):
+            found.append(text[start:end])
+            start = text.find("{", end)
+        else:
+            start = text.find("{", start + 1)
+    return found[0] if len(found) == 1 else None
+
+
 def parse_talk(reply: Any) -> TalkReply | None:
-    """Only a complete reply that is exactly the talk call's JSON object counts (the same checks as parse_decision)."""
+    """A complete reply that is the talk call's JSON object (the same checks as parse_decision), or that holds exactly one
+    such object with text around it (v1.1 item 5; live 2026-10-20, Luna: "I don't have a gender or personal life.
+    {...}"). The text around it is never shown or used. Refused: no object, two or more, an object without "reply",
+    and anything TalkReply refuses (strict types, an extra field, a data label)."""
     if reply is None or getattr(reply, "tool_calls", None) or getattr(reply, "refusal", None):
         return None
     if getattr(reply, "finish_reason", None) not in (None, "stop"):
         return None
+    content = (getattr(reply, "content", None) or "").strip()
     try:
-        return TalkReply.model_validate_json((getattr(reply, "content", None) or "").strip())
+        return TalkReply.model_validate_json(content)
+    except ValidationError:
+        pass
+    wrapped = _one_json_object(content)
+    if wrapped is None or wrapped == content or "reply" not in json.loads(wrapped):
+        return None
+    try:
+        return TalkReply.model_validate_json(wrapped)
     except ValidationError:
         return None
 
@@ -613,7 +646,7 @@ def ask_to_talk(text: str, make_model: Callable[[], Any] | None, *, label: str, 
 
 
 def _usable_talk(reply: Any, *, text: str, source: str, reference: str, words: Sequence[str]) -> TalkReply | None:
-    """The talk reply when it may be shown: exactly the JSON object, with a letter or digit that shows, and no number that
+    """The talk reply when it may be shown: its JSON object (parse_talk), with a letter or digit that shows, and no number that
     is not in the message, the person's earlier words, the source's name or the reference."""
     talk = parse_talk(reply)
     if talk is None or not any(char.isalnum() and char not in _BLANK_LETTERS for char in talk.reply):

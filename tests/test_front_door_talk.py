@@ -202,6 +202,90 @@ def test_offer_lookup_left_out_keeps_the_yes_line():
     assert result is not None and result.offer_lookup is True
 
 
+# --------------------------------------------------------------------------
+# Text around exactly one JSON object (v1.1 item 5; coach 2026-10-20, Bidhan's word 2026-10-21)
+# --------------------------------------------------------------------------
+
+LUNA_WRAPPED = [   # live 2026-10-20, Luna, "are you boy or girl?" (front_door_label_field_20261020/live/script_luna.json)
+    ("I don\u2019t have a personal life or gender; I\u2019m an AI assistant. "
+     '{"reason":"They asked about the assistant\u2019s personal identity.","reply":"I don\u2019t have a personal life or '
+     'gender; I\u2019m an AI assistant.","offer_lookup":false,"said_coverage":false}',
+     "I don\u2019t have a personal life or gender; I\u2019m an AI assistant."),
+    ("I don\u2019t have a gender or personal life. "
+     '{"reason":"The user asks about the assistant\u2019s personal identity; no lookup is needed.","reply":"I don\u2019t '
+     'have a gender or personal life.","offer_lookup":false,"said_coverage":false}',
+     "I don\u2019t have a gender or personal life."),
+]
+BODY = '{"reason": "scripted", "reply": "I have no personal life.", "offer_lookup": false}'
+
+
+@pytest.mark.parametrize("content, reply", LUNA_WRAPPED, ids=["slip-1", "slip-2"])
+def test_lunas_wrapped_replies_of_the_20th_are_used_and_the_text_around_is_not(content, reply):
+    model = FakeModelClient([reply_text(content)])
+    result = ask_talk("are you boy or girl?", lambda: model, label="app_question")
+    assert result is not None and result.reply == reply and result.offer_lookup is False
+    assert len(model.requests) == 1                                             # used at once, not asked for again
+
+
+@pytest.mark.parametrize("content", [
+    "Sure. " + BODY, BODY + " Hope that helps!", "Here you go:\n" + BODY + "\nThanks.",
+    "```json\n" + BODY + "\n```",                                             # fenced: one object between fences
+    "Note {not json} first. " + BODY,                                          # a brace that starts no JSON
+], ids=["prefix", "suffix", "both", "fenced", "stray-brace"])
+def test_text_around_exactly_one_object_is_ignored(content):
+    model = FakeModelClient([reply_text(content)])
+    result = ask_talk("who is your daddy?", lambda: model, label="unsure")
+    assert result is not None and result.reply == "I have no personal life." and len(model.requests) == 1
+
+
+@pytest.mark.parametrize("content", [
+    BODY + " " + BODY,                                                         # two objects
+    'Example: {"a": 1}. ' + BODY,                                              # another object in the text
+    "I don\u2019t have a gender or personal life; I\u2019m an AI assistant.",  # live 2026-10-20: no JSON at all
+    'Text ["not", "an", "object"]',                                            # JSON, but not an object
+    'Text {"reason": "scripted", "offer_lookup": false}',                       # the reply field is missing
+    'Text {"reason": "scripted", "reply": "Hi", "extra": "x"}',                  # an extra field (strict, as always)
+    'Text {"label": "data_question", "reason": "s", "reply": "I will search now."}',   # a data label (refused, as always)
+], ids=["two-objects", "object-in-text", "no-json", "array", "no-reply", "extra-field", "data-label"])
+def test_none_or_two_objects_or_a_bad_object_is_still_refused(content):
+    model = FakeModelClient([reply_text(content)] * 2)
+    assert ask_talk("who is your daddy?", lambda: model, label="unsure") is None
+    assert len(model.requests) == 2                                             # asked once more, as any format error
+
+
+def test_a_wrapped_object_without_a_reply_field_is_no_talk_reply():
+    """Coach, 2026-10-20: refuse a missing reply field. An object with an empty reply is refused later anyway (no letter
+    that shows); this pins the parser's own refusal, so it does not depend on that later check."""
+    assert triage.parse_talk(reply_text('Text {"reason": "scripted", "offer_lookup": false}')) is None
+    assert triage.parse_talk(reply_text('Text {"reason": "scripted", "reply": "Hi"}')).reply == "Hi"
+
+
+def test_a_reply_nested_too_deep_is_refused_not_a_crash():
+    """Review 9 (2026-10-21): about 1000 nested objects make json raise RecursionError, which ended the chat turn with an
+    error. Such a reply is no talk reply: refused, and asked for once more like any format error."""
+    deep = "Sorry, here it is. " + '{"a":' * 1500 + "1" + "}" * 1500
+    assert triage.parse_talk(reply_text(deep)) is None
+    model = FakeModelClient([reply_text(deep)] * 2)
+    assert ask_talk("hello", lambda: model, label="greeting_or_smalltalk") is None and len(model.requests) == 2
+
+
+def test_the_number_backstop_reads_the_reply_not_the_text_around_it():
+    shown_ok = FakeModelClient([reply_text("Step 1 of 2: " + BODY)])           # numbers outside the object are never shown
+    assert ask_talk("who is your daddy?", lambda: shown_ok, label="unsure") is not None
+    own_number = '{"reason": "s", "reply": "There are 2039 studies.", "offer_lookup": false}'
+    refused = FakeModelClient([reply_text("Sure. " + own_number)] * 2)
+    assert ask_talk("hello", lambda: refused, label="greeting_or_smalltalk") is None
+
+
+def test_lunas_wrapped_reply_reaches_the_screen_in_the_app(chat, no_runs):
+    """End to end, as live 2026-10-20 with no catalog: today the app showed the short app pointer after two tries."""
+    content, reply = LUNA_WRAPPED[0]
+    model, _, factory = model_factory(reply_text(decision("app_question")), reply_text(content))
+    history, _ = chat.turn("are you boy or girl?", triage_model=factory)
+    assert plain(history[-1]["content"]) == reply and len(model.requests) == 2
+    assert "{" not in history[-1]["content"] and "reason" not in history[-1]["content"]   # nothing around the object shows
+
+
 @pytest.mark.parametrize("stray", [None, "unsure", "out_of_scope", "greeting_or_smalltalk", "maybe", ""])
 def test_a_stray_talk_label_or_other_text_is_ignored_and_the_reply_is_used(stray):
     """Live 2026-10-19 (Luna): the talk call wrote "label": "out_of_scope" where the app had app_question or unsure, and
@@ -240,7 +324,7 @@ def test_the_talk_call_writes_only_for_messages_that_start_nothing_and_that_code
     reply_text(json.dumps({"label": "unsure", "reply": "Hi"})),                                # the reason is required
     reply_text(json.dumps({"label": "unsure", "reason": "x", "reply": "Hi", "offer_lookup": "false"})),   # strict: a word
     reply_text(json.dumps({"label": "unsure", "reason": "x", "reply": "a" * 4001})),
-    reply_text("```json\n" + talk("unsure", "Hi") + "\n```"),                                  # only the bare JSON object
+    reply_text("```json\n" + talk("unsure", "Hi") + "\n```json\n" + talk("unsure", "Hi") + "\n```"),   # two objects
     reply_text(talk("unsure", "Hi"), finish_reason="length"),                                  # cut off at the limit
     reply_tools([("search_studies", "{}")]),                                                   # the talk call has no tools
     ModelProviderError("http_error", "provider returned HTTP 500"),
@@ -248,7 +332,7 @@ def test_the_talk_call_writes_only_for_messages_that_start_nothing_and_that_code
     reply_text(talk("unsure", "  \n ")),                                                       # blank
     reply_text(talk("unsure", "\u200b\u2060")),                                                # invisible characters only
     reply_text(talk("unsure", "\u3164\uffa0")),                                                # letters that show as nothing
-], ids=["not-json", "label-not-text", "extra-field", "no-reason", "offer-as-text", "too-long", "fenced", "cut-off",
+], ids=["not-json", "label-not-text", "extra-field", "no-reason", "offer-as-text", "too-long", "two-fenced", "cut-off",
         "tool-call", "provider-error", "empty", "blank", "invisible", "blank-letters"])
 def test_an_invalid_or_failed_talk_reply_is_not_used(reply):
     """Since 2026-10-19 a reply that breaks the format is asked for once more (TALK_ATTEMPTS); a provider error is not."""
