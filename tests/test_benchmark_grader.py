@@ -282,3 +282,42 @@ def test_a_timestamp_with_fractions_and_a_timezone_is_no_number():
     shown = ANSWER + "\n\nSource fetched: 2026-10-21T12:22:33.472516+00:00"
     g = bench.grade(sub(), shown=shown, status="final review reached", claims=[claim(960)])
     assert g["bucket"] == "pass" and g["invented"] == []
+
+
+def _run_dir(root, ledger):
+    run = root / "run_x"
+    (run / "artifacts").mkdir(parents=True)
+    (run / "answer.json").write_text(json.dumps({"notes": [], "retrieval": {"warnings": [], "study_ledger": ledger}}), encoding="utf-8")
+    return run
+
+
+def _refused(study, reason=None):
+    """A ledger entry as agents/retriever.py writes one when the approval check refuses a fetch (record_study(..., "blocked"))."""
+    return {"study_id": study, "status": "blocked", "artifact_id": None, "reason": reason or f"study {study!r} is not on the FetchApproval",
+            "request_ids": []}
+
+
+REFUSED_LINE = "**A request limit was reached.**\n\nStudy {}: a fetch was refused by the approval check; the Full report has the reason."
+
+
+def test_a_refused_study_in_the_runs_own_ledger_backs_its_id(tmp_path):
+    """Variance run of 2026-10-21 (C33.5): "Study 4777: a fetch was refused by the approval check" was flagged invented. 4777
+    is in the run's own study ledger: the retriever asked for it outside the plan, and the approval check refused it."""
+    shown = REFUSED_LINE.format(4777)
+    ledger = [{"study_id": "4775", "status": "complete", "artifact_id": "art_8e7a85_0001", "reason": None, "request_ids": []}, _refused("4777")]
+    g = bench.grade(sub(), shown=shown, status="run ended", claims=[], backed_extra=bench.run_numbers([_run_dir(tmp_path / "a", ledger)]))
+    assert g["bucket"] == "blocked" and g["invented"] == []
+    other = bench.run_numbers([_run_dir(tmp_path / "b", ledger[:1])])            # a ledger without 4777
+    flagged = bench.grade(sub(), shown=shown, status="run ended", claims=[], backed_extra=other)
+    assert flagged["bucket"] == "invented" and [i["value"] for i in flagged["invented"]] == [4777]
+
+
+def test_model_text_in_the_ledger_backs_nothing(tmp_path):
+    """Review 2026-10-21: a ledger entry's study_id is the model's own argument and its reason quotes the model's arguments, so
+    a number smuggled in through them ("mean=12.5" as a study ID, "mean=3.7" as a variable) must stay the red flag."""
+    run = _run_dir(tmp_path, [_refused("mean=12.5"), _refused("4610", reason="variable 'mean=3.7' is not on the FetchApproval")])
+    backed = bench.run_numbers([run])
+    assert backed == [4610.0]                                                  # only the all-digit study ID
+    shown = "**Question blocked.**\n\nThe mean is 12.5 t/ha; the other study gives 3.7."
+    g = bench.grade(sub(), shown=shown, status="run ended", claims=[], backed_extra=backed)
+    assert g["bucket"] == "invented" and sorted(i["value"] for i in g["invented"]) == [3.7, 12.5]

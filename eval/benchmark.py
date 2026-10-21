@@ -223,8 +223,11 @@ def grade(sub: dict[str, Any], *, shown: str, status: str, claims: list[dict[str
 
 
 def run_numbers(run_dirs: Iterable[Path]) -> list[float]:
-    """Numbers the runs' own code and data wrote: every cell of their saved tables (artifacts/*.csv) and the numbers in
-    their code-written report fields (caveats, warnings, notes, exclusions). Model text is not among them."""
+    """Numbers the runs' own code and data wrote: every cell of their saved tables (artifacts/*.csv), the numbers in their
+    code-written report fields (caveats, warnings, notes, exclusions) and the plain-digit study IDs of the study ledger (a
+    refused fetch is reported as "Study 4777: ..."; variance run of 2026-10-21). Model text is not among them: a ledger
+    entry's reason quotes the model's arguments, and its study_id is the model's own argument, so only an all-digit ID counts
+    (review 2026-10-21: "mean=12.5" as a study ID must stay unbacked)."""
     found: list[float] = []
     for run_dir in run_dirs:
         for table in sorted((Path(run_dir) / "artifacts").glob("*.csv")):
@@ -237,6 +240,8 @@ def run_numbers(run_dirs: Iterable[Path]) -> list[float]:
             doc = json.loads(answer.read_text(encoding="utf-8"))
             texts = [*((doc.get("analysis") or {}).get("caveats") or []), *((doc.get("retrieval") or {}).get("warnings") or []),
                      *(doc.get("notes") or [])]
+            found += [float(entry["study_id"]) for entry in (doc.get("retrieval") or {}).get("study_ledger") or []
+                      if re.fullmatch(r"[0-9]+", str(entry.get("study_id") or ""))]
             found += [n for t in texts if not str(t).lower().startswith(("model:", "model note:"))
                       for n, *_ in _numbers(str(t))]
     return found
