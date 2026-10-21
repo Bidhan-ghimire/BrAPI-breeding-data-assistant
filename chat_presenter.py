@@ -152,9 +152,11 @@ def _claim_method(claim: Claim) -> str:
 
 
 def _mean_focus(controller: Any, claims: list[Claim]) -> bool:
-    """Only a clearly requested mean may hide the numeric tool's incidental statistics in chat."""
+    """Only a clearly requested mean may hide the numeric tool's incidental statistics in chat; a ranking is never hidden."""
     plan = getattr(controller, "plan", None)
     if getattr(getattr(plan, "statistic", None), "kind", None) != "mean" or sum(claim.kind == "mean" for claim in claims) != 1:
+        return False
+    if any(claim.kind == "rank" for claim in claims):
         return False
     words = person_words(getattr(plan, "question", ""))
     if not re.search(r"\b(?:mean|average)\b", words, re.I):
@@ -235,6 +237,41 @@ def _count_lead(controller: Any, claims: list[Claim], in_catalog_titles: set[str
     return ["**Counts**", "", *[line for _, _, line in sorted(ranked)], ""]
 
 
+RANK_SENTENCE = "Descriptive numbers only: an ordering of recorded values, not a recommendation."
+
+
+def _ranking_block(claims: list[Claim], sources: _Sources, source_labels: dict[tuple[str, ...], str]) -> tuple[list[str], set[str]]:
+    """R1 (2026-10-21): the rank claims of one ranking as one table (Rank, Entry, Mean, n) in rank order, each with the mean
+    claim rank_entries made beside it (the same claim ID with "_mean_" for "_rank_"), then the descriptive sentence. Returns
+    the lines and the IDs of the claims they show, so no mean appears twice."""
+    by_id = {claim.claim_id: claim for claim in claims}
+    rankings: dict[tuple[Any, ...], list[tuple[Claim, Claim | None]]] = defaultdict(list)
+    for claim in claims:
+        if claim.kind == "rank":
+            head, _, tail = claim.claim_id.partition("_rank_")
+            rankings[(tuple(sorted(claim.source_artifact_hashes)), claim.denominator.name, claim.denominator.n, head)].append(
+                (claim, by_id.get(f"{head}_mean_{tail}")))
+    lines: list[str] = []
+    shown: set[str] = set()
+    for (hashes, name, n, _), pairs in rankings.items():
+        rows = sources.rows(hashes) or []
+        table = []
+        for rank, mean in sorted(pairs, key=lambda pair: (pair[0].value if pair[0].value is not None else float("inf"),
+                                                          sorted(pair[0].filters.items()))):
+            entry = [" · ".join([value, *[found for found in (_names(rows, column, value, name_column)
+                                                              for name_column, _ in NAMES.get(column, (column, ()))[1]) if found]])
+                     for column, value in rank.filters.items()]
+            mean_text = "not stated" if mean is None else f"{_number(mean.value)} {mean.unit or '(unit not stated)'}"
+            table.append([_number(rank.value), "; ".join(entry), mean_text, "" if mean is None else mean.denominator.n])
+            shown |= {rank.claim_id, *([mean.claim_id] if mean is not None else [])}
+        order = "highest first" if "highest first" in name else "lowest first"
+        lines += [f"**Ranking by entry mean, {order}, of {n} entries{source_labels.get(hashes, '')}**", "",
+                  *_table(["Rank", "Entry", "Mean", "n"], table), ""]
+        lines += [_text(f"{item.reason}: {item.count}.") for item in pairs[0][0].exclusions if item.reason.startswith("entries ")]
+        lines += [RANK_SENTENCE, ""]
+    return lines, shown
+
+
 def _numeric_blocks(claims: list[Claim], sources: _Sources, source_labels: dict[tuple[str, ...], str], *, focus_mean: bool = False) -> list[str]:
     groups: dict[tuple[Any, ...], list[Claim]] = defaultdict(list)
     for claim in claims:
@@ -295,7 +332,7 @@ def _human_note(note: str) -> str:
     if text.startswith(_CODE_STOP):     # a stop written by code (catalog_answers, metadata_answers): its plain line;
         asked = text[len(_CODE_STOP):].strip()                                 # the exact check stays in the Full report
         return catalog_plain(asked) or metadata_plain(asked) or _CODE_STOP_OTHER
-    text = re.sub(r"^(?:(?:numeric_summary|group_stats|count_records|analysis target|model(?: note)?)\s*:\s*)+", "", text, flags=re.I)
+    text = re.sub(r"^(?:(?:numeric_summary|group_stats|count_records|rank_entries|analysis target|model(?: note)?)\s*:\s*)+", "", text, flags=re.I)
     if "no complete artifact is eligible for analysis" in text.lower():
         return re.sub("no complete artifact is eligible for analysis", "No complete data table was available for analysis, so an answer could not be calculated.", text, flags=re.I)
     # Normalize only the two known unit-only messages; other caveat wording is preserved.
@@ -520,6 +557,12 @@ def answer_summary(controller: Any) -> str:
     sources = _Sources(getattr(getattr(controller, "ctx", None), "registry", None))
     hashes = list(dict.fromkeys(tuple(sorted(claim.source_artifact_hashes)) for claim in claims))
     source_labels = {key: f" · source {index + 1}" for index, key in enumerate(hashes)} if len(hashes) > 1 else {}
+    ranking, in_ranking = _ranking_block(claims, sources, source_labels)
+    # a mean the ranking table shows is not shown again (group_stats on the same table states the same entry mean; review)
+    ranked_means = {(tuple(sorted(c.source_artifact_hashes)), tuple(sorted(c.filters.items())), c.value)
+                    for c in claims if c.claim_id in in_ranking and c.kind == "mean"}
+    displayed_claims = [claim for claim in displayed_claims if claim.claim_id not in in_ranking and not (
+        claim.kind == "mean" and (tuple(sorted(claim.source_artifact_hashes)), tuple(sorted(claim.filters.items())), claim.value) in ranked_means)]
     buckets: dict[tuple[Any, ...], list[Claim]] = defaultdict(list)
     other = []
     for claim in displayed_claims:
@@ -530,7 +573,7 @@ def answer_summary(controller: Any) -> str:
             buckets[(tuple(sorted(claim.source_artifact_hashes)), claim.grouping[0], claim.denominator.name, claim.denominator.n)].append(claim)
         else:
             other.append(claim)
-    lines: list[str] = []
+    lines: list[str] = list(ranking)
     in_catalog_titles: set[str] = set()              # distinct counts a catalog block's title already leads with
     for key, group in buckets.items():
         block = _catalog_block(group, sources, source_labels.get(key[0], ""), focus_count=focus_count)

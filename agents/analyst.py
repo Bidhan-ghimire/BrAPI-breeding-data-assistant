@@ -29,18 +29,21 @@ __all__ = [
 ]
 
 FIXTURE_DIR = PART2_DIR / "tests" / "fixtures" / "model_analyst"
-NUMERIC_TOOLS = frozenset({"numeric_summary", "group_stats", "count_records"})     # the tools that return claims
-DERIVING_TOOLS = frozenset({"group_stats", "filter_rows", "concat_tables"})         # the tools that save new artifacts
+NUMERIC_TOOLS = frozenset({"numeric_summary", "group_stats", "count_records", "rank_entries"})     # the tools that return claims
+DERIVING_TOOLS = frozenset({"group_stats", "filter_rows", "concat_tables", "rank_entries"})         # the tools that save new artifacts
+# Review 2 of R1 (2026-10-21): without "highest-yielding" this filter let "the highest-yielding clone, so it should be advanced"
+# through, so it stays until Bidhan decides how advice that rides on an ordering is caught (asked, not changed).
 _SUPERIORITY = re.compile(r"\b(best|superior|outperform\w*|top[- ]performing|winner|genetically (better|superior)|highest[- ]yielding)\b", re.IGNORECASE)
 
 ANALYST_SYSTEM_PROMPT = """You are the Analyst for a read-only plant-breeding database. You compute NOTHING yourself.
-You have eight fixed tools that read registered artifacts (handles like art_3f9a2c_0001) and return typed claims.
+You have nine fixed tools that read registered artifacts (handles like art_3f9a2c_0001) and return typed claims.
 Rules:
 1. Start with table_info for EVERY supplied artifact. Check that it is complete, that it measures the variable the
    question is about (trait, unit, timepoint), and whether duplicates or unknown independence are reported.
 2. If the artifacts do not contain what the question asks for (a different trait, an incomplete fetch, an unclear
    grouping), finish with needs_clarification and say exactly what is missing. Never guess a value.
-3. For numbers call numeric_summary / group_stats; for catalog questions call count_records. Use exact column names
+3. For numbers call numeric_summary / group_stats; for an order (the highest, the lowest, the top k, where a named entry
+   ranks) call rank_entries; for catalog questions call count_records. Use exact column names
    from table_info. Never pass a file path, never invent a handle, never ask for a tool you do not have.
 4. If a tool refuses (duplicates, incomplete data), read its message: either name the aggregation rule it asks for
    (duplicate_policy) or stop with needs_clarification. Do not work around a refusal.
@@ -60,7 +63,7 @@ or {"status": "needs_clarification", "question": "<one precise question>"}"""
 # on Luna but said numeric_summary counts valid values, which is false under mean_per_unit (it counts units; review).
 # This corrected wording recovered 19 of 19 nudged replays through this code on Luna.
 NO_CLAIM_NUDGE = ("No tool has made a claim yet, so nothing can be reported. table_info and missing_report show counts for checking, "
-                  "but they make no claims. Only numeric_summary, group_stats and count_records make claims: numeric_summary's count "
+                  "but they make no claims. Only numeric_summary, group_stats, rank_entries and count_records make claims: numeric_summary's count "
                   "claim is the number of valid values it used (one per unit under duplicate_policy=mean_per_unit); count_records "
                   "counts rows (all rows, or the rows kept by filter_rows, e.g. op is_valid_number keeps each row with a valid value). "
                   "Call the tool that states the number the question asks for, then finish again with the JSON object. If no tool "
@@ -90,7 +93,7 @@ class AnalystPayload(BaseModel):
 
 
 # --------------------------------------------------------------------------
-# Runtime guards around the eight tools + evidence recording
+# Runtime guards around the nine tools + evidence recording
 # --------------------------------------------------------------------------
 
 @dataclass

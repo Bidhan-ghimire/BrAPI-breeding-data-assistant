@@ -106,9 +106,11 @@ def test_the_talk_prompt_never_gives_advice_and_carries_the_reply_rules(label):
                  "answer in kind and briefly, without restating what they asked, and never offer to look their message up",
                  "to a rude remark, one calm sentence, with no lecture and no example question",
                  "to a question on another topic or of general knowledge, say that it is outside what you know",
-                 "say that the app gives descriptive numbers only and does not rank or recommend",
-                 "When the message asks which variety, clone, line or parent is best or should be chosen (advice or a "
-                 "ranking), set offer_lookup to false",
+                 # R1 (2026-10-21): an ordering of recorded values is a fact the app may state; it still never recommends
+                 "say that the app gives descriptive numbers only and does not recommend, and that it can say which entries "
+                 "had the highest or lowest recorded values",
+                 "When the message asks which variety, clone, line or parent is best or should be chosen (advice), set "
+                 "offer_lookup to false",
                  "You do not learn from these chats, and for this reply you see only the person's last few messages",
                  "to a question about your own opinions, feelings or private life, say simply that you have no personal "
                  "views or life of that kind",
@@ -772,16 +774,16 @@ def test_a_talk_reply_that_leaves_said_coverage_out_does_not_set_the_flag(chat, 
 def test_an_advice_question_gets_no_yes_line(chat, no_runs, route):
     message = "ad124 is best sweepotato veriety. which sweet potato variety is best?"
     if route == "unsure-no-offer":
-        replies = [reply_text(decision("unsure")), reply_text(talk_json("unsure", "This app does not rank or recommend varieties.",
+        replies = [reply_text(decision("unsure")), reply_text(talk_json("unsure", "This app does not recommend varieties.",
                                                                         offer_lookup=False))]
     else:
         replies = [reply_text(decision("out_of_scope")),
-                   reply_text(talk_json("out_of_scope", "The app gives descriptive numbers only and does not rank varieties."))]
+                   reply_text(talk_json("out_of_scope", "The app gives descriptive numbers only and does not recommend varieties."))]
     model, _, factory = model_factory(*replies)
     history, state = chat.turn(message, triage_model=factory)
     assert "Reply **yes**" not in history[-1]["content"] and "pending_question" not in state and len(model.requests) == 2
     assert "which variety, clone, line or parent is best or should be chosen" in one_line(model.requests[1]["messages"][0]["content"])
-    assert "A request to recommend, rank or choose varieties" in one_line(model.requests[0]["messages"][0]["content"])
+    assert "A request to recommend or choose varieties" in one_line(model.requests[0]["messages"][0]["content"])   # R1, 2026-10-21
     history, state = chat.turn("yes", history, state, triage_model=None)                # a later yes starts nothing
     assert no_runs == [] and chat.requests == []
 

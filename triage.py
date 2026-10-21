@@ -114,9 +114,10 @@ _LABELS = """Labels:
 - follow_up: a short continuation of an earlier data question, for example "and in 2025?".
 {catalog_list_label}{catalog_label}- out_of_scope: a message this app cannot help with: a question that breeding records cannot answer (general knowledge or
   another topic, for example world facts, news or sports), a request for a decision the app does not make (such as which
-  parents to cross), or an insult or rude remark. A request to recommend, rank or choose varieties, clones, lines or
-  parents (which is best, which to plant or cross) is out_of_scope, even though it names a crop; a question about
-  recorded numbers (for example the highest mean yield in a study) is data_question. Otherwise use out_of_scope only when
+  parents to cross), or an insult or rude remark. A request to recommend or choose varieties, clones, lines or parents
+  (which is best, which to plant, cross, select or advance) is out_of_scope, even though it names a crop; a question about
+  recorded numbers, including their order (for example the highest mean yield in a study, the top 5 entries for a trait,
+  or where a named entry ranks), is data_question. Otherwise use out_of_scope only when
   it is clear: a message about crops, plants, places, programs, seasons or years is data_question or unsure, and between
   out_of_scope and unsure choose unsure.
 - unsure: it may be a question about the breeding records, but you cannot tell what is meant; or anything else."""
@@ -130,8 +131,9 @@ _OUT_OF_SCOPE_START = ("For out_of_scope (this replaces the rules above about sa
                        "examples), answer in kind and briefly, without restating what they asked, and never offer to look "
                        "their message up: to a rude remark, one calm sentence, with no lecture and no example question; ")
 _OUT_OF_SCOPE_END = ("to a question about your own opinions, feelings or private life, say simply that you have no personal "
-                     "views or life of that kind; to a request for advice, a ranking or a recommendation, say that the "
-                     "app gives descriptive numbers only and does not rank or recommend.")
+                     "views or life of that kind; to a request for advice or a recommendation, say that the app gives "
+                     "descriptive numbers only and does not recommend, and that it can say which entries had the highest or "
+                     "lowest recorded values.")
 OUT_OF_SCOPE_RULE = (_OUT_OF_SCOPE_START + "to a question on another topic or of general knowledge, say that it is outside what "
                      "you know, since you have only the breeding records; " + _OUT_OF_SCOPE_END)
 # After the first reply in a chat (live chat 2026-10-19: "since I only have the breeding records" in reply after reply).
@@ -451,8 +453,8 @@ UNSURE_TALK_RULE = ("For unsure, say briefly what you understood and ask what th
                     "question about breeding records (a crop, trait, place, season or study, even misspelled or cut short): "
                     "the app then adds how to look up their message as typed. Otherwise set it to false; when its words "
                     "mean nothing you can read (random letters or keys), say kindly that you did not catch that. When "
-                    "the message asks which variety, clone, line or parent is best or should be chosen (advice or a "
-                    "ranking), set offer_lookup to false. For the other labels, offer_lookup is false.")
+                    "the message asks which variety, clone, line or parent is best or should be chosen (advice), set "
+                    "offer_lookup to false. For the other labels, offer_lookup is false.")
 _TALK_MEANING = {
     "greeting_or_smalltalk": "greetings, thanks or small talk",
     "app_question": "a question about this assistant itself: what it can do or how to use it",

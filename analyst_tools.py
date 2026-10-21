@@ -1,8 +1,8 @@
 """
-analyst_tools.py — eight FIXED calculation tools for the Analyst.
+analyst_tools.py — nine FIXED calculation tools for the Analyst.
 
 Plain-words summary:
-* The Analyst never writes Python. It picks one of these eight functions and passes a
+* The Analyst never writes Python. It picks one of these nine functions and passes a
   registered artifact handle (art_xxxxxx_0001). The function reads the table through
   artifacts.py (hash-checked, path-safe), computes with plain arithmetic, and hands back
   typed claims plus the counts behind them. No HTTP, no eval/exec, no subprocess, no model.
@@ -25,12 +25,15 @@ Plain-words summary:
 * Full results (every group, including excluded ones) are saved as analysis_result artifacts
   with their lineage in the manifest notes; a message only ever shows a preview.
 
-Everyday example: a pocket calculator with eight labelled buttons, glued to a filing cabinet.
+Everyday example: a pocket calculator with nine labelled buttons, glued to a filing cabinet.
 You may press a button and name a drawer; you may not rewire the calculator, open other
 cabinets, or dictate the answer.
 """
 from __future__ import annotations
 
+import difflib
+import hashlib
+import json
 import math
 import re
 import statistics
@@ -387,8 +390,24 @@ class CountRecordsArgs(ToolArgs):
     distinct_by: str | None = Field(default=None, description="column whose distinct non-empty values to count")
 
 
+class RankEntriesArgs(ToolArgs):
+    artifact_id: ArtifactId = _handle()
+    by: str = Field(default="germplasmDbId", description="the entry ID column to rank (names are carried as labels)")
+    value: str = Field(default=VALUE_COL)
+    order: Literal["highest", "lowest"] = Field(default="highest", description="which end of the order comes first")
+    top_k: int = Field(default=1, ge=1, le=1000, description="how many entries to state from the top of the order; entries tied "
+                                                              "with the last one are stated too")
+    named: list[str] = Field(default_factory=list, max_length=50,
+                             description="entries (exact ID or exact name) whose rank and mean to state wherever they fall")
+    exclude: list[str] = Field(default_factory=list, max_length=50,
+                               description="entries (exact ID or exact name) left out before ranking, for example the checks")
+    min_independent_n: int = Field(default=1, ge=1, description="exclusion threshold on independent units; not a design correction")
+    duplicate_policy: DuplicatePolicy = Field(default="reject")
+    allow_incomplete: bool = Field(default=False)
+
+
 # --------------------------------------------------------------------------
-# The eight tools
+# The nine tools
 # --------------------------------------------------------------------------
 
 def tool_table_info(registry: ArtifactRegistry, a: TableInfoArgs) -> ToolResult:
@@ -481,6 +500,38 @@ GROUP_RESULT_COLUMNS = {
 }
 
 
+def _group_results(table: Table, by: str, value: str, classified: Classified, used: list[tuple[dict[str, str], float]],
+                   min_independent_n: int, label_col: str | None) -> tuple[list[dict[str, Any]], int]:
+    """Per-group statistics of the used values (group_stats and rank_entries): every source row is attributed to a group first,
+    so missing and invalid counts are per group too. Returns the groups sorted by ID, and the rows with an empty group ID."""
+    per_group_rows: dict[str, list[dict[str, str]]] = {}
+    for row in table.rows:
+        per_group_rows.setdefault(row.get(by, ""), []).append(row)
+    per_group_used: dict[str, list[tuple[dict[str, str], float]]] = {}
+    for row, number in used:
+        per_group_used.setdefault(row.get(by, ""), []).append((row, number))
+
+    results: list[dict[str, Any]] = []
+    no_group_rows = len(per_group_rows.get("", []))
+    for group_id in sorted(per_group_rows):
+        if group_id == "":
+            continue
+        rows = per_group_rows[group_id]
+        counts = Counter(classify_value(r.get(value))[0] for r in rows)
+        values = [n for _, n in per_group_used.get(group_id, [])]
+        n_units = len({r[UNIT_COL] for r, _ in per_group_used.get(group_id, [])}) if classified.units_known else None
+        basis = n_units if n_units is not None else len(values)
+        reason = ""
+        if basis < min_independent_n:
+            what = "independent units" if n_units is not None else "valid values (independence unknown)"
+            reason = f"fewer than {min_independent_n} {what}: {basis}"
+        labels = {r.get(label_col, "") for r in rows if r.get(label_col, "")} if label_col else set()
+        results.append({"group_id": group_id, "label": "; ".join(sorted(labels)), "included": reason == "", "exclusion_reason": reason,
+                        "n_rows": len(rows), "n_valid_values": len(values), "n_raw_missing": counts["missing"], "n_invalid": counts["invalid"],
+                        "n_independent_units": n_units, **_stats(values)})
+    return results, no_group_rows
+
+
 def tool_group_stats(registry: ArtifactRegistry, a: GroupStatsArgs) -> ToolResult:
     """Per-group statistics of ONE variable, grouped by a stable ID column with names carried as labels. Each group
     reports n_valid_values and n_independent_units separately. Groups under min_independent_n are EXCLUDED with a
@@ -502,33 +553,7 @@ def tool_group_stats(registry: ArtifactRegistry, a: GroupStatsArgs) -> ToolResul
     unit = table.manifest.measurement.unit
     label_col = LABEL_FOR.get(a.by)
     label_col = label_col if label_col in table.manifest.columns else None
-
-    # every source row is attributed to a group first (so missing/invalid counts are per group too)
-    per_group_rows: dict[str, list[dict[str, str]]] = {}
-    for row in table.rows:
-        per_group_rows.setdefault(row.get(a.by, ""), []).append(row)
-    per_group_used: dict[str, list[tuple[dict[str, str], float]]] = {}
-    for row, number in used:
-        per_group_used.setdefault(row.get(a.by, ""), []).append((row, number))
-
-    results: list[dict[str, Any]] = []
-    no_group_rows = len(per_group_rows.get("", []))
-    for group_id in sorted(per_group_rows):
-        if group_id == "":
-            continue
-        rows = per_group_rows[group_id]
-        counts = Counter(classify_value(r.get(a.value))[0] for r in rows)
-        values = [n for _, n in per_group_used.get(group_id, [])]
-        n_units = len({r[UNIT_COL] for r, _ in per_group_used.get(group_id, [])}) if classified.units_known else None
-        basis = n_units if n_units is not None else len(values)
-        reason = ""
-        if basis < a.min_independent_n:
-            what = "independent units" if n_units is not None else "valid values (independence unknown)"
-            reason = f"fewer than {a.min_independent_n} {what}: {basis}"
-        labels = {r.get(label_col, "") for r in rows if r.get(label_col, "")} if label_col else set()
-        results.append({"group_id": group_id, "label": "; ".join(sorted(labels)), "included": reason == "", "exclusion_reason": reason,
-                        "n_rows": len(rows), "n_valid_values": len(values), "n_raw_missing": counts["missing"], "n_invalid": counts["invalid"],
-                        "n_independent_units": n_units, **_stats(values)})
+    results, no_group_rows = _group_results(table, a.by, a.value, classified, used, a.min_independent_n, label_col)
 
     included = [g for g in results if g["included"]]
     included.sort(key=lambda g: ((g["mean"] if a.ascending else -g["mean"]), g["group_id"]))
@@ -804,8 +829,148 @@ def tool_count_records(registry: ArtifactRegistry, a: CountRecordsArgs) -> ToolR
     return ToolResult(ok=True, data=data, artifact_ids=[table.manifest.artifact_id], complete=True)
 
 
+# R1 (Bidhan, 2026-10-21): the highest, the lowest, the top k or the rank of a named entry, for one measured trait, is a fact the
+# app may state, as an ordering of recorded values; "best", "select", "advance" and "recommend" stay refused elsewhere.
+ORDERING_NOTE = "descriptive ordering of recorded values, not a recommendation"
+RANK_RESULT_COLUMNS = {**GROUP_RESULT_COLUMNS, "rank": "rank among the ranked entries (ties share a rank; '' = not ranked)",
+                       "left_out": "true when the entry was left out before ranking (exclude)"}
+
+
+def _entries(table: Table, by: str, label_col: str | None, wanted: list[str], what: str) -> list[str]:
+    """Exact entry IDs for entries given by exact ID or exact name; an unknown name is refused with the closest ones."""
+    ids = sorted({row.get(by, "") for row in table.rows} - {""})
+    by_label: dict[str, set[str]] = {}
+    if label_col:
+        for row in table.rows:
+            if row.get(label_col) and row.get(by):
+                by_label.setdefault(row[label_col], set()).add(row[by])
+    found = []
+    for name in wanted:
+        if name in ids and by_label.get(name, {name}) - {name}:
+            raise AnalystError("invalid_argument", f"{what} {name!r} is the ID of one entry and the name of another "
+                                                   f"({sorted(by_label[name] - {name})}); give an ID that is not also a name")
+        if name in ids:
+            found.append(name)
+        elif len(by_label.get(name, ())) == 1:
+            found.append(next(iter(by_label[name])))
+        elif name in by_label:
+            raise AnalystError("invalid_argument", f"{what} {name!r} is the name of {len(by_label[name])} entries "
+                                                   f"({sorted(by_label[name])}); give the entry ID")
+        else:
+            close = difflib.get_close_matches(name, ids + sorted(by_label), n=3, cutoff=0.6)
+            raise AnalystError("invalid_argument", f"{what} {name!r} is not an entry ID or name in {table.manifest.artifact_id}"
+                                                   + (f"; the closest are {close}" if close else ""))
+    return list(dict.fromkeys(found))
+
+
+def tool_rank_entries(registry: ArtifactRegistry, a: RankEntriesArgs) -> ToolResult:
+    """The order of entries by their mean for ONE trait: the highest (or lowest) top_k entries, and the rank of each named entry
+    wherever it falls, after leaving out the excluded entries (for example the checks). Each stated entry gets a mean claim and
+    a rank claim (n = the entries ranked; ties share a rank, order inside a tie by entry ID; entries tied with the last of the
+    top_k are stated too). Entries are given by exact ID or exact name; an unknown name is refused with the closest ones. The
+    full ranking (every entry, ranked or not) is saved as an analysis_result artifact. A descriptive ordering of recorded
+    values, not a recommendation."""
+    table = _load(registry, a.artifact_id)
+    _require_column(table, a.by, "entry column")
+    _require_column(table, a.value, "value column")
+    if a.by.endswith("Name"):
+        raise AnalystError("invalid_argument", f"rank by the ID column, not {a.by!r}; names are carried as labels")
+    caveat = _completeness_gate(table, a.allow_incomplete)
+    variable = _single_variable(table)
+    label_col = LABEL_FOR.get(a.by)
+    label_col = label_col if label_col in table.manifest.columns else None
+    left_out = set(_entries(table, a.by, label_col, a.exclude, "exclude"))
+    named = _entries(table, a.by, label_col, a.named, "named")
+    both = sorted(left_out & set(named))
+    if both:
+        raise AnalystError("invalid_argument", f"{both} are both named and left out; an entry is either ranked or left out")
+    classified = _classify(table, a.value)
+    used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy)
+    if caveat:
+        transformation = f"{caveat}; {transformation}"
+    unit = table.manifest.measurement.unit
+    results, no_group_rows = _group_results(table, a.by, a.value, classified, used, a.min_independent_n, label_col)
+
+    first = "highest" if a.order == "highest" else "lowest"
+    ranked = [g for g in results if g["included"] and g["group_id"] not in left_out]
+    # means equal at the precision the answer shows are equal: 0.1 and 0.2 average to 0.15000000000000002, 0.15 and 0.15 to
+    # 0.15, and both entries must share a rank (review 2026-10-21)
+    tie = {g["group_id"]: float(format(g["mean"], ".12g")) for g in ranked}
+    ranked.sort(key=lambda g: ((-tie[g["group_id"]] if a.order == "highest" else tie[g["group_id"]]), g["group_id"]))
+    for g in ranked:                                              # competition ranking: ties share a rank
+        g["rank"] = 1 + sum(1 for o in ranked if (tie[o["group_id"]] > tie[g["group_id"]] if a.order == "highest"
+                                                  else tie[o["group_id"]] < tie[g["group_id"]]))
+    for g in results:
+        g.setdefault("rank", None)
+    cut = ranked[min(a.top_k, len(ranked)) - 1]["rank"] if ranked else 0
+    stated = [g for g in ranked if g["rank"] <= cut or g["group_id"] in named]
+    by_id = {g["group_id"]: g for g in results}
+    named_not_ranked = [{"entry": n, "label": by_id[n]["label"], "reason": by_id[n]["exclusion_reason"]} for n in named if by_id[n]["rank"] is None]
+    not_ranked = [g for g in results if not g["included"] and g["group_id"] not in left_out]
+
+    lineage = [f"lineage: rank_entries by {a.by} on {table.manifest.artifact_id} sha256={table.manifest.sha256}",
+               f"transformation: {transformation}", f"order: {first} entry mean first; ties share a rank",
+               f"left out before ranking: {sorted(left_out) or 'none'}", f"min_independent_n={a.min_independent_n} (exclusion threshold)",
+               f"rows with an empty {a.by}: {no_group_rows} (excluded, not dropped silently)", f"analysis target: {ANALYSIS_TARGET}"]
+    text_rows = [{**g, "included": "true" if g["included"] else "false", "left_out": "true" if g["group_id"] in left_out else "false",
+                  "n_independent_units": "" if g["n_independent_units"] is None else str(g["n_independent_units"]),
+                  "rank": "" if g["rank"] is None else str(g["rank"]),
+                  **{k: ("" if g[k] is None else repr(g[k])) for k in ("mean", "median", "min", "max", "sd")}} for g in results]
+    manifest = registry.save_table(text_rows, kind="analysis_result", columns=RANK_RESULT_COLUMNS, complete=table.manifest.complete,
+                                   source_request_ids=list(table.manifest.source_request_ids), study_ids=list(table.manifest.study_ids),
+                                   variable_ids=list(table.manifest.variable_ids), measurement=table.manifest.measurement, quality_notes=lineage)
+
+    exclusions = _exclusions(classified)
+    if no_group_rows:
+        exclusions.append(Exclusion(reason=f"rows with an empty {a.by}", count=no_group_rows))
+    order_exclusions = list(exclusions)
+    if left_out:
+        order_exclusions.append(Exclusion(reason="entries left out before ranking", count=len(left_out)))
+    if not_ranked:
+        order_exclusions.append(Exclusion(reason=f"entries not ranked: fewer than {a.min_independent_n} independent units",
+                                          count=len(not_ranked)))
+    # one namespace per ranking: a second call with other entries left out ranks differently, so its claims must not share IDs
+    variant = hashlib.sha256(json.dumps([a.order, sorted(left_out), a.min_independent_n, a.duplicate_policy, a.allow_incomplete,
+                                         a.value]).encode("utf-8")).hexdigest()[:10]
+    averaged = len(used) != len(classified.valid)
+    claims: list[Claim] = []
+    for g in stated:
+        denominator = Denominator(name=(f"observation units in entry {g['group_id']} ({PER_UNIT})" if averaged else
+                                        f"valid numeric values in entry {g['group_id']}" + ("" if classified.units_known else " (rows; independence unknown)")),
+                                  n=g["n_valid_values"])
+        claims.append(Claim(claim_id=_claim_id(table.manifest.artifact_id, "mean", a.by, g["group_id"], namespace=f"rank-{variant}"),
+                            kind="mean", value=g["mean"], unit=unit, denominator=denominator, n_independent_units=g["n_independent_units"],
+                            source_artifact_hashes=[table.manifest.sha256], filters={a.by: g["group_id"]}, grouping=[a.by],
+                            transformation=f"entry mean of valid values; {transformation}", exclusions=exclusions))
+        claims.append(Claim(claim_id=_claim_id(table.manifest.artifact_id, "rank", a.by, g["group_id"], namespace=f"rank-{variant}"),
+                            kind="rank", value=g["rank"], denominator=Denominator(name=f"entries ranked by entry mean, {first} first", n=len(ranked)),
+                            source_artifact_hashes=[table.manifest.sha256], filters={a.by: g["group_id"]}, grouping=[a.by],
+                            transformation=(f"rank among {len(ranked)} entries by entry mean, {first} first; ties share a rank; "
+                                            f"{ORDERING_NOTE}; {transformation}"), exclusions=order_exclusions))
+    data = {
+        "artifact_id": table.manifest.artifact_id, "result_artifact_id": manifest.artifact_id, "variable_id": variable, "unit": unit,
+        "by": a.by, "label_column": label_col, "order": f"{first} first", "entries_ranked": len(ranked),
+        "left_out": [{"entry": e, "label": by_id[e]["label"]} for e in sorted(left_out)],
+        "not_ranked": [{"entry": g["group_id"], "label": g["label"], "reason": g["exclusion_reason"]} for g in not_ranked],
+        "named_not_ranked": named_not_ranked,
+        "stated": [{"entry": g["group_id"], "label": g["label"], "rank": g["rank"], "mean": g["mean"], "display_mean": _display(g["mean"]),
+                    "n_valid_values": g["n_valid_values"], "n_independent_units": g["n_independent_units"]} for g in stated],
+        "tie_rule": "equal means share a rank; order inside a tie is by entry ID; entries tied with the last of top_k are stated",
+        "transformation": transformation, "min_independent_n": a.min_independent_n, "claims": _claims_json(claims),
+        "exclusions": [e.model_dump() for e in order_exclusions], "analysis_target": ANALYSIS_TARGET, "ordering": ORDERING_NOTE,
+        "value_policy": VALUE_POLICY,
+    }
+    warnings = [w for w in (caveat, classified.duplicate_note if a.duplicate_policy != "reject" else None) if w]
+    if not classified.units_known:
+        warnings.append("independence unknown: min_independent_n was applied to valid values, not to units")
+    warnings.extend(f"named entry {n['entry']} ({n['label'] or 'no name'}) is not ranked: {n['reason']}" for n in named_not_ranked)
+    warnings.extend(_timing_warnings(table, a.value))
+    return ToolResult(ok=True, data=data, artifact_ids=[table.manifest.artifact_id, manifest.artifact_id], complete=table.manifest.complete,
+                      warnings=warnings)
+
+
 # --------------------------------------------------------------------------
-# ONE registry of the eight tools, schemas and dispatch
+# ONE registry of the nine tools, schemas and dispatch
 # --------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -831,9 +996,10 @@ ANALYST_TOOLS: dict[str, AnalystToolSpec] = {spec.name: spec for spec in [
     AnalystToolSpec("missing_report", MissingReportArgs, tool_missing_report),
     AnalystToolSpec("plot_bar", PlotBarArgs, tool_plot_bar),
     AnalystToolSpec("count_records", CountRecordsArgs, tool_count_records),
+    AnalystToolSpec("rank_entries", RankEntriesArgs, tool_rank_entries),
 ]}
 ANALYST_TOOL_NAMES = list(ANALYST_TOOLS)
-assert len(ANALYST_TOOL_NAMES) == 8
+assert len(ANALYST_TOOL_NAMES) == 9
 
 
 def analyst_tool_schemas() -> list[dict[str, Any]]:
@@ -874,7 +1040,7 @@ def dispatch_analyst(registry: ArtifactRegistry, name: str, arguments: Mapping[s
 
 
 class AnalystTools:
-    """The eight tools behind the agent loop's ToolInterface (async schemas()/call()), in-process, no network."""
+    """The nine tools behind the agent loop's ToolInterface (async schemas()/call()), in-process, no network."""
 
     def __init__(self, registry: ArtifactRegistry) -> None:
         self.registry = registry
@@ -891,7 +1057,7 @@ class AnalystTools:
 
 
 def main(argv: list[str] | None = None) -> int:   # pragma: no cover - tiny helper for humans
-    """Print the eight tool schemas; there is no other command-line behaviour."""
+    """Print the nine tool schemas; there is no other command-line behaviour."""
     import json
 
     names = argv if argv else ANALYST_TOOL_NAMES

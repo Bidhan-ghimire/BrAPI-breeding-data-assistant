@@ -65,7 +65,8 @@ __all__ = [
 
 RETRIEVER_ACTIONS = frozenset({"server_info", "search_studies", "study_types", "get_study", "list_variables", "get_observations",
                                "list_locations", "list_programs", "list_seasons", "get_observation_units", "export_metadata"})
-ANALYST_ACTIONS = frozenset({"table_info", "numeric_summary", "group_stats", "filter_rows", "concat_tables", "missing_report", "count_records"})
+ANALYST_ACTIONS = frozenset({"table_info", "numeric_summary", "group_stats", "filter_rows", "concat_tables", "missing_report", "count_records",
+                             "rank_entries"})
 DISCOVERY_FAMILIES: frozenset[str] = frozenset({"serverinfo", "commoncropnames", "studies", "observationvariables", "locations", "programs", "seasons"})
 # Wording that makes a question about SEVERAL studies (so "all known studies" may be its scope). A question that names one study
 # by an unknown name has none of these, and then no study may be chosen for the user. Seen 2026-09-28: a strong model answered
@@ -123,7 +124,10 @@ def latest_words(question: str) -> str:
     return _CLARIFIED.split(question)[-1].replace(FOLLOW_UP_LABEL, "\n")
 
 
-DECISION_WORDS = re.compile(r"\b(best|worst|superior|inferior|recommend\w*|release|outperform\w*|top[- ]performing|winner|highest[- ]yielding|should (?:we|i) (?:grow|plant|select))\b", re.IGNORECASE)
+# R1 (2026-10-21): "should we/I advance" joins the refused decisions, with best, select and recommend. "highest-yielding" stays
+# (review 2: without it "which highest-yielding clone should we cross?" passed this check); whether an ordering phrased that way
+# may pass is put to Bidhan, with a check on decision verbs instead (asked, not changed).
+DECISION_WORDS = re.compile(r"\b(best|worst|superior|inferior|recommend\w*|release|outperform\w*|top[- ]performing|winner|highest[- ]yielding|should (?:we|i) (?:grow|plant|select|advance))\b", re.IGNORECASE)
 _STOPWORDS = frozenset({"the", "and", "for", "with", "per", "mean", "means", "average", "study", "studies", "trial", "trials", "clone", "clones",
                         "synthetic", "give", "show", "compare", "what", "which", "how", "many", "each", "all", "from", "that", "this", "are", "was",
                         "were", "have", "has", "does", "list", "count", "number", "yields",
@@ -378,7 +382,7 @@ Rules:
    A uniquely named study already tells us its location and season; do not ask for them.
 4. Steps: retriever actions are search_studies, list_variables, get_observations, get_observation_units, export_metadata,
    list_locations, list_seasons, get_study; analyst actions are table_info, numeric_summary, group_stats, count_records,
-   missing_report, filter_rows, concat_tables. Each step depends only on earlier steps; every analyst step traces back to a
+   rank_entries, missing_report, filter_rows, concat_tables. Each step depends only on earlier steps; every analyst step traces back to a
    retriever step, directly or through the earlier analyst steps it depends on (export -> filter -> count is fine; a step that
    depends on nothing is not). The list_* and search_* actions return
    previews only, never a table the analyst can use: a count over catalog rows (variables, studies, seasons, locations) needs an
@@ -404,6 +408,8 @@ Rules:
      per observation unit, its level in levelName), then count_records() for the number of plots and
      count_records(group_by="germplasmDbId", distinct_by="germplasmDbId") for the entries and the plots of each;
      get_observations needs a trait in scope.variable_ids.
+   - the highest / lowest / top k entries, or where a named entry ranks, for ONE measured trait: get_observations, then
+     rank_entries(order="highest", top_k=1, named=["..."], exclude=["..."]) — an ordering of recorded values, never "best".
    - narrowing a table: filter_rows(column="studyType", op="eq", value="Advanced Yield Trial"); op is one of eq, ne, contains,
      gt, ge, lt, le, is_missing, is_valid_number. A catalog table comes from export_metadata(entity="variables"); entity is one
      of studies, variables, locations, programs, seasons.

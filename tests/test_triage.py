@@ -165,9 +165,11 @@ def test_the_prompt_carries_the_rules_the_reference_and_the_examples():
                  "front-door.invalid", "Choose the label", "- out_of_scope: a message this app cannot help with",
                  "an insult or rude remark", "between out_of_scope and unsure choose unsure",       # a doubt keeps the lookup offer
                  "a message about crops, plants, places, programs, seasons or years is data_question or unsure",
-                 "A request to recommend, rank or choose varieties, clones, lines or parents (which is best, which to plant "
-                 "or cross) is out_of_scope, even though it names a crop",
-                 "a question about recorded numbers (for example the highest mean yield in a study) is data_question"):
+                 # R1 (2026-10-21): ordering recorded values is a data question; recommending or choosing stays out of scope
+                 "A request to recommend or choose varieties, clones, lines or parents (which is best, which to plant, "
+                 "cross, select or advance) is out_of_scope, even though it names a crop",
+                 "a question about recorded numbers, including their order (for example the highest mean yield in a study, "
+                 "the top 5 entries for a trait, or where a named entry ranks), is data_question"):
         assert rule in " ".join(prompt.split())                     # the same words, whatever the line breaks
     for gone in ("1 to 3 sentences", "Mirror the person's greeting", "For out_of_scope (", "offer one example question"):
         assert gone not in prompt                                   # the label call writes no shown reply
@@ -668,7 +670,7 @@ def test_which_parents_should_i_cross_gets_a_reply_and_starts_no_run(chat, no_ru
     assert "job" not in state and "pending_question" not in state
     label_call, talk_call = model.requests
     assert label_call["tools"] == talk_call["tools"] == [] and "Choose the label" in label_call["messages"][0]["content"]
-    assert "does not rank or recommend" in talk_call["messages"][0]["content"]     # the no-advice answer in kind
+    assert "does not recommend" in talk_call["messages"][0]["content"]     # the no-advice answer in kind (R1: it may rank)
 
 
 @pytest.mark.parametrize("factory", [
