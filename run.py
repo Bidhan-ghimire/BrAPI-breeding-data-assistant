@@ -1368,6 +1368,8 @@ class Controller:
     def counts(self) -> RunCounts:
         origins = [r.get("origin") for r in [*self.catalog_requests, *self.requests]]
         fetched = {e.study_id for e in (self.retrieval.study_ledger if self.retrieval else []) if e.status in ("complete", "empty")}
+        fetched |= {s for a in (self.retrieval.artifacts if self.retrieval else []) if a.kind == "observation_units" and a.complete
+                    for s in a.study_ids}                         # a complete plot list is a fetch of its study (item 3d)
         return RunCounts(model_calls=self.budget.model_calls, tool_calls=self.budget.tool_calls,          # the shared budget counted them
                          live_attempts=sum(1 for o in origins if o == "live"), cached_requests=sum(1 for o in origins if o == "cache") + self.meta_requests,
                          distinct_studies_fetched=len(fetched), elapsed_seconds=max(0.0, (self.now() - self.started).total_seconds()))

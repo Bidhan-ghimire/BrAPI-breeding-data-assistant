@@ -307,6 +307,62 @@ def test_studies_named_but_never_fetched_make_the_run_incomplete(tmp_path):
     assert report.status == "incomplete" and any("never fetched: ['S1']" in w for w in report.warnings)
 
 
+def test_a_study_whose_complete_plot_list_was_fetched_counts_as_fetched(tmp_path):
+    """Benchmark 2026-10-21 (item 3d; A35.2, A37.1): a plot-count question planned on the plot list alone fetched every plot and was
+    still called incomplete, "studies named by the model but never fetched", because only get_observations writes the study
+    ledger. A complete plot list is a fetch of that study; a study named without any fetch still makes the run incomplete."""
+    def plots_model(studies):
+        return FakeModelClient([
+            reply_tools([("get_observation_units", json.dumps({"study_db_id": "S1"}))]),
+            reply_text(json.dumps({"status": "completed", "payload": {"resolved": [], "studies": studies, "notes": []}})),
+        ], reported_model="mock-model")
+    report, _, _, _ = run_script(tmp_path / "one", "valid_request.json", model=plots_model(["S1"]), request="How many plots does S1 have?")
+    assert report.status == "completed" and report.complete is True and not any("never fetched" in w for w in report.warnings)
+    assert [a.kind for a in report.artifacts] == ["observation_units"] and report.study_ledger == []
+    # the Full report's study table lists the plot list, not "(no studies fetched)" (review 2026-10-21)
+    import agents.coordinator as co
+    from contracts import AnalysisReport
+    table = co.render_numeric_table(AnalysisReport(status="failed", claims=[]), report)           # the study table does not read claims
+    rows = report.artifacts[0].row_count
+    assert f"| S1 | plot list complete | {rows} | |" in table and "(no studies fetched)" not in table
+    import run as ctl
+    controller = ctl.Controller(ctl.RunConfig(question="How many plots does S1 have?", out_dir=tmp_path / "out_counts"))
+    controller.retrieval = report
+    assert controller.counts().distinct_studies_fetched == 1                                     # the run record counts it too
+    named, _, _, _ = run_script(tmp_path / "two", "valid_request.json", model=plots_model(["S1", "S2"]), request="How many plots?")
+    assert named.status == "incomplete" and any("never fetched: ['S2']" in w for w in named.warnings)
+
+
+def test_a_plot_list_never_stands_in_for_planned_measurements_or_when_incomplete(tmp_path, monkeypatch):
+    """The same run, reported again with what run.py adds: a planned measurement fetch (S1, V1) that never happened, and an
+    incomplete plot list. Neither may be read as complete because a plot list was fetched."""
+    from types import SimpleNamespace
+
+    import brapi_mcp_server as srv
+    captured, original = {}, rt.build_report
+
+    def spy(agent, tools, ctx, **kwargs):
+        captured.update(agent=agent, tools=tools, ctx=ctx)
+        return original(agent, tools, ctx, **kwargs)
+
+    monkeypatch.setattr(rt, "build_report", spy)
+    model = FakeModelClient([reply_tools([("get_observation_units", json.dumps({"study_db_id": "S1"}))]),
+                             reply_text(json.dumps({"status": "completed", "payload": {"resolved": [], "studies": ["S1"], "notes": []}}))],
+                            reported_model="mock-model")
+    run_script(tmp_path, "valid_request.json", model=model, request="How many plots does S1 have?")
+    agent, tools, ctx = captured["agent"], captured["tools"], captured["ctx"]
+    planned = original(agent, tools, ctx, expected_observation_pairs={("S1", "V1")}, expected_unit_studies={"S1"})
+    assert planned.status == "incomplete" and any("planned fetches lack complete evidence" in w for w in planned.warnings)
+    partial = ctx.registry.save_table([{c: "" for c in srv.UNIT_COLUMNS}], kind="observation_units", columns=srv.UNIT_COLUMNS,
+                                      complete=False, study_ids=["S1"]).artifact_id
+    cut = original(agent, SimpleNamespace(records=[], artifact_ids=[partial], seen=tools.seen, request_ids=[]), ctx)
+    assert cut.status == "incomplete" and any("never fetched: ['S1']" in w for w in cut.warnings)
+    other = ctx.registry.save_table([{"studyDbId": "S1", "studyName": "SYNTHETIC"}], kind="studies", columns={"studyDbId": "ID", "studyName": "name"},
+                                    complete=True, study_ids=["S1"]).artifact_id                 # a complete table, but not a plot list
+    not_plots = original(agent, SimpleNamespace(records=[], artifact_ids=[other], seen=tools.seen, request_ids=[]), ctx)
+    assert not_plots.status == "incomplete" and any("never fetched: ['S1']" in w for w in not_plots.warnings)
+
+
 def test_a_catalog_plan_fetches_nothing_so_its_named_studies_do_not_make_it_incomplete(tmp_path):
     """Real data, 2026-09-29 (Q1, Q2): the model exported the complete study table, counted 25 matching studies and listed them; the
     report called that 'incomplete' because none of the 25 had observations fetched. A plan without an observation step fetches no

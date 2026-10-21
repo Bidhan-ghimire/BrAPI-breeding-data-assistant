@@ -392,7 +392,8 @@ def build_report(agent: AgentResult, tools: ApprovedTools, ctx: ToolContext, *, 
                  expected_observation_pairs: set[tuple[str, str]] | None = None,
                  expected_unit_studies: set[str] | None = None,
                  expected_catalog_exports: list[dict[str, Any]] | None = None) -> RetrievalReport:
-    """expects_observations: the plan has an observation step, so every study the model names must appear in the fetch ledger.
+    """expects_observations: the plan has a data step, so every study the model names must have been fetched: be in the fetch
+    ledger (measurements) or have a complete plot list from this run (item 3d, 2026-10-21).
     A catalog plan (counts of studies, seasons, variables) fetches no observations: the studies it names are its answer, not its
     fetch targets, and leaving them unfetched does not make the report incomplete."""
     warnings: list[str] = []
@@ -442,7 +443,11 @@ def build_report(agent: AgentResult, tools: ApprovedTools, ctx: ToolContext, *, 
         warnings.append(f"model note: {note}")
 
     ledger_ids = {e.study_id for e in ledger}
-    missing = [s for s in payload.studies if s not in ledger_ids]
+    # A study whose complete plot list (observation units) was fetched has been fetched, though only get_observations writes the
+    # ledger: a plot-count question planned on the plot list alone read "named but never fetched" (benchmark 2026-10-21, item 3d:
+    # A35.2, A37.1). An incomplete plot list does not count, and planned measurements are still checked below.
+    plot_lists = {s for a in artifacts if a.kind == "observation_units" and a.complete for s in a.study_ids}
+    missing = [s for s in payload.studies if s not in ledger_ids | plot_lists]
     if missing and not expects_observations:
         warnings.append(f"studies named by the model for a catalog plan (no observation step; nothing to fetch for them): {missing}")
         missing = []

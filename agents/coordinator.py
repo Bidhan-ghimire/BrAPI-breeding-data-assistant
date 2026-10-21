@@ -835,7 +835,13 @@ def render_numeric_table(analysis: AnalysisReport, retrieval: RetrievalReport | 
         for e in sorted(retrieval.study_ledger, key=lambda x: x.study_id):
             rows = rows_by_artifact.get(e.artifact_id or "", "-")
             lines.append(f"| {e.study_id} | {e.status} | {rows} | {e.reason or ''} |")
-        if not retrieval.study_ledger:
+        # plot lists are not in the ledger (only measurements write it): a plot-count run listed "(no studies fetched)" (item 3d)
+        ledger_ids = {e.study_id for e in retrieval.study_ledger}
+        plot_lists = sorted(((s, a) for a in retrieval.artifacts if a.kind == "observation_units" for s in a.study_ids if s not in ledger_ids),
+                            key=lambda pair: pair[0])
+        for study_id, a in plot_lists:
+            lines.append(f"| {study_id} | plot list {'complete' if a.complete else 'incomplete'} | {a.row_count} | |")
+        if not retrieval.study_ledger and not plot_lists:
             lines.append("| (no studies fetched) | | | |")
     caveats = list(analysis.caveats) + ([w for w in retrieval.warnings] if retrieval is not None else [])
     if caveats:
