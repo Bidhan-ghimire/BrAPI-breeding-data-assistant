@@ -3,7 +3,7 @@
 This is Bidhan's BrAPI breeding data assistant. Bidhan is learning: explain in plain words and keep reports short.
 
 ## Branches and releases
-- `codex/initial-release` is the published line. Tag `v1.0` marks the exact version running on Hugging Face.
+- `codex/initial-release` is the published line. The newest release tag (`v1.0`, then `v1.1`, ...) marks the exact version running on Hugging Face.
 - Work only on `dev`, or on a branch made from `dev`.
 - Publishing happens only when Bidhan says so for that release: merging into the published line, adding a tag (v1.1, v1.2, ...), or uploading to the Hugging Face Space `bidhanghimire/brapi-breeding-assistant`.
 - Never force-push. Never delete or move branches, tags or repositories.
