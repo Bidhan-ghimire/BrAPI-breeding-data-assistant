@@ -52,6 +52,7 @@ def test_runner_grades_the_apps_real_answers_on_a_cache_copy(place, monkeypatch)
     measured = rows["S1.1"]
     assert measured["bucket"] == "pass" and measured["invented"] == [] and measured["typed"] == ["approve", "continue"]
     assert measured["run_ids"] and measured["refused_requests"] == 0
+    assert measured["answer_full"].startswith(measured["answer"]) and "accept" in measured["answer_full"][-400:]   # never cut
     catalog = rows["C1.1"]
     assert catalog["bucket"] == "pass" and catalog["status"] == "no run: answered by code from the saved catalog"
     assert report["invented"] == [] and report["by_tier"]["T1"]["pass"] == 2 and report["requests"] == "none: cache copy only"

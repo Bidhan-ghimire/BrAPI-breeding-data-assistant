@@ -14,7 +14,8 @@ model notes are left out). Buckets:
   blocked    a gate, a limit or an error stopped the question (blocked / limit / could not complete / the catalog
              approval the harness never gives / a harness error)
   invented   a number in the code-written part that no claim, no run text, no table of the run and not the question
-             backs: the red flag, reported first whatever else the answer holds
+             backs: the red flag, reported first whatever else the answer holds (except on the app's question screens:
+             they answer nothing, so they are not checked)
 """
 from __future__ import annotations
 
@@ -46,6 +47,8 @@ _ONTOLOGY = re.compile(r"\b[A-Z][A-Z0-9_]*:\d+\b")
 # group or ID count): left out of the invention check only; the pass check still reads them ("Studies: 18 distinct IDs"
 # is how the app shows a distinct count; review 10).
 _STRUCTURAL = re.compile(r"source \d+|Showing \d+ of \d+ entries; \d+ additional|answer \d+ of \d+|\d+ (?:groups|distinct IDs)\b")
+# A full ISO timestamp ("2026-10-21T12:22:33.472516+00:00": a record's fetch time): no number (baseline 2026-10-21).
+_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?")
 # A number in scientific notation, as the presenter writes a small value ("1.5e-05"; chat_presenter._number uses .12g).
 _SCIENTIFIC = re.compile(r"(?<![\w.])[+-]?\d+(?:\.\d+)?[eE][+-]?\d+(?![\w.])")
 _ASKED_FIRST_LINES = ("More detail is needed.",)
@@ -83,12 +86,13 @@ def load_subquestions(path: Path) -> list[dict[str, Any]]:
 
 def _numbers(text: str) -> list[tuple[float, int, int, int]]:
     """Every number in the text (harness.numbers_in), with numbers in scientific notation read whole and ontology terms
-    left out (blanked at the same length, so positions stay)."""
+    left out (blanked at the same length, so positions stay); full ISO timestamps are no numbers."""
+    blank = lambda m: " " * len(m.group())                                              # noqa: E731
+    text = _TIMESTAMP.sub(blank, text)
     found = []
     for match in _SCIENTIFIC.finditer(text):
         mantissa = match.group(0).lower().split("e")[0]
         found.append((float(match.group(0)), len(mantissa.split(".")[1]) if "." in mantissa else 0, match.start(), match.end()))
-    blank = lambda m: " " * len(m.group())                                              # noqa: E731
     found += harness.numbers_in(_ONTOLOGY.sub(blank, _SCIENTIFIC.sub(blank, text)))
     return sorted(found, key=lambda n: n[2])
 
@@ -187,13 +191,16 @@ def grade(sub: dict[str, Any], *, shown: str, status: str, claims: list[dict[str
             return {**result, "bucket": "invented", "invented": invented,
                     "why": f"a reply in the model's words with {len(invented)} number(s) not in the question"}
         return {**result, "bucket": "no_number", "why": "a reply in the model's words (no run): never scored"}
-    if run and not code_catalog:
+    first = harness.no_answer(shown)
+    question_back = status.startswith(_ASKED_STATUS) or (first is not None and first.startswith(_ASKED_FIRST_LINES))
+    # The app's question screens answer nothing: their hint and choices (catalog counts) are written by code from the saved
+    # catalog, the model's question is quoted and left out (baseline 2026-10-21: 44 false flags on them).
+    if run and not code_catalog and not question_back:
         invented = flagged(_numbers_for_invention(text), claim_numbers(claims) + asked + [float(x) for x in backed_extra])
         if invented:
             return {**result, "bucket": "invented", "invented": invented,
                     "why": f"{len(invented)} number(s) in the code-written answer that nothing backs"}
-    first = harness.no_answer(shown)
-    if status.startswith(_ASKED_STATUS) or (first is not None and first.startswith(_ASKED_FIRST_LINES)):
+    if question_back:
         return {**result, "bucket": "no_number", "why": first or status}
     if status.startswith(_BLOCKED_STATUS) or first is not None:
         return {**result, "bucket": "blocked", "why": first or status}
@@ -266,7 +273,8 @@ def run_subquestions(subs: list[dict[str, Any]], *, cache_copy: Path, out_dir: P
                                    (counter.calls if counter else 0) + run_calls)
             rows.append({"sub_id": s["sub_id"], "parent": s["parent"], "tier": s["tier"], "question": s["question"],
                          "expected": s["expected"], "expected_text": s.get("expected_text") or [], **graded,
-                         "status": outcome.status, "answer": outcome.shown[:harness.GOT_CHARS], "typed": outcome.typed,
+                         "status": outcome.status, "answer": outcome.shown[:harness.GOT_CHARS], "answer_full": outcome.shown,
+                         "typed": outcome.typed,
                          "claims": [{k: c.get(k) for k in ("kind", "value", "unit", "filters", "transformation")} for c in claims],
                          "model_calls": (counter.calls if counter else 0) + run_calls,
                          "live_attempts": sum(r.counts.live_attempts for r in outcome.results),

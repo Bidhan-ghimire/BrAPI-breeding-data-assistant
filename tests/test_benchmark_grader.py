@@ -252,3 +252,33 @@ def test_a_name_written_a_or_b_is_found_by_either():
     assert bench.grade(named, shown=shown, status="run ended", claims=[claim(960)], backed_extra=[1])["bucket"] == "pass"
     missing = sub(expected_text=["CIP199062.1|Dagga"])
     assert bench.grade(missing, shown=ANSWER, status="run ended", claims=[claim(960)])["bucket"] == "wrong"
+
+
+# --------------------------------------------------------------------------
+# Baseline 2026-10-21: 45 INVENTED flags, all on code-written text (checked one by one)
+# --------------------------------------------------------------------------
+
+PLANNER_QUESTION = ("I need one more detail before I can make a plan (answer 1 of 3):\n\n> Which location do you mean?\n\n"
+                    "- 12 · Clinton - Horticultural Crops Research · 426 studies\n- 80 · Cunningham Research Station · 184 studies\n\n"
+                    "Your answer is added to your question, so a few words are enough, for example **study 4501** or **all studies "
+                    "from 2026**. Or reply **cancel**.")
+
+
+@pytest.mark.parametrize("shown, status", [
+    (PLANNER_QUESTION, "stopped: the app asked a question (the harness never answers one)"),
+    (PLANNER_QUESTION, "no run: the app asked whether to look it up"),
+    ("More detail is needed.\n\nThe plot roster of study 4501 lists 412 units.", "run ended"),
+], ids=["planner-question", "lookup-offer", "more-detail"])
+def test_the_apps_question_screen_is_not_checked_for_invention(shown, status):
+    """44 flags: the planner's clarification screen holds the app's own hint ("for example study 4501 or all studies from
+    2026") and location choices with study counts from the saved catalog, written by code. It answers nothing; nor do the
+    lookup offer and a run's "More detail is needed." screen (both pinned after the fresh review of 2026-10-21)."""
+    g = bench.grade(sub(), shown=shown, status=status, claims=[])
+    assert g["bucket"] == "no_number" and g["invented"] == []
+
+
+def test_a_timestamp_with_fractions_and_a_timezone_is_no_number():
+    """1 flag: "Source fetched: 2026-10-21T12:22:33.472516+00:00" was read as 33.472516."""
+    shown = ANSWER + "\n\nSource fetched: 2026-10-21T12:22:33.472516+00:00"
+    g = bench.grade(sub(), shown=shown, status="final review reached", claims=[claim(960)])
+    assert g["bucket"] == "pass" and g["invented"] == []
