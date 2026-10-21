@@ -184,6 +184,31 @@ def test_an_over_long_reason_is_shortened_and_noted_not_fatal(tmp_path):
     assert exact.status == "completed" and exact.decision.reason == "x" * 600 and exact.notes == []
 
 
+def test_a_revise_plan_with_an_instruction_but_no_reason_uses_the_instruction_as_its_reason(tmp_path):
+    """Benchmark 2026-10-21 (Luna): one of six revise_plan replies gave the needed change as instruction and no reason, and was
+    blocked at reason (missing). The reason only explains and grants nothing, so the instruction stands in for it, shortened like
+    an over-long reason. A revise_plan with a reason but NO instruction stays blocked (test_wrong_shape_..., ("revise_plan", {}))."""
+    reply = reply_text(json.dumps({"status": "completed", "payload": {"action": "revise_plan", "instruction": "Restrict to the six trials."}}))
+    result = choose(FakeModelClient([reply]), tmp_path)
+    assert result.status == "completed" and result.decision.action == "revise_plan"
+    assert result.decision.reason == "Restrict to the six trials." == result.decision.instruction
+    assert result.notes == ["the Coordinator gave no reason for revise_plan; its instruction stands as the reason"]
+    long = reply_text(json.dumps({"status": "completed", "payload": {"action": "revise_plan", "instruction": "z" * 900}}))
+    shortened = choose(FakeModelClient([long]), tmp_path)
+    assert shortened.status == "completed" and shortened.decision.reason == "z" * 599 + "…" and shortened.decision.instruction == "z" * 900
+    for action, fields in (("retrieve", {}), ("analyze", {"instruction": "Explain the caveat."}), ("revise_plan", {})):
+        bare = reply_text(json.dumps({"status": "completed", "payload": {"action": action, **fields}}))
+        assert choose(FakeModelClient([bare]), tmp_path, allowed=[action]).status == "blocked", action     # still no reason: blocked
+    # review 2026-10-21: an explicit reason is kept; only an ABSENT reason is filled, and only from a real instruction
+    both = choose(FakeModelClient([decision_reply("revise_plan", reason="Keep my reason.", instruction="Narrow it.")]), tmp_path)
+    assert both.status == "completed" and both.decision.reason == "Keep my reason." and both.notes == []
+    for fields in ({"reason": None, "instruction": "Narrow it."}, {"reason": "", "instruction": "Narrow it."},
+                   {"reason": "   ", "instruction": "Narrow it."}, {"instruction": 7}, {"instruction": ["Narrow it."]},
+                   {"instruction": None}, {"instruction": "   "}):
+        odd = reply_text(json.dumps({"status": "completed", "payload": {"action": "revise_plan", **fields}}))
+        assert choose(FakeModelClient([odd]), tmp_path).status == "blocked", fields
+
+
 @pytest.mark.parametrize("field, size", [("question", 601), ("instruction", 1001)])
 def test_an_over_long_question_or_instruction_still_blocks(tmp_path, field, size):
     action = "clarify" if field == "question" else "revise_plan"

@@ -344,3 +344,9 @@ def test_full_report_separates_raw_model_independence_claim_from_recorded_action
 def test_a_shortened_reason_note_is_bookkeeping_not_the_reason_a_run_stopped():
     note = "supervisor: the Coordinator's reason was shortened from 1000 to 600 characters"
     assert cp._NOT_A_REASON.match(note) and cp._fallback_notes([note]) == []
+
+
+def test_a_filled_reason_note_is_bookkeeping_too():
+    """Review 2026-10-21: the revise_plan note (agents/supervisor.py) belongs with its sibling, never shown as a stop reason."""
+    note = "supervisor: the Coordinator gave no reason for revise_plan; its instruction stands as the reason"
+    assert cp._NOT_A_REASON.match(note) and cp._fallback_notes([note]) == []

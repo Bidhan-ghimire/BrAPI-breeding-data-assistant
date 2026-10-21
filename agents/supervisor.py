@@ -138,6 +138,14 @@ failures stop here rather than starting another unbounded repair loop.
         payload = {"action": "clarify", "reason": "The Coordinator needs the person's clarification.",
                    "question": payload.get("question")}
     notes: list[str] = []
+    instruction = payload.get("instruction")
+    if (payload.get("action") == "revise_plan" and "reason" not in payload
+            and isinstance(instruction, str) and instruction.strip()):
+        # The reason only explains and grants nothing; a revise_plan that states its change as instruction but gives no reason
+        # (benchmark 2026-10-21, Luna: 1 of 6 revise_plan replies) lets the instruction stand as the reason, shortened below if
+        # long. The opposite, a reason with no instruction, stays blocked: the new draft needs the instruction.
+        notes.append("the Coordinator gave no reason for revise_plan; its instruction stands as the reason")
+        payload = {**payload, "reason": instruction}
     reason = payload.get("reason")
     if isinstance(reason, str) and len(reason.strip()) > REASON_LIMIT:
         # The reason only explains (logs, the stop note) and grants nothing: an over-long one is shortened, not fatal.
