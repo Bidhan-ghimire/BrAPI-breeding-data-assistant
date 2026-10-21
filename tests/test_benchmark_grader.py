@@ -230,3 +230,25 @@ def test_a_sub_question_marked_not_checkable_may_have_nothing_to_check(tmp_path)
     path = tmp_path / "subs.json"
     path.write_text(json.dumps({"subquestions": [sub(expected=[], expected_text=[], checkable=False)]}), encoding="utf-8")
     assert bench.load_subquestions(path)[0]["checkable"] is False
+
+
+# --------------------------------------------------------------------------
+# The split's conventions (eval/benchmark/spb_subquestions.json "notes")
+# --------------------------------------------------------------------------
+
+def test_each_number_may_carry_its_own_display_tolerance_and_counts_stay_exact():
+    two = sub(expected=[{"value": 12.3, "kind": "mean", "decimals": 1, "abs": 0.05},
+                        {"value": 840, "kind": "count", "decimals": 0, "abs": None}],
+              tolerance={"rule": "display", "abs": 0.005})
+    assert bench.grade(two, shown=MEAN, status="run ended", claims=MEAN_CLAIMS)["bucket"] == "pass"   # 12.341 is 12.3 at 1 decimal
+    # a count stays exact even when the sub-question's display tolerance is wide (a mean shown in whole tonnes: abs 5)
+    off = sub(expected=[{"value": 841, "kind": "count", "decimals": 0, "abs": None}], tolerance={"rule": "display", "abs": 5})
+    assert bench.grade(off, shown=MEAN, status="run ended", claims=MEAN_CLAIMS)["bucket"] == "wrong"
+
+
+def test_a_name_written_a_or_b_is_found_by_either():
+    named = sub(expected_text=["CIP199062.1|Dagga"])
+    shown = ANSWER + "\n\n| ID | Germplasm |\n| --- | --- |\n| 1 | Dagga |"
+    assert bench.grade(named, shown=shown, status="run ended", claims=[claim(960)], backed_extra=[1])["bucket"] == "pass"
+    missing = sub(expected_text=["CIP199062.1|Dagga"])
+    assert bench.grade(missing, shown=ANSWER, status="run ended", claims=[claim(960)])["bucket"] == "wrong"

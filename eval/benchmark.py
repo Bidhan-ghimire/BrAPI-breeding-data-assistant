@@ -126,13 +126,17 @@ def _backed(value: float, decimals: int, sources: list[float]) -> bool:
 
 
 def _match(expected: dict[str, Any], tolerance: dict[str, Any], shown: list[tuple[float, int, int, int]]) -> tuple[float, int, int, int] | None:
+    """The first shown number within tolerance of one expected value. Under "display" each number may carry its own "abs"
+    (half a unit of its own last decimal); a count without one is exact (the split's notes)."""
     target = float(expected["value"])
     rule = tolerance.get("rule")
+    if rule == "display" and expected.get("abs") is None and expected.get("kind") == "count":
+        rule = "exact"
     for number in shown:
         value = number[0]
         if rule == "exact" and value == target:
             return number
-        if rule == "display" and abs(value - target) <= float(tolerance["abs"]) + 1e-9:
+        if rule == "display" and abs(value - target) <= float(expected.get("abs") or tolerance["abs"]) + 1e-9:
             return number
         if rule == "relative" and abs(value - target) <= float(tolerance.get("rel", 0.005)) * abs(target) + 1e-12:
             return number
@@ -149,11 +153,12 @@ def _found_all(expected: list[dict[str, Any]], names: list[str], tolerance: dict
         if hit is None:
             return None
         where.append(f"{expected_label(e)}: {harness._around(text, hit[2], hit[3], 50)}")
-    for name in names:
-        if name.casefold() not in lowered:
+    for name in names:                                    # "A|B": either synonym (the split's notes)
+        found = [option for option in name.split("|") if option.strip() and option.strip().casefold() in lowered]
+        if not found:
             return None
-        start = lowered.index(name.casefold())
-        where.append(f"{name}: {harness._around(text, start, start + len(name), 50)}")
+        start = lowered.index(found[0].strip().casefold())
+        where.append(f"{name}: {harness._around(text, start, start + len(found[0].strip()), 50)}")
     return where
 
 
