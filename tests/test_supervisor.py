@@ -16,14 +16,14 @@ def decision_reply(action="retrieve", **fields):
         "action": action, "reason": "Take the next permitted step.", **fields}}))
 
 
-def choose(model, tmp_path, *, budget=None, allowed=None, state=None, turn=1):
+def choose(model, tmp_path, *, budget=None, allowed=None, state=None, turn=1, clock=lambda: 0.0):
     async def go():
         return await choose_next(
             model=model, question="Summarize trait V1 in study S1.",
             state=state or {"stage": "approved_plan"},
             allowed_actions=allowed if allowed is not None else ["retrieve", "clarify", "revise_plan", "stop"],
             budget=budget if budget is not None else Budget(), run_id="run_supervisor_test",
-            log_dir=tmp_path, model_requested="fake-model", turn=turn, clock=lambda: 0.0,
+            log_dir=tmp_path, model_requested="fake-model", turn=turn, clock=clock,
         )
     return anyio.run(go)
 
@@ -98,9 +98,14 @@ def test_model_cannot_smuggle_authority_artifacts_or_plan_edits(tmp_path, fields
     ("retrieve", {"reason": 123}),
 ])
 def test_wrong_shape_or_unbounded_fields_are_rejected(tmp_path, action, fields):
-    result = choose(FakeModelClient([decision_reply(action, **fields)]), tmp_path,
-                    allowed=["retrieve", "analyze", "revise_plan", "clarify", "finish", "stop"])
-    assert result.status == "blocked" and result.decision is None
+    # A reply that lacks a required field is asked once more (item 3c): those five shapes get the same reply twice and must still
+    # be rejected. Every other shape gets one reply, so a retry it should not get ends "failed" and fails this test (review).
+    asked_again = [("clarify", {}), ("clarify", {"question": "   "}), ("revise_plan", {}), ("revise_plan", {"instruction": ""}),
+                   ("stop", {"reason": ""})]
+    n = 2 if (action, fields) in asked_again else 1
+    model = FakeModelClient([decision_reply(action, **fields)] * n)
+    result = choose(model, tmp_path, allowed=["retrieve", "analyze", "revise_plan", "clarify", "finish", "stop"])
+    assert result.status == "blocked" and result.decision is None and len(model.requests) == n
 
 
 @pytest.mark.parametrize("action,fields", [
@@ -184,29 +189,107 @@ def test_an_over_long_reason_is_shortened_and_noted_not_fatal(tmp_path):
     assert exact.status == "completed" and exact.decision.reason == "x" * 600 and exact.notes == []
 
 
-def test_a_revise_plan_with_an_instruction_but_no_reason_uses_the_instruction_as_its_reason(tmp_path):
-    """Benchmark 2026-10-21 (Luna): one of six revise_plan replies gave the needed change as instruction and no reason, and was
-    blocked at reason (missing). The reason only explains and grants nothing, so the instruction stands in for it, shortened like
-    an over-long reason. A revise_plan with a reason but NO instruction stays blocked (test_wrong_shape_..., ("revise_plan", {}))."""
-    reply = reply_text(json.dumps({"status": "completed", "payload": {"action": "revise_plan", "instruction": "Restrict to the six trials."}}))
-    result = choose(FakeModelClient([reply]), tmp_path)
-    assert result.status == "completed" and result.decision.action == "revise_plan"
-    assert result.decision.reason == "Restrict to the six trials." == result.decision.instruction
-    assert result.notes == ["the Coordinator gave no reason for revise_plan; its instruction stands as the reason"]
-    long = reply_text(json.dumps({"status": "completed", "payload": {"action": "revise_plan", "instruction": "z" * 900}}))
-    shortened = choose(FakeModelClient([long]), tmp_path)
-    assert shortened.status == "completed" and shortened.decision.reason == "z" * 599 + "…" and shortened.decision.instruction == "z" * 900
-    for action, fields in (("retrieve", {}), ("analyze", {"instruction": "Explain the caveat."}), ("revise_plan", {})):
-        bare = reply_text(json.dumps({"status": "completed", "payload": {"action": action, **fields}}))
-        assert choose(FakeModelClient([bare]), tmp_path, allowed=[action]).status == "blocked", action     # still no reason: blocked
-    # review 2026-10-21: an explicit reason is kept; only an ABSENT reason is filled, and only from a real instruction
+def payload_reply(payload):
+    return reply_text(json.dumps({"status": "completed", "payload": payload}))
+
+
+# Benchmark 2026-10-21 (Luna, item 3c): 3 of 12 supervisor replies were revise_plan replies with only one of reason and
+# instruction, and each blocked its run. Coach 2026-10-21 22:55 UTC: one retry that names the exact missing field; code never
+# fills the field, and a reply still missing it stays rejected (this replaces e8a1781, where an instruction stood in for a reason).
+@pytest.mark.parametrize("first, named, second", [
+    ({"action": "revise_plan", "reason": "Use a correlation tool."}, "it has no instruction.",
+     {"action": "revise_plan", "reason": "Use a correlation tool.", "instruction": "Plan a correlation of entry means."}),
+    ({"action": "revise_plan", "instruction": "Restrict to the six trials."}, "it has no reason.",
+     {"action": "revise_plan", "reason": "The question names six trials.", "instruction": "Restrict to the six trials."}),
+    ({"action": "revise_plan", "reason": "Narrow it.", "instruction": None}, "it has no instruction.",
+     {"action": "revise_plan", "reason": "Narrow it.", "instruction": "Keep study S1 only."}),
+    ({"action": "revise_plan", "reason": "   ", "instruction": "Narrow it."}, "it has no reason.",
+     {"action": "stop", "reason": "Nothing more can be done without a new question."}),       # the second reply may choose again
+    ({"action": "revise_plan"}, "it has no reason and no instruction.",
+     {"action": "revise_plan", "reason": "The scope is too wide.", "instruction": "Keep study S1 only."}),
+    ({"action": "clarify", "reason": "Two traits match."}, "it has no question.",
+     {"action": "clarify", "reason": "Two traits match.", "question": "Which trait: V1 or V2?"}),
+    ({"action": "clarify", "reason": "Two traits match.", "question": None}, "it has no question.",          # review: null and
+     {"action": "clarify", "reason": "Two traits match.", "question": "Which trait: V1 or V2?"}),            # blank are missing
+    ({"action": "clarify", "reason": "Two traits match.", "question": "   "}, "it has no question.",
+     {"action": "clarify", "reason": "Two traits match.", "question": "Which trait: V1 or V2?"}),
+    ({"action": "stop", "reason": ""}, "it has no reason.", {"action": "stop", "reason": "The data cannot answer this."}),
+])
+def test_a_decision_missing_a_required_field_is_asked_once_naming_the_field(tmp_path, first, named, second):
+    from agents.supervisor import missing_field_question
+
+    model, budget = FakeModelClient([payload_reply(first), payload_reply(second)]), Budget()
+    result = choose(model, tmp_path, budget=budget)
+    assert result.status == "completed" and len(model.requests) == 2 and budget.repairs == 1
+    assert result.decision == SupervisorDecision(**second) and result.notes == []        # the second reply as written: nothing filled
+    asked = model.requests[1]["messages"][-1]
+    assert asked["role"] == "user" and named in asked["content"]
+    assert asked["content"] == missing_field_question(first, ["retrieve", "clarify", "revise_plan", "stop"])
+    for text in (first.get(name) for name in ("reason", "question", "instruction")):
+        assert not (isinstance(text, str) and text.strip()) or text not in asked["content"]  # it names fields, never a value
+
+
+def test_a_reply_still_missing_the_field_after_the_one_retry_stays_rejected(tmp_path):
+    """Code never fills the field, and never asks a second time."""
+    for first, note in (({"action": "revise_plan", "reason": "Use a correlation tool."},
+                         "supervisor decision rejected at decision (value_error)"),
+                        ({"action": "revise_plan", "instruction": "Restrict to the six trials."},      # e8a1781 filled this one
+                         "supervisor decision rejected at reason (missing)")):
+        model, budget = FakeModelClient([payload_reply(first), payload_reply(first), decision_reply("revise_plan", instruction="I.")]), Budget()
+        result = choose(model, tmp_path, budget=budget)
+        assert result.status == "blocked" and result.decision is None and result.notes == [note]
+        assert len(model.requests) == 2 and budget.repairs == 1
     both = choose(FakeModelClient([decision_reply("revise_plan", reason="Keep my reason.", instruction="Narrow it.")]), tmp_path)
     assert both.status == "completed" and both.decision.reason == "Keep my reason." and both.notes == []
     for fields in ({"reason": None, "instruction": "Narrow it."}, {"reason": "", "instruction": "Narrow it."},
-                   {"reason": "   ", "instruction": "Narrow it."}, {"instruction": 7}, {"instruction": ["Narrow it."]},
-                   {"instruction": None}, {"instruction": "   "}):
-        odd = reply_text(json.dumps({"status": "completed", "payload": {"action": "revise_plan", **fields}}))
-        assert choose(FakeModelClient([odd]), tmp_path).status == "blocked", fields
+                   {"reason": "   ", "instruction": "Narrow it."}, {"instruction": None}, {"instruction": "   "}):
+        model = FakeModelClient([payload_reply({"action": "revise_plan", **fields})] * 2)
+        assert choose(model, tmp_path).status == "blocked" and len(model.requests) == 2, fields
+    # review: no reason for any action is filled either (a code constant would pass a bare retrieve) ...
+    for first, allowed in (({"action": "retrieve"}, ["retrieve"]), ({"action": "analyze"}, ["analyze"]), ({"action": "finish"}, ["finish"]),
+                           ({"action": "stop"}, ["stop"]), ({"action": "clarify", "question": "Which trait?"}, ["clarify"])):
+        model = FakeModelClient([payload_reply(first)] * 2)
+        assert choose(model, tmp_path, allowed=allowed).status == "blocked" and len(model.requests) == 2, first
+    # ... and the second reply never borrows the field the first reply had
+    for first, second in (({"action": "revise_plan", "reason": "R1."}, {"action": "revise_plan", "instruction": "I2."}),
+                          ({"action": "revise_plan", "instruction": "I1."}, {"action": "revise_plan", "reason": "R2."}),
+                          ({"action": "clarify", "reason": "R1."}, {"action": "clarify", "question": "Q2?"})):
+        model = FakeModelClient([payload_reply(first), payload_reply(second)])
+        result = choose(model, tmp_path)
+        assert result.status == "blocked" and result.decision is None and len(model.requests) == 2, (first, second)
+
+
+def test_no_retry_once_the_time_limit_has_passed(tmp_path):
+    """Review 2026-10-21: the run's elapsed-time limit also stops the retry (llm.run_agent_loop checks it before asking)."""
+    now = [0.0]
+
+    class Slow(FakeModelClient):
+        async def complete(self, messages, tools, *, max_tokens):
+            reply = await super().complete(messages, tools, max_tokens=max_tokens)
+            now[0] += 400.0                                                    # the first call took 400 s of a 300 s limit
+            return reply
+
+    model = Slow([payload_reply({"action": "revise_plan", "reason": "R1."}), decision_reply("revise_plan", instruction="I.")])
+    result = choose(model, tmp_path, budget=Budget(max_elapsed_seconds=300.0), clock=lambda: now[0])
+    assert result.status == "blocked" and result.decision is None and len(model.requests) == 1
+
+
+@pytest.mark.parametrize("first, allowed, budget", [
+    ({"action": "revise_plan", "reason": "R.", "instruction": "y" * 1001}, None, None),      # over-long: rejected, not missing
+    ({"action": "revise_plan", "reason": "R.", "instruction": 7}, None, None),               # the wrong type is not missing
+    ({"action": "revise_plan", "reason": "R.", "instruction": ["Narrow it."]}, None, None),
+    ({"action": "retrieve", "reason": "R.", "question": "Which trait?"}, None, None),        # a field the action may not have
+    ({"action": "analyze", "reason": "R.", "instruction": ""}, ["analyze"], None),            # analyze's instruction is optional
+    ({"action": ["revise_plan"], "reason": "R."}, None, None),                               # not an action name
+    ({"reason": "R."}, None, None),                                                          # no action: nothing to complete
+    ({"action": "revise_plan", "reason": "R."}, ["retrieve", "stop"], None),                 # the action is not allowed anyway
+    ({"action": "revise_plan", "reason": "R."}, None, Budget(max_repairs=0)),               # no repair left in the shared pool
+    ({"action": "revise_plan", "reason": "R."}, None, Budget(max_model_calls=1)),           # no model call left
+])
+def test_no_retry_for_other_rejections_or_without_a_repair_or_call_left(tmp_path, first, allowed, budget):
+    model = FakeModelClient([payload_reply(first), decision_reply("revise_plan", instruction="Narrow it.")])
+    result = choose(model, tmp_path, allowed=allowed, budget=budget)
+    assert result.status == "blocked" and result.decision is None and len(model.requests) == 1
 
 
 @pytest.mark.parametrize("field, size", [("question", 601), ("instruction", 1001)])

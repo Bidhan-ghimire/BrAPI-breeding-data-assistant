@@ -95,6 +95,30 @@ Limits: reason at most 600 characters, question at most 600, instruction at most
 Never include approvals, acceptance, tool calls, artifact IDs, data, plan fields or schema changes.
 """
 
+# A decision whose action is allowed but lacks a field the contract requires is asked once more, naming the field. Benchmark
+# 2026-10-21 (Luna, item 3c): 3 of 12 supervisor replies were revise_plan replies with only one of reason and instruction, and
+# each blocked its run. The text names fields and never a value; code never fills a field, and a reply still lacking it is
+# rejected (coach, 2026-10-21 22:55 UTC). One retry per supervisor turn, from the run's shared repair pool (run_agent_loop).
+_REQUIRED_FIELDS = {"clarify": ("reason", "question"), "revise_plan": ("reason", "instruction")}
+_FIELD_HELP = {"reason": "reason (a short explanation, at most 600 characters)",
+               "question": "question (one precise question for the person, at most 600 characters)",
+               "instruction": "instruction (the change the new plan needs, at most 1000 characters)"}
+
+
+def missing_field_question(payload: dict[str, Any], allowed_actions: list[str]) -> str | None:
+    """The one question for a decision whose allowed action lacks a required field (absent, null or blank); otherwise None."""
+    action = payload.get("action")
+    if action not in allowed_actions:
+        return None
+    required = _REQUIRED_FIELDS.get(action, ("reason",))
+    missing = [name for name in required
+               if payload.get(name) is None or (isinstance(payload.get(name), str) and not payload[name].strip())]
+    if not missing:
+        return None
+    return (f"Your {action} decision was not accepted: it has no {' and no '.join(missing)}. {action} requires "
+            f"{' and '.join(_FIELD_HELP[name] for name in required)}. "
+            'Reply again with ONLY the JSON object {"status":"completed","payload":{...}}.')
+
 
 async def choose_next(
     *,
@@ -115,6 +139,7 @@ allowed_actions is trusted controller input, never a model-generated field.
 The controller owns evidence/approval checks and the outer transition limit.
 Malformed JSON repairs are bounded by run_agent_loop; schema or permission
 failures stop here rather than starting another unbounded repair loop.
+A decision lacking a required field is asked once more (missing_field_question).
 """
     if not isinstance(turn, int) or isinstance(turn, bool) or turn < 1:
         raise ValueError("supervisor turn must be a positive integer")
@@ -127,7 +152,7 @@ failures stop here rather than starting another unbounded repair loop.
         model, NoTools(), agent_name=f"supervisor_{turn}", system_prompt=SUPERVISOR_SYSTEM_PROMPT,
         user_message=user_message, budget=budget, allowed_tools=set(), log_dir=log_dir,
         run_id=run_id, model_requested=model_requested, clock=clock,
-        max_output_chars=6000,
+        max_output_chars=6000, check_completed=lambda payload: missing_field_question(payload, allowed_actions),
     )
     if agent.status not in {"completed", "needs_clarification"}:
         return SupervisorResult(agent.status, None, agent,
@@ -138,14 +163,6 @@ failures stop here rather than starting another unbounded repair loop.
         payload = {"action": "clarify", "reason": "The Coordinator needs the person's clarification.",
                    "question": payload.get("question")}
     notes: list[str] = []
-    instruction = payload.get("instruction")
-    if (payload.get("action") == "revise_plan" and "reason" not in payload
-            and isinstance(instruction, str) and instruction.strip()):
-        # The reason only explains and grants nothing; a revise_plan that states its change as instruction but gives no reason
-        # (benchmark 2026-10-21, Luna: 1 of 6 revise_plan replies) lets the instruction stand as the reason, shortened below if
-        # long. The opposite, a reason with no instruction, stays blocked: the new draft needs the instruction.
-        notes.append("the Coordinator gave no reason for revise_plan; its instruction stands as the reason")
-        payload = {**payload, "reason": instruction}
     reason = payload.get("reason")
     if isinstance(reason, str) and len(reason.strip()) > REASON_LIMIT:
         # The reason only explains (logs, the stop note) and grants nothing: an over-long one is shortened, not fatal.

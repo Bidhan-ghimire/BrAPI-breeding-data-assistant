@@ -44,7 +44,7 @@ What is here:
   may return one message; the loop keeps that final in the conversation, adds the
   message as a user turn and asks again, at most once per loop. With no repair, model
   call or tool call left, the final ends the loop as before. The Analyst uses it when
-  no tool made a claim.
+  no tool made a claim; the Coordinator's supervisor when a decision lacks a required field.
   One reply may use DEFAULT_MAX_TOKENS tokens, thinking included; more room
   does not change the rule that a reply which is still cut off is no answer.
 * compact_tool_result — the summary a tool result becomes for the model: always
