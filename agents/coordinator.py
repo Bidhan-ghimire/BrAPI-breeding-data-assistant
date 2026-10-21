@@ -52,6 +52,7 @@ from contracts import (
     StudyFilters,
 )
 from llm import Budget, ModelClient, run_agent_loop
+from plan_permissions import fetch_manifest
 
 __all__ = [
     "KnownStudy", "KnownVariable", "KnownMetadata", "Candidates", "find_candidates", "PlanDraft", "CoordinatorResult",
@@ -397,8 +398,12 @@ Rules:
      FILTERED variables table — one call states the count and every counted variable.
    - which locations have the most studies: count_records(group_by="locationDbId") over the complete studies table; the
      controller ranks, the plan does not pick a top few.
-   - how many clones / plots per clone / independent units: get_observations AND get_observation_units, then
-     group_stats(by="germplasmDbId", min_independent_n=1, top_n=1000) — count_records counts rows, never plots.
+   - how many clones / plots per clone / independent units of a MEASURED trait: get_observations AND get_observation_units, then
+     group_stats(by="germplasmDbId", min_independent_n=1, top_n=1000) — on a measurements table count_records counts rows, never plots.
+   - how many plots or entries a study has, when the question names NO trait: get_observation_units alone (the plot list: one row
+     per observation unit, its level in levelName), then count_records() for the number of plots and
+     count_records(group_by="germplasmDbId", distinct_by="germplasmDbId") for the entries and the plots of each;
+     get_observations needs a trait in scope.variable_ids.
    - narrowing a table: filter_rows(column="studyType", op="eq", value="Advanced Yield Trial"); op is one of eq, ne, contains,
      gt, ge, lt, le, is_missing, is_valid_number. A catalog table comes from export_metadata(entity="variables"); entity is one
      of studies, variables, locations, programs, seasons.
@@ -487,6 +492,7 @@ def assemble_plan(question: str, draft: PlanDraft, metadata: KnownMetadata | Non
     cands = find_candidates(question, metadata)
     scope = draft.scope
     study_ids = list(scope.study_ids)                                  # may be filled by code below; the model never widens it
+    filled_from_filters = False                                        # True once code fills study_ids for an all-studies question
 
     if metadata is None:
         if not scope.discovery_needed:
@@ -520,6 +526,7 @@ def assemble_plan(question: str, draft: PlanDraft, metadata: KnownMetadata | Non
                                 "leave study_ids empty with all_known_studies=false and plan export_metadata steps")
             else:
                 study_ids = sorted(s.study_id for s in metadata.studies if _study_matches(s, scope))
+                filled_from_filters = True
                 notes.append(f"scope.study_ids set by code to the {len(study_ids)} of {len(known_studies)} known studies that match the plan's "
                              "filters, because the question is about all studies; on a live server this list can be long, and every fetch still "
                              "needs the approval screen and stays under the fetch ceiling")
@@ -539,14 +546,16 @@ def assemble_plan(question: str, draft: PlanDraft, metadata: KnownMetadata | Non
     if bad_families:
         problems.append(f"discovery may use metadata families only, not {bad_families}")
 
-    in_scope_ids = set(study_ids) | set(scope.variable_ids)
+    # a study input must be a study of the scope and a variable input a variable of it (review 2026-10-21: a variable ID given as
+    # study_db_id passed a check on the union of both, and the fetch list then held no study)
+    in_scope_ids = {"study_db_id": set(study_ids), "variable_db_id": set(scope.variable_ids)}
     for step in draft.steps:
         allowed = RETRIEVER_ACTIONS if step.agent == "retriever" else ANALYST_ACTIONS
         if step.action not in allowed:
             problems.append(f"{step.step_id}: {step.action!r} is not a {step.agent} action")
         for key in ("study_db_id", "variable_db_id"):
             value = step.inputs.get(key)
-            if isinstance(value, str) and value not in in_scope_ids:
+            if isinstance(value, str) and value not in in_scope_ids[key]:
                 hint = (" - for a question about several studies leave study_db_id out: the controller gives the retriever the resolved "
                         "study list" if key == "study_db_id" and scope.all_known_studies else "")
                 problems.append(f"{step.step_id}: input {key}={value!r} is outside the plan's scope{hint}")
@@ -597,9 +606,48 @@ def assemble_plan(question: str, draft: PlanDraft, metadata: KnownMetadata | Non
                     scope=resolved, statistic=draft.statistic, steps=steps, created_at_utc=now)
     except ValidationError as exc:
         return None, [f"plan contract rejected the draft at {_explain_rejection(exc)}"], notes
+    if status == "ready":
+        # A ready plan goes on to the fetch list a person approves (plan_permissions.fetch_manifest, the same builder the controller
+        # uses). If that list cannot hold it, the plan goes back to the planner now, with a reason it can act on; at resolve it was an
+        # "unexpected error" (benchmark baseline 2026-10-21: 23 sub-questions). A plan still waiting for an answer is not checked: the
+        # person's answer comes first (review 2026-10-21).
+        try:
+            fetch_manifest(plan, run_id="plan_check", base_url=base_url, max_http_attempts=1)
+        except ValueError as exc:                                     # pydantic's ValidationError is a ValueError too
+            applied = {k: v for k, v in scope.filters.items() if v and k in _MATCHED_FILTERS}      # what _study_matches reads
+            narrowing = {key: value for key, value in (("filters", applied), ("location_ids", list(scope.location_ids)),
+                                                       ("season_ids", list(scope.season_ids))) if value}
+            return None, [_unfetchable(plan, exc, filled_from_filters=filled_from_filters, known=len(metadata.studies) if metadata else 0,
+                                       narrowing=narrowing)], notes
     if matching is not None:
         notes.append(f"matching_study_count={matching} was counted by code from the scope, not taken from the model")
     return plan, [], notes
+
+
+def _unfetchable(plan: Plan, exc: ValueError, *, filled_from_filters: bool, known: int, narrowing: dict[str, Any]) -> str:
+    """Why the fetch list cannot hold this ready plan, in words the planner can act on. narrowing: every scope input that
+    _study_matches applies (filters, location_ids, season_ids), so 'matches none' names all of them (review 2026-10-21)."""
+    data = [s for s in plan.steps if s.agent == "retriever" and s.action in ("get_observations", "get_observation_units")]
+    measurements = [s for s in data if s.action == "get_observations"]
+    if not isinstance(exc, ValidationError):                         # endpoint_families_for_plan: an export without a known entity
+        return f"{exc}; export_metadata takes entity = one of studies, variables, locations, programs, seasons"
+    if data and not plan.scope.study_ids:
+        described = ", ".join(f"{key} {value}" for key, value in narrowing.items()) or "no filter"
+        why = (f"the plan's narrowing ({described}) matches none of the {known} known studies" if filled_from_filters
+               else "the plan names no study (a question about all studies sets all_known_studies, narrowed by its filters)")
+        return (f"{data[0].step_id}: {data[0].action} fetches plot data of exact studies, but {why}. Name the studies the question "
+                "gives, by ID or exact name, or ask which studies are meant")
+    if measurements and not plan.scope.variable_ids:
+        return (f"{measurements[0].step_id}: get_observations fetches the measurements of exact traits, but scope.variable_ids is empty. "
+                "If the question names a trait, put it in scope.variable_ids. If it asks only how many plots or entries a study has, "
+                "plan get_observation_units alone, then count_records on that plot list (rule 7). If it needs a trait it does not "
+                "name, ask which trait is meant")
+    return f"the fetch list cannot hold this plan: {_explain_rejection(exc)}"
+
+
+# The filter keys _study_matches applies; location_name and season_name are valid filters but narrow nothing here, so a "matches
+# none" reason never names them (review 3 of 2026-10-21).
+_MATCHED_FILTERS = ("program_id", "location_id", "season_id", "study_type", "name_contains")
 
 
 def _study_matches(study: KnownStudy, scope: "DraftScope") -> bool:

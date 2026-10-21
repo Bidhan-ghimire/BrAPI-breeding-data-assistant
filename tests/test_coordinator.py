@@ -181,6 +181,101 @@ def test_steps_are_checked_against_scope_and_agent_menus(tmp_path, metadata):
     assert "outside the plan's scope" in notes and "is not a analyst action" in notes and "plan contract rejected" in notes
 
 
+# Benchmark baseline 2026-10-21: 23 of 149 failing sub-questions crashed at resolve ("unexpected error ... FetchManifest"):
+# the plan asked for measurements with no trait, or for plot data with no study. The plan check now builds the same fetch list
+# (plan_permissions.fetch_manifest) for a READY plan and sends one it cannot hold back to the planner.
+PLOTS_Q = "How many plots does synthetic study S1 have, and how many for each clone?"
+ROSTER = {"step_id": "step_2", "agent": "retriever", "action": "get_observation_units", "inputs": {"study_db_id": "S1"}}
+COUNT_PLOTS = {"kind": "count", "denominator": "plots in the plot list", "grouping": ["germplasmDbId"]}
+PER_CLONE = {"step_id": "step_3", "agent": "analyst", "action": "count_records", "inputs": {"group_by": "germplasmDbId"}}
+
+
+def test_measurements_without_a_trait_are_sent_back_with_what_to_plan_instead(tmp_path, metadata):
+    """A plot question planned as get_observations with no trait: the fetch list holds measurements only of exact traits.
+    The planner is told what it can do instead (the plot list alone; the trait the question names; or ask) and re-plans.
+    The reason promises no replicate or block column: the plot list has none (review 2026-10-21)."""
+    no_trait = draft(scope={"study_ids": ["S1"], "variable_ids": []}, statistic=COUNT_PLOTS,
+                     steps=[{"step_id": "step_1", "agent": "retriever", "action": "get_observations", "inputs": {"study_db_id": "S1"}}, ROSTER,
+                            {**PER_CLONE, "depends_on": ["step_1", "step_2"]}])
+    roster_only = draft(scope={"study_ids": ["S1"], "variable_ids": []}, statistic=COUNT_PLOTS, steps=[ROSTER, {**PER_CLONE, "depends_on": ["step_2"]}])
+    model = fake(completed(no_trait), completed(roster_only))
+    result = plan_with(tmp_path, PLOTS_Q, model, metadata)
+    assert result.status == "completed" and result.attempts == 2 and result.plan.status == "ready"
+    assert [s.action for s in result.plan.steps] == ["get_observation_units", "count_records"]
+    told = model.requests[1]["messages"][-1]["content"]
+    assert "step_1: get_observations fetches the measurements of exact traits, but scope.variable_ids is empty" in told
+    assert "plan get_observation_units alone, then count_records on that plot list (rule 7)" in told and "ask which trait is meant" in told
+    assert "replicate" not in told and "block" not in told
+    assert "get_observation_units alone" in co.COORDINATOR_SYSTEM_PROMPT        # rule 7 says the same (review 2 of 2026-10-21)
+    # review 3: count_records with group_by states plots per clone and the clone count, never the plot total; the recipe asks for both
+    assert "then count_records() for the number of plots and" in co.COORDINATOR_SYSTEM_PROMPT
+
+
+def test_a_plan_waiting_for_the_persons_answer_is_not_refused_for_its_fetch_list(tmp_path, metadata):
+    """Review 2026-10-21: a measurements plan with no trait that ASKS which trait is meant never reaches the fetch list (the
+    person answers first, then the plan is made again). Refusing it turned an honest question into a failed run."""
+    question = "What is the mean starch content in synthetic study S1?"
+    asking = draft(scope={"study_ids": ["S1"], "variable_ids": []},
+                   clarifications=[{"question": "Which variable is starch content?", "required": True}],
+                   steps=[{"step_id": "step_1", "agent": "retriever", "action": "get_observations", "inputs": {"study_db_id": "S1"}},
+                          {"step_id": "step_2", "agent": "analyst", "action": "numeric_summary", "depends_on": ["step_1"]}])
+    result = plan_with(tmp_path, question, fake(completed(asking)), metadata)
+    assert result.status == "needs_clarification" and result.attempts == 1 and result.plan.status == "needs_clarification"
+    assert result.questions and not any("fetches the measurements" in n for n in result.notes)
+
+
+def test_plot_data_with_no_study_is_sent_back_and_a_question_is_the_way_out(tmp_path, metadata):
+    """'All studies in folder X': the folder's name matched no study name, so the measurements step had no study at all."""
+    question = "Across all studies of the folder 'Genetic Gain 2016-19', how many V1 values are there?"
+    none_match = draft(scope={"study_ids": [], "all_known_studies": True, "variable_ids": ["V1"], "filters": {"name_contains": "Genetic Gain"}},
+                       statistic={"kind": "count", "denominator": "valid values", "grouping": []},
+                       steps=[{"step_id": "step_1", "agent": "retriever", "action": "get_observations", "inputs": {"variable_db_id": "V1"}},
+                              {"step_id": "step_2", "agent": "analyst", "action": "count_records", "depends_on": ["step_1"]}])
+    model = fake(completed(none_match), clarify("No known study name contains 'Genetic Gain'. Which studies does that folder hold?"))
+    result = plan_with(tmp_path, question, model, metadata)
+    assert result.status == "needs_clarification" and result.attempts == 2 and "Genetic Gain" in result.questions[0]
+    told = model.requests[1]["messages"][-1]["content"]
+    assert "step_1: get_observations fetches plot data of exact studies" in told and "matches none of the 1 known studies" in told
+    assert "(filters {'name_contains': 'Genetic Gain'})" in told                         # the narrowing that matched nothing is named
+
+
+def test_no_match_is_said_only_when_code_looked_for_matching_studies(tmp_path, metadata):
+    """Review 2026-10-21: when another rule refuses the all-studies switch (here: the question names S1), code never looked
+    for matching studies, so 'the filters match none' would be false. Only that rule's reason goes back."""
+    switched = draft(scope={"study_ids": [], "all_known_studies": True, "variable_ids": ["V1"]},
+                     steps=[{"step_id": "step_1", "agent": "retriever", "action": "get_observations", "inputs": {"variable_db_id": "V1"}},
+                            {"step_id": "step_2", "agent": "analyst", "action": "numeric_summary", "depends_on": ["step_1"]}])
+    result = plan_with(tmp_path, Q_AB, fake(completed(switched), completed(draft())), metadata)
+    assert result.status == "completed" and result.attempts == 2
+    assert any("all_known_studies must be false when a study is named" in n for n in result.notes)
+    assert not any("match none" in n or "names no study" in n for n in result.notes)
+
+
+def test_a_variable_given_as_a_study_input_is_outside_the_scope(tmp_path, metadata):
+    """Review 2026-10-21: the scope check accepted any ID of the scope for either input, so get_observation_units(study_db_id="V1")
+    passed and its fetch list held no study. A study input must be a study of the scope, a variable input a variable of it."""
+    crossed = draft(steps=[{"step_id": "step_1", "agent": "retriever", "action": "get_observations", "inputs": {"study_db_id": "S1", "variable_db_id": "V1"}},
+                           {"step_id": "step_2", "agent": "retriever", "action": "get_observation_units", "inputs": {"study_db_id": "V1"}},
+                           {"step_id": "step_3", "agent": "analyst", "action": "group_stats", "inputs": {"by": "germplasmDbId"}, "depends_on": ["step_1", "step_2"]}])
+    result = plan_with(tmp_path, Q_AB, fake(completed(crossed), completed(draft())), metadata)
+    assert result.status == "completed" and result.attempts == 2
+    assert any("step_2: input study_db_id='V1' is outside the plan's scope" in n for n in result.notes)
+
+
+def test_an_export_without_a_known_entity_is_sent_back(tmp_path, metadata):
+    """An export_metadata step whose entity is missing failed at resolve too (endpoint_families_for_plan); now it goes back."""
+    question = "How many studies are there per location?"
+    no_entity = draft(interpretation="count studies per location", scope={"study_ids": [], "all_known_studies": True, "variable_ids": []},
+                      statistic={"kind": "count", "denominator": "rows in the complete studies table", "grouping": ["locationDbId"]},
+                      steps=[{"step_id": "step_1", "agent": "retriever", "action": "export_metadata", "inputs": {}},
+                             {"step_id": "step_2", "agent": "analyst", "action": "count_records", "inputs": {"group_by": "locationDbId"}, "depends_on": ["step_1"]}])
+    fixed = draft(**{**no_entity, "steps": [{**no_entity["steps"][0], "inputs": {"entity": "studies"}}, no_entity["steps"][1]]})
+    model = fake(completed(no_entity), completed(fixed))
+    result = plan_with(tmp_path, question, model, metadata)
+    assert result.status == "completed" and result.attempts == 2
+    assert "export_metadata takes entity = one of studies, variables, locations, programs, seasons" in model.requests[1]["messages"][-1]["content"]
+
+
 # --- 3. clarifications: only the needed ones -------------------------------------------------------
 
 def test_irrelevant_clarification_for_a_uniquely_named_study_is_dropped(tmp_path, metadata):

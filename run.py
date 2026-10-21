@@ -54,7 +54,7 @@ from access_policy import ACCESS_NOTES_PATH, access_notes_review_date
 from llm import REPEAT_ENDED, Budget, ModelClient, compact_tool_result, run_agent_loop
 from mcp_bridge import BridgeError, McpTools
 from artifacts import ArtifactError
-from plan_permissions import endpoint_families_for_plan
+from plan_permissions import fetch_manifest, required_fetches
 from retrieval_review import review_snapshot, verify_reviewed_tables
 from metadata_answers import metadata_only_plan, materialize_metadata, analyze_metadata, render_metadata_facts
 from catalog_answers import catalog_count_plan, capture_catalog_sources, run_catalog_plan_async
@@ -376,21 +376,8 @@ def scope_needs_a_check(question: str, scope_ids: list[str], metadata: KnownMeta
 # Approval helpers (controller code only)
 # --------------------------------------------------------------------------
 
-def required_fetches(plan: Plan, manifest: FetchManifest | None = None) -> tuple[set[tuple[str, str]], set[str]]:
-    """Required observation coverage is the full scope, even if a model omitted a step for one pair.
-
-    A manifest is authoritative after approval. Unit rosters are required only when the plan uses them.
-    This is a minimum call estimate, not a promise about additional metadata calls or pagination."""
-    studies = set(manifest.observation_study_ids if manifest is not None else plan.scope.study_ids)
-    variables = set(manifest.observation_variable_ids if manifest is not None else plan.scope.variable_ids)
-    observation_plan = any(s.agent == "retriever" and s.action == "get_observations" for s in plan.steps)
-    pairs = {(study, variable) for study in studies for variable in variables} if observation_plan else set()
-    units: set[str] = set()
-    for step in plan.steps:
-        if step.agent == "retriever" and step.action == "get_observation_units":
-            explicit = step.inputs.get("study_db_id")
-            units.update(({explicit} & studies) if isinstance(explicit, str) else studies)
-    return pairs, units
+# required_fetches lives in plan_permissions (imported above), next to the fetch list it counts: the plan check builds the
+# same fetch list (2026-10-21).
 
 
 _PLAIN_FAMILIES = {"serverinfo": "server details", "commoncropnames": "crop names", "studies": "studies",
@@ -1010,14 +997,8 @@ class Controller:
 
     def resolve_manifest(self, study_ids: list[str] | None = None) -> FetchManifest:
         assert self.plan is not None
-        studies = list(self.plan.scope.study_ids if study_ids is None else study_ids)
-        variables = list(self.plan.scope.variable_ids)
-        families = endpoint_families_for_plan(self.plan)
-        pairs, units = required_fetches(self.plan)
-        return FetchManifest(run_id=self.run_id, base_url=self._server(), origin="live",
-                             endpoint_families=families,   # type: ignore[arg-type]
-                             observation_study_ids=studies if (pairs or units) else [], observation_variable_ids=variables if pairs else [],
-                             max_http_attempts=self.config.max_http_attempts, max_observation_studies=len(studies) if (pairs or units) else 0)
+        return fetch_manifest(self.plan, run_id=self.run_id, base_url=self._server(), max_http_attempts=self.config.max_http_attempts,
+                              study_ids=study_ids)
 
     def approval_screen(self) -> str:
         assert self.plan is not None and self.manifest is not None
