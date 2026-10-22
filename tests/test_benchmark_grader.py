@@ -426,3 +426,81 @@ def test_an_endless_number_backs_nothing(tmp_path):
     g = bench.grade(sub(), shown=shown, status="run ended", claims=[], backed_extra=backed)
     assert g["bucket"] == "invented" and sorted(i["value"] for i in g["invented"]) == [3.7, 12.5]
     assert not bench._backed(12.5, 1, [math.inf]) and bench._backed(12.5, 1, [math.inf, 12.5])
+
+
+@pytest.mark.parametrize("spelling", ["agent error", "coordinator: agent error", "supervisor: supervisor error"])
+def test_an_agent_error_that_quotes_the_model_backs_nothing_in_any_spelling(tmp_path, spelling):
+    """Review 2026-10-22 (round 2, R1; coach 02:50 UTC, round 3 (a)): a refusal, a malformed tool call and an unreadable final
+    reply quote the model's own text (llm.py add_error). The retriever and the analyst write them as "agent error ...", the
+    planner's arrive as "coordinator: agent error ..." and the supervisor's as "supervisor: supervisor error ...". A budget,
+    size or timeout error is the code's own and still backs its numbers (the saved A42.1 shows "fetch budget (5)")."""
+    model_lines = [f"{spelling} model_refusal: I will not report study 99991",
+                   f"{spelling} malformed_arguments: '99992': unknown tool '99992'; repair budget used up",
+                   f"{spelling} invalid_json: final reply has unknown status '99993'"]
+    code_lines = [f"{spelling} budget_exhausted: stopped before a model call: model calls (12) budget used up",
+                  f"{spelling} budget_exhausted: fetch budget (5) reached at 'get_observations'",
+                  f"{spelling} oversized_output: model produced 7000 characters; limit 6000",      # review of round 3: M1
+                  f"{spelling} tool_timeout: the tool call took longer than 30 seconds"]
+    run = _with_report_lines(_run_dir(tmp_path, []), warnings=model_lines + code_lines, caveats=model_lines,
+                             notes=model_lines + code_lines)
+    backed = bench.run_numbers([run])
+    assert sorted(set(backed)) == [5.0, 12.0, 30.0, 6000.0, 7000.0]
+    shown = "**Question blocked.**\n\nStudies 99991, 99992 and 99993 were named by the model."
+    g = bench.grade(sub(), shown=shown, status="run ended", claims=[], backed_extra=backed)
+    assert g["bucket"] == "invented" and sorted(i["value"] for i in g["invented"]) == [99991, 99992, 99993]
+
+
+# A saved planner note (benchmark_20261021T191237Z/run_20261021T191737_b08b40, one of 9 such lines): the draft's filters,
+# locations and seasons are quoted, the attempt number and the 2039 known studies are the code's own.
+SAVED_UNFETCHABLE = ("coordinator: attempt 1 rejected: step_2: get_observations fetches plot data of exact studies, but the plan's "
+                     "narrowing (filters {'name_contains': '2016-19 Genetic Gain'}, location_ids ['116', '29', '30', '81'], "
+                     "season_ids ['2016', '2017', '2018', '2019']) matches none of the 2039 known studies. Name the studies the "
+                     "question gives, by ID or exact name, or ask which studies are meant")
+
+
+def test_an_apostrophe_inside_a_quoted_note_does_not_stop_the_blanking(tmp_path):
+    """Review 2026-10-22 (round 2, R2; coach 02:50 UTC, round 3 (b)): the apostrophe in "the plan's narrowing" opened a quote
+    that paired with the draft's own quotes, so nothing was blanked and the draft's 116, 29, 30, 81 and 2016-2019 backed. An
+    apostrophe inside a question in double quotes must not stop the blanking either."""
+    run = _with_report_lines(_run_dir(tmp_path, []), notes=[
+        SAVED_UNFETCHABLE,
+        "coordinator: dropped clarification \"Which study's yield in 2099?\": study 4610 is uniquely named and its metadata "
+        "supplies location and season"],
+        caveats=["count_records: rows matching studyDbId eq '4612' in the complete studies table"])  # not a draft line: kept whole
+    assert sorted(set(bench.run_numbers([run]))) == [1.0, 2039.0, 4610.0, 4612.0]
+
+
+def test_each_quote_guard_holds_on_its_own(tmp_path):
+    """Review of round 3 (2026-10-22): on every real writer shape the two guards cover each other, so dropping one alone stayed
+    green. Two SYNTHETIC shapes need each: "(plan)'s" has no word before its apostrophe, so only the closing guard stops it
+    pairing with the draft's quote; a quoted value starting with a sign ('-5') lets the pairing close, so only the opening
+    guard stops it."""
+    run = _with_report_lines(_run_dir(tmp_path, []), notes=[
+        "coordinator: attempt 1 rejected: the (plan)'s narrowing (location_ids ['116']) matches none of the 2039 known studies",
+        "coordinator: attempt 2 rejected: the plan's narrowing (location_ids ['-5', '117']) matches none of the 2039 known studies"])
+    assert sorted(set(bench.run_numbers([run]))) == [1.0, 2.0, 2039.0]
+
+
+def test_a_long_run_of_escaped_quotes_is_read_in_linear_time(tmp_path):
+    """Review of round 3 (2026-10-22): with no guard before the double quote, 80 KB of \\" with no closing quote took 12 s."""
+    import time
+
+    run = _with_report_lines(_run_dir(tmp_path, []), notes=["coordinator: attempt 1 rejected: " + '\\"' * 40_000])
+    start = time.perf_counter()
+    assert bench.run_numbers([run]) == [1.0]
+    assert time.perf_counter() - start < 2.0
+
+
+def test_a_note_with_both_quote_kinds_is_blanked_whole(tmp_path):
+    """Review 2026-10-22 (round 2, R2; coach 02:50 UTC, round 3 (b)): the planner's question is written by repr, and a
+    question with both quote kinds comes out with an escaped apostrophe ('... the "S1" study\\'s team ...'). The escaped
+    apostrophe closed the quote early, so the question's 2099 and 2098 backed. An escaped quote before a space or a comma
+    must not close it either."""
+    notes = []
+    for question in ('Which season did the "S1" study\'s team use in 2099 or 2098?',
+                     'Did the \'S1\' clones, the "early" set, flower in 2097?'):
+        notes.append(f"coordinator: dropped clarification {question!r}: study 4610 is uniquely named and its metadata supplies "
+                     "location and season")                                  # as agents/coordinator.py writes it
+        assert "\\'" in notes[-1] and '"' in notes[-1]
+    run = _with_report_lines(_run_dir(tmp_path, []), notes=notes)
+    assert bench.run_numbers([run]) == [4610.0, 4610.0]

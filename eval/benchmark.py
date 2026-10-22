@@ -62,15 +62,24 @@ MODEL_REPLY_STATUS = "no run: the app answered without starting one"
 # agents' questions, with any answer to them (run.py's clarification notes; the harness never answers); the supervisor's stop
 # reason. They back no number: an ID on the run's record only because the model named it is an invented ID's path (coach,
 # 2026-10-21 20:50 UTC, answer 2; review 2026-10-22).
+# An agent error quotes the model when it reports the model's refusal, its malformed tool call or its unreadable final reply
+# (llm.py add_error). The retriever and the analyst write it as "agent error ...", the planner's arrives as "coordinator: agent
+# error ..." and the supervisor's as "supervisor: supervisor error ..." (review 2026-10-22, round 2, R1). A budget or provider
+# error is the code's own and still backs its numbers.
+_MODEL_ERRORS = tuple(f"{spelling} {code}" for spelling in ("agent error", "coordinator: agent error", "supervisor: supervisor error")
+                      for code in ("model_refusal", "malformed_arguments", "invalid_json"))
 _MODEL_QUOTED = ("model:", "model note:", "model declared ids", "model listed resolved entries", "model named claim ids",
                  "studies named by the model", "clarification ", "retriever clarification ", "analyst clarification ",
-                 "agent error malformed_arguments", "coordinator stopped the run:")
+                 *_MODEL_ERRORS, "coordinator stopped the run:")
 # Coordinator notes that code writes about the planner's draft: a rejected attempt ("coordinator: attempt 2 rejected: ... at most
 # 12 items ..., not 14") and a dropped clarification. The draft's own IDs, names and questions sit in quotes or brackets
 # ("scope.study_ids names IDs that are not in the validated metadata: ['99991']", "dropped clarification 'Which 5 studies?'"):
 # those are blanked, the code's own numbers stay (review 2026-10-22).
 _DRAFT_LINES = ("coordinator: attempt", "coordinator: dropped clarification")
-_QUOTED_PART = re.compile(r"'[^']*'|\"[^\"]*\"|\{[^}]*\}|\[[^\]]*\]")
+# A single quote opens a quoted part only where no word runs into it ("the plan's narrowing" holds none), and an escaped quote
+# does not close it: repr writes a question with both quote kinds as '... the "S1" study\'s ...' (review 2026-10-22, round 2, R2).
+# An escaped quote never opens one either, so a long run of them is read once, not once per quote (review of round 3).
+_QUOTED_PART = re.compile(r"(?<![\w\\])'(?:\\.|[^'\\])*'(?!\w)|(?<!\\)\"(?:\\.|[^\"\\])*\"|\{[^}]*\}|\[[^\]]*\]")
 # Runs whose answer is written by code from the saved catalog, not from claims about measurements: a list run.
 CATALOG_ACTIONS = ("list_catalog_names", "count_catalog_rows")
 
