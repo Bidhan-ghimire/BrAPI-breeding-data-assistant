@@ -444,8 +444,26 @@ class ThresholdCountArgs(ToolArgs):
         return self
 
 
+class CorrelateEntryMeansArgs(ToolArgs):
+    artifact_ids: list[ArtifactId] = Field(min_length=2, max_length=2,
+                                           description="the two measurement tables whose entry means are correlated: one trait in two studies, or two "
+                                                       "traits of the same studies (the order does not matter)")
+    by: str = Field(default="germplasmDbId", description="the entry ID column both tables share (names are carried as labels)")
+    value: str = Field(default=VALUE_COL)
+    method: Literal["pearson", "spearman", "both"] = Field(default="both", description="Pearson r of the entry means, Spearman rho of their ranks "
+                                                                                       "(tied means share the average rank), or both")
+    entries: Literal["in_every_study", "in_any_study"] = Field(default="in_every_study",
+                                                               description="for a table of several studies, an entry's mean is the unweighted mean of its "
+                                                                           "study means: over the entries present in every study of the table (default), or in any")
+    exclude: list[str] = Field(default_factory=list, max_length=50, description="entries (exact ID or exact name) left out, for example the checks")
+    name_prefix: str | None = Field(default=None, min_length=1, description="keep only the entries whose name starts with this exact text, for example PH17.")
+    min_pairs: int = Field(default=3, ge=3, description="the fewest shared entries a correlation is stated for")
+    duplicate_policy: DuplicatePolicy = Field(default="reject")
+    allow_incomplete: bool = Field(default=False)
+
+
 # --------------------------------------------------------------------------
-# The ten tools
+# The eleven tools
 # --------------------------------------------------------------------------
 
 def tool_table_info(registry: ArtifactRegistry, a: TableInfoArgs) -> ToolResult:
@@ -1205,8 +1223,256 @@ def tool_threshold_count(registry: ArtifactRegistry, a: ThresholdCountArgs) -> T
                       warnings=warnings)
 
 
+# R2 (Bidhan 2026-10-21; coach 2026-10-22 10:52 UTC next 2): the Pearson / Spearman correlation of two tables' entry means, joined
+# by entry. Measured first (r2_need_20261022): 15 benchmark sub-questions need it, 8 as one trait in two studies (C27.4, C29.2-5,
+# C31.5, C33.3, C34.2) and 7 as two traits of the same studies (E13.1-4, E18.1, E18.3, E18.4). Entry means first: per study, then
+# the unweighted mean over the studies, as those questions define them. No p-value is stated.
+CORRELATION_NOTE = "descriptive correlation of recorded entry means, not a recommendation"
+CORRELATION_RESULT_COLUMNS = {
+    "entry": "exact entry ID", "label": "name carried from the label column, if any",
+    "paired": "true when the entry has a mean in both tables and is correlated",
+    "left_out": "why an entry is not paired ('' when paired): only in x, only in y, excluded, outside the name prefix, not in every study of x / y",
+    "x_mean": "entry mean in the first table, full precision ('' = none)", "x_n_values": "valid values behind x_mean", "x_n_studies": "studies x_mean averages",
+    "y_mean": "entry mean in the second table, full precision ('' = none)", "y_n_values": "valid values behind y_mean", "y_n_studies": "studies y_mean averages",
+    "x_rank": "rank of x_mean among the paired entries, lowest first; tied means share the average rank ('' when not paired)",
+    "y_rank": "rank of y_mean among the paired entries, the same way",
+}
+
+
+@dataclass
+class _EntryMeans:
+    table: Table
+    variable: str
+    means: dict[str, tuple[float, int, int]]        # entry -> (mean, valid values behind it, studies it averages)
+    labels: dict[str, set[str]]                     # entry -> its names in this table
+    studies: list[str]
+    not_in_every_study: int
+    no_study_rows: int
+    transformation: str
+    caveat: str | None
+    classified: Classified
+    dropped: set[str]                               # entries without a mean under entries=in_every_study (review: saved and named)
+    manifest_only: list[str]                        # studies the manifest lists that have no row (review: said, not ignored)
+
+
+def _entry_means(table: Table, a: CorrelateEntryMeansArgs, label_col: str | None) -> _EntryMeans:
+    """Each entry's mean in one table: the mean of its valid values per study, then the unweighted mean over its studies (all of
+    the table's studies under entries=in_every_study; otherwise those where it has a value)."""
+    _require_column(table, a.by, "entry column")
+    _require_column(table, a.value, "value column")
+    _require_column(table, "studyDbId", "study column")
+    caveat = _completeness_gate(table, a.allow_incomplete)
+    variable = _single_variable(table)
+    classified = _classify(table, a.value)
+    big = max((abs(number) for _, number in classified.valid), default=0.0)
+    if big >= 1e200:                                      # review: sums of such values overflow inside a mean (also when duplicates are averaged); refuse, never crash
+        raise AnalystError("unsupported", f"{table.manifest.artifact_id} holds a value of 1e200 or more in absolute value ({big!r}); "
+                                          "entry means of such values are not computed")
+    used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy)
+    if caveat:
+        transformation = f"{caveat}; {transformation}"
+    labels: dict[str, set[str]] = {}
+    studies: set[str] = set()
+    no_study_rows = 0
+    for row in table.rows:
+        if not row.get("studyDbId", ""):
+            no_study_rows += 1
+            continue
+        studies.add(row["studyDbId"])
+        if row.get(a.by, ""):
+            labels.setdefault(row[a.by], set())
+            if label_col and row.get(label_col, ""):
+                labels[row[a.by]].add(row[label_col])
+    per_study: dict[str, dict[str, list[float]]] = {}
+    for row, number in used:
+        if row.get(a.by, "") and row.get("studyDbId", ""):
+            per_study.setdefault(row[a.by], {}).setdefault(row["studyDbId"], []).append(number)
+    means: dict[str, tuple[float, int, int]] = {}
+    not_in_every_study = 0
+    dropped: set[str] = set()
+    for entry in sorted(per_study):
+        study_means = {study: statistics.fmean(values) for study, values in per_study[entry].items()}
+        if a.entries == "in_every_study" and len(study_means) < len(studies):
+            not_in_every_study += 1
+            dropped.add(entry)
+            continue
+        means[entry] = (statistics.fmean(study_means.values()), sum(len(v) for v in per_study[entry].values()), len(study_means))
+    manifest_only = sorted(set(table.manifest.study_ids) - studies)
+    return _EntryMeans(table, variable, means, labels, sorted(studies), not_in_every_study, no_study_rows, transformation, caveat, classified,
+                       dropped, manifest_only)
+
+
+def _tie_key(scaled: float) -> float:
+    """The value two entry means are compared by, after each side was divided by its largest absolute value: anything under 1e-13 of
+    that scale is a float residue and counts as 0 (0.1 + 0.2 - 0.3 averages to 9e-18, which must tie with an exact 0; review), and
+    the rest tie at 12 significant digits (the project's rule)."""
+    return 0.0 if abs(scaled) < 1e-13 else float(format(scaled, ".12g"))
+
+
+def _average_ranks(values: list[float]) -> list[float]:
+    """Ranks from 1 (the lowest) of values already divided by the side's largest absolute value; values with the same tie key share
+    the average of their ranks."""
+    keyed = [_tie_key(v) for v in values]
+    order = sorted(range(len(values)), key=lambda i: keyed[i])
+    ranks = [0.0] * len(values)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and keyed[order[j + 1]] == keyed[order[i]]:
+            j += 1
+        for k in range(i, j + 1):
+            ranks[order[k]] = (i + j) / 2 + 1
+        i = j + 1
+    return ranks
+
+
+def _table_text(side: str, e: _EntryMeans) -> str:
+    unit = e.table.manifest.measurement.unit
+    trait = e.table.manifest.measurement.trait or e.variable
+    listed = " and ".join(e.studies) if len(e.studies) <= 2 else ", ".join(e.studies)
+    return f"{side}: {trait}{f' ({unit})' if unit else ''} in {'study' if len(e.studies) == 1 else 'studies'} {listed}; {len(e.means)} entries with a mean"
+
+
+def tool_correlate_entry_means(registry: ArtifactRegistry, a: CorrelateEntryMeansArgs) -> ToolResult:
+    """The Pearson correlation (r) and the Spearman rank correlation (rho) between the entry means of two tables, joined by
+    entry: ONE trait in two studies, or TWO traits of the same studies. An entry's mean in a table is the mean of its valid
+    values per study, then the unweighted mean over the studies (over the entries present in every study of the table unless
+    entries=in_any_study). Named entries can be left out (exclude) and one family kept (name_prefix). n = the entries with a
+    mean in both tables. Refused, never guessed: fewer than min_pairs; a side whose means are all equal at 12 significant digits
+    (undefined); means spanning more than 12 orders of magnitude; a value of 1e200 or more; the same table, or the same rows
+    under two handles.
+    One claim per method (kind correlation; no p-value); every entry and why it was or was not paired is saved as an
+    analysis_result artifact. A descriptive correlation of recorded entry means, not a recommendation."""
+    x_table, y_table = (_load(registry, handle) for handle in a.artifact_ids)
+    if x_table.manifest.artifact_id == y_table.manifest.artifact_id or x_table.manifest.sha256 == y_table.manifest.sha256:
+        raise AnalystError("invalid_argument", f"{x_table.manifest.artifact_id} and {y_table.manifest.artifact_id} hold the same rows; "
+                                               "correlate two different tables")
+    if a.by.endswith("Name"):
+        raise AnalystError("invalid_argument", f"join by the ID column, not {a.by!r}; names are carried as labels")
+    label_col = LABEL_FOR.get(a.by)
+    label_col = label_col if label_col in x_table.manifest.columns and label_col in y_table.manifest.columns else None
+    if a.name_prefix is not None and label_col is None:
+        raise AnalystError("invalid_argument", f"name_prefix needs a name column beside {a.by!r} in both tables")
+    x, y = _entry_means(x_table, a, label_col), _entry_means(y_table, a, label_col)
+    names = {entry: x.labels.get(entry, set()) | y.labels.get(entry, set()) for entry in set(x.labels) | set(y.labels)}
+    label = {entry: "; ".join(sorted(found)) for entry, found in names.items()}
+    excluded: set[str] = set()
+    for wanted in a.exclude:
+        try:
+            excluded |= set(_entries(x_table, a.by, label_col, [wanted], "exclude"))
+        except AnalystError as not_in_x:
+            try:
+                excluded |= set(_entries(y_table, a.by, label_col, [wanted], "exclude"))
+            except AnalystError:
+                raise not_in_x from None
+    candidates = sorted(set(x.means) | set(y.means))
+    outside = {e for e in candidates if a.name_prefix is not None and e not in excluded and not any(n.startswith(a.name_prefix) for n in names.get(e, ()))}
+    kept = [e for e in candidates if e not in excluded and e not in outside]
+    paired = [e for e in kept if e in x.means and e in y.means]
+    only_x = sum(1 for e in kept if e in x.means and e not in y.means)
+    only_y = sum(1 for e in kept if e in y.means and e not in x.means)
+    if len(paired) < a.min_pairs:
+        raise AnalystError("unsupported", f"{len(paired)} shared entries with a mean in both tables; a correlation needs at least {a.min_pairs} "
+                                          f"(only in x: {only_x}, only in y: {only_y}, excluded: {len(excluded)}, outside the name prefix: {len(outside)})")
+    xs, ys = [x.means[e][0] for e in paired], [y.means[e][0] for e in paired]
+    # Each side is divided by its largest absolute value first: a correlation does not change under that scaling, and the sums
+    # inside it can then neither overflow (values near 1e155 gave r = 0) nor underflow (values near 1e-200 crashed) (review).
+    scaled = {side: [v / scale if scale else 0.0 for v in values]
+              for side, values, scale in (("x", xs, max(abs(v) for v in xs)), ("y", ys, max(abs(v) for v in ys)))}
+    for side, values in (("x", xs), ("y", ys)):
+        keys = {_tie_key(v) for v in scaled[side]}
+        if len(keys) == 1:
+            raise AnalystError("unsupported", f"the {side} entry means are all equal at 12 significant digits ({_display(values[0])}) over the "
+                                              f"{len(paired)} shared entries; a correlation is undefined")
+        nonzero = [abs(k) for k in keys if k]
+        if nonzero and max(nonzero) / min(nonzero) > 1e12:    # review 2: means 13 orders of magnitude apart tied falsely; say so instead
+            smallest = min(abs(v) for v, k in zip(values, scaled[side]) if _tie_key(k))
+            raise AnalystError("unsupported", f"the {side} entry means span more than 12 orders of magnitude (from {smallest!r} to "
+                                              f"{max(abs(v) for v in values)!r} in absolute value); their ranks and correlation are not computed")
+    x_ranks, y_ranks = _average_ranks(scaled["x"]), _average_ranks(scaled["y"])
+    results: dict[str, float] = {}
+    if a.method in ("pearson", "both"):
+        results["pearson"] = statistics.correlation(scaled["x"], scaled["y"])
+    if a.method in ("spearman", "both"):
+        if len(set(x_ranks)) == 1 or len(set(y_ranks)) == 1:
+            raise AnalystError("unsupported", "every shared entry ties on one side; the Spearman correlation is undefined")
+        results["spearman"] = statistics.correlation(x_ranks, y_ranks)
+    overlap = set(x.studies) & set(y.studies)
+    warnings: list[str] = []
+    if overlap and set(x.studies) != set(y.studies):        # review: neither the same studies nor two different ones, and nothing said
+        warnings.append(f"x covers {'study' if len(x.studies) == 1 else 'studies'} {', '.join(x.studies)} and y covers {', '.join(y.studies)}: "
+                        "the correlation pairs entry means from different study sets")
+    for side, e in (("x", x), ("y", y)):
+        if e.manifest_only:
+            warnings.append(f"{side}: the table's manifest lists {'a study' if len(e.manifest_only) == 1 else 'studies'} with no row: {', '.join(e.manifest_only)}")
+
+    variant = hashlib.sha256(json.dumps([x_table.manifest.sha256, y_table.manifest.sha256, a.by, a.value, a.entries, sorted(excluded), a.name_prefix,
+                                         a.min_pairs, a.duplicate_policy, a.allow_incomplete]).encode("utf-8")).hexdigest()[:10]
+    hashes = [x_table.manifest.sha256, y_table.manifest.sha256]
+    exclusions: list[Exclusion] = []
+    for side, e in (("x", x), ("y", y)):
+        exclusions += [Exclusion(reason=f"{side}: {item.reason}", count=item.count) for item in _exclusions(e.classified)]
+        if e.no_study_rows:
+            exclusions.append(Exclusion(reason=f"{side}: rows with an empty studyDbId", count=e.no_study_rows))
+        if e.not_in_every_study:
+            exclusions.append(Exclusion(reason=f"entries not in every study of {side}", count=e.not_in_every_study))
+    removed = sum(1 for e in excluded if e in x.means or e in y.means)              # named entries that had a mean to lose (review)
+    for reason, n in (("entries only in x", only_x), ("entries only in y", only_y), ("entries left out: excluded", removed),
+                      ("entries left out: outside the name prefix", len(outside))):
+        if n:
+            exclusions.append(Exclusion(reason=reason, count=n))
+    rule = "over the entries present in every study of the table" if a.entries == "in_every_study" else "over the studies where the entry has a value"
+    rule_text = "entries: in every study of each table" if a.entries == "in_every_study" else "entries: in any study"
+    basis = (f"entry mean = the mean of the entry's valid values per study, then the unweighted mean over its studies ({rule}); "
+             f"x: {x.transformation}; y: {y.transformation}")
+    denominator = Denominator(name="entries with an entry mean in both tables (pairs)", n=len(paired))
+    claims = [Claim(claim_id=_claim_id(x_table.manifest.artifact_id, "correlation", method, namespace=f"cor-{variant}"), kind="correlation",
+                    value=value, denominator=denominator, source_artifact_hashes=hashes, grouping=[a.by],
+                    transformation=f"{'Pearson' if method == 'pearson' else 'Spearman'} correlation of entry means | {_table_text('x', x)} | "
+                                   f"{_table_text('y', y)} | {rule_text} | {CORRELATION_NOTE} | {basis}"
+                                   + (" | ranks: ties share the average rank" if method == "spearman" else ""),
+                    exclusions=exclusions)
+              for method, value in results.items()]
+
+    rank_of = {e: (rx, ry) for e, rx, ry in zip(paired, x_ranks, y_ranks)}
+    rows = []
+    for e in sorted(set(candidates) | excluded | x.dropped | y.dropped):
+        missing = [side for side, table_means in (("x", x), ("y", y)) if e in table_means.dropped]
+        why = ("excluded" if e in excluded else "outside the name prefix" if e in outside else "" if e in rank_of
+               else f"not in every study of {' and '.join(missing)}" if missing else "only in x" if e in x.means else "only in y")
+        xm, ym = x.means.get(e), y.means.get(e)
+        rows.append({"entry": e, "label": label.get(e, ""), "paired": "true" if e in rank_of else "false", "left_out": why,
+                     "x_mean": "" if xm is None else repr(xm[0]), "x_n_values": "" if xm is None else str(xm[1]), "x_n_studies": "" if xm is None else str(xm[2]),
+                     "y_mean": "" if ym is None else repr(ym[0]), "y_n_values": "" if ym is None else str(ym[1]), "y_n_studies": "" if ym is None else str(ym[2]),
+                     "x_rank": repr(rank_of[e][0]) if e in rank_of else "", "y_rank": repr(rank_of[e][1]) if e in rank_of else ""})
+    lineage = [f"lineage: correlate_entry_means of {x_table.manifest.artifact_id} sha256={x_table.manifest.sha256} and "
+               f"{y_table.manifest.artifact_id} sha256={y_table.manifest.sha256}", basis, f"left out: excluded {sorted(excluded)}, name_prefix {a.name_prefix!r}",
+               f"analysis target: {ANALYSIS_TARGET}"]
+    complete = bool(x_table.manifest.complete and y_table.manifest.complete)
+    manifest = registry.save_table(rows, kind="analysis_result", columns=CORRELATION_RESULT_COLUMNS, complete=complete,
+                                   source_request_ids=list(dict.fromkeys([*x_table.manifest.source_request_ids, *y_table.manifest.source_request_ids])),
+                                   study_ids=list(dict.fromkeys([*x_table.manifest.study_ids, *y_table.manifest.study_ids])),
+                                   variable_ids=list(dict.fromkeys([*x_table.manifest.variable_ids, *y_table.manifest.variable_ids])), quality_notes=lineage)
+    tables = [{"artifact_id": e.table.manifest.artifact_id, "trait": e.table.manifest.measurement.trait, "unit": e.table.manifest.measurement.unit,
+               "variable_id": e.variable, "study_ids": e.studies, "entries_with_a_mean": len(e.means), "entries_not_in_every_study": e.not_in_every_study,
+               "transformation": e.transformation} for e in (x, y)]
+    data = {"x_artifact_id": x_table.manifest.artifact_id, "y_artifact_id": y_table.manifest.artifact_id, "result_artifact_id": manifest.artifact_id,
+            "n_pairs": len(paired), "pearson": results.get("pearson"), "spearman": results.get("spearman"),
+            "display_pearson": _display(results.get("pearson")), "display_spearman": _display(results.get("spearman")), "tables": tables,
+            "unpaired": {"only in x": only_x, "only in y": only_y}, "left_out": {"excluded": removed, "outside the name prefix": len(outside)},
+            "excluded_named": sorted(excluded), "entries_rule": rule, "claims": _claims_json(claims), "note": CORRELATION_NOTE,
+            "analysis_target": ANALYSIS_TARGET, "value_policy": VALUE_POLICY}
+    warnings += [w for e in (x, y) for w in (e.caveat, e.classified.duplicate_note if a.duplicate_policy != "reject" else None) if w]
+    for side, e in (("x", x), ("y", y)):
+        if not e.classified.units_known:
+            warnings.append(f"{side}: independence unknown: some valid rows name no observation unit")
+        warnings.extend(f"{side}: {w}" for w in _timing_warnings(e.table, a.value))
+    return ToolResult(ok=True, data=data, artifact_ids=[x_table.manifest.artifact_id, y_table.manifest.artifact_id, manifest.artifact_id],
+                      complete=complete, warnings=warnings)
+
+
 # --------------------------------------------------------------------------
-# ONE registry of the ten tools, schemas and dispatch
+# ONE registry of the eleven tools, schemas and dispatch
 # --------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -1234,9 +1500,10 @@ ANALYST_TOOLS: dict[str, AnalystToolSpec] = {spec.name: spec for spec in [
     AnalystToolSpec("count_records", CountRecordsArgs, tool_count_records),
     AnalystToolSpec("rank_entries", RankEntriesArgs, tool_rank_entries),
     AnalystToolSpec("threshold_count", ThresholdCountArgs, tool_threshold_count),
+    AnalystToolSpec("correlate_entry_means", CorrelateEntryMeansArgs, tool_correlate_entry_means),
 ]}
 ANALYST_TOOL_NAMES = list(ANALYST_TOOLS)
-assert len(ANALYST_TOOL_NAMES) == 10
+assert len(ANALYST_TOOL_NAMES) == 11
 
 
 def analyst_tool_schemas() -> list[dict[str, Any]]:

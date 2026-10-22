@@ -156,7 +156,7 @@ def _mean_focus(controller: Any, claims: list[Claim]) -> bool:
     plan = getattr(controller, "plan", None)
     if getattr(getattr(plan, "statistic", None), "kind", None) != "mean" or sum(claim.kind == "mean" for claim in claims) != 1:
         return False
-    if any(claim.kind == "rank" or _THRESHOLD_ID.match(claim.claim_id) for claim in claims):
+    if any(claim.kind in ("rank", "correlation") or _THRESHOLD_ID.match(claim.claim_id) for claim in claims):
         return False
     words = person_words(getattr(plan, "question", ""))
     if not re.search(r"\b(?:mean|average)\b", words, re.I):
@@ -325,6 +325,40 @@ def _threshold_block(claims: list[Claim], sources: _Sources, source_labels: dict
     return lines, shown
 
 
+CORRELATION_SENTENCE = "Descriptive numbers only: a correlation of recorded entry means, not a recommendation."
+
+
+def _correlation(value: float | int | None) -> str:
+    return "Not available" if value is None else f"{value:.4f}".rstrip("0").rstrip(".")
+
+
+def _correlation_block(claims: list[Claim], source_labels: dict[tuple[str, ...], str]) -> tuple[list[str], set[str]]:
+    """R2 (2026-10-22): the correlation claims of one correlate_entry_means call as one table (Method, Correlation, n), the two
+    tables it correlated and what was left out, then the descriptive sentence. Returns the lines and the IDs of the claims shown."""
+    calls: dict[str, list[Claim]] = defaultdict(list)
+    for claim in claims:
+        if claim.kind == "correlation":
+            calls[claim.claim_id.rsplit("_correlation_", 1)[0]].append(claim)
+    lines: list[str] = []
+    shown: set[str] = set()
+    for group in calls.values():
+        table = []
+        for claim in sorted(group, key=lambda claim: claim.transformation.startswith("Spearman")):
+            method = "Spearman rho" if claim.transformation.startswith("Spearman") else "Pearson r"
+            table.append([method, _correlation(claim.value), claim.denominator.n])
+            shown.add(claim.claim_id)
+        first = group[0]
+        parts = first.transformation.split(" | ")
+        about = [part for part in parts if part.startswith(("x: ", "y: ", "entries: "))]
+        left = "; ".join(f"{item.reason[len('entries '):].replace('left out: ', '')} {item.count}" for item in first.exclusions
+                         if item.reason.startswith("entries "))
+        label = source_labels.get(tuple(sorted(first.source_artifact_hashes)), "")
+        lines += [f"**Correlation of entry means, {first.denominator.n} entries in both tables{label}**", "",
+                  *_table(["Method", "Correlation", "n"], table), "", _text("; ".join(about) + ".") if about else "",
+                  *([_text(f"Left out: {left}.")] if left else []), "", CORRELATION_SENTENCE, ""]
+    return lines, shown
+
+
 def _numeric_blocks(claims: list[Claim], sources: _Sources, source_labels: dict[tuple[str, ...], str], *, focus_mean: bool = False) -> list[str]:
     groups: dict[tuple[Any, ...], list[Claim]] = defaultdict(list)
     for claim in claims:
@@ -333,7 +367,8 @@ def _numeric_blocks(claims: list[Claim], sources: _Sources, source_labels: dict[
                tuple((item.reason, item.count) for item in claim.exclusions), _claim_method(claim))
         groups[key].append(claim)
     lines: list[str] = []
-    labels = {"mean": "Mean", "median": "Median", "min": "Minimum", "max": "Maximum", "sd": "Sample standard deviation", "count": "Count"}
+    labels = {"mean": "Mean", "median": "Median", "min": "Minimum", "max": "Maximum", "sd": "Sample standard deviation", "count": "Count",
+              "correlation": "Correlation"}
     for key, group in groups.items():
         first = group[0]
         hashes = key[0]
@@ -385,7 +420,7 @@ def _human_note(note: str) -> str:
     if text.startswith(_CODE_STOP):     # a stop written by code (catalog_answers, metadata_answers): its plain line;
         asked = text[len(_CODE_STOP):].strip()                                 # the exact check stays in the Full report
         return catalog_plain(asked) or metadata_plain(asked) or _CODE_STOP_OTHER
-    text = re.sub(r"^(?:(?:numeric_summary|group_stats|count_records|rank_entries|threshold_count|analysis target|model(?: note)?)\s*:\s*)+", "", text, flags=re.I)
+    text = re.sub(r"^(?:(?:numeric_summary|group_stats|count_records|rank_entries|threshold_count|correlate_entry_means|analysis target|model(?: note)?)\s*:\s*)+", "", text, flags=re.I)
     if "no complete artifact is eligible for analysis" in text.lower():
         return re.sub("no complete artifact is eligible for analysis", "No complete data table was available for analysis, so an answer could not be calculated.", text, flags=re.I)
     # Normalize only the two known unit-only messages; other caveat wording is preserved.
@@ -629,7 +664,8 @@ def answer_summary(controller: Any) -> str:
     source_labels = {key: f" · source {index + 1}" for index, key in enumerate(hashes)} if len(hashes) > 1 else {}
     ranking, in_ranking = _ranking_block(claims, sources, source_labels)
     thresholds, in_threshold = _threshold_block(claims, sources, source_labels)
-    in_ranking |= in_threshold
+    correlations, in_correlation = _correlation_block(claims, source_labels)
+    in_ranking |= in_threshold | in_correlation
     # a mean the ranking table shows is not shown again (group_stats on the same table states the same entry mean; review)
     ranked_means = {(tuple(sorted(c.source_artifact_hashes)), tuple(sorted(c.filters.items())), c.value)
                     for c in claims if c.claim_id in in_ranking and c.kind == "mean" and c.claim_id not in in_threshold}
@@ -645,7 +681,7 @@ def answer_summary(controller: Any) -> str:
             buckets[(tuple(sorted(claim.source_artifact_hashes)), claim.grouping[0], claim.denominator.name, claim.denominator.n)].append(claim)
         else:
             other.append(claim)
-    lines: list[str] = [*ranking, *thresholds]
+    lines: list[str] = [*ranking, *thresholds, *correlations]
     in_catalog_titles: set[str] = set()              # distinct counts a catalog block's title already leads with
     for key, group in buckets.items():
         block = _catalog_block(group, sources, source_labels.get(key[0], ""), focus_count=focus_count)

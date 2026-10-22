@@ -111,7 +111,7 @@ RequestErrorCode = Literal[
     "connection", "timeout", "http_error", "invalid_json", "not_brapi",
     "blocked", "cancelled", "too_large", "unknown",
 ]
-ClaimKind = Literal["mean", "median", "min", "max", "sd", "count", "ratio", "rank"]
+ClaimKind = Literal["mean", "median", "min", "max", "sd", "count", "ratio", "rank", "correlation"]   # correlation: R2, 2026-10-22
 EntityKind = Literal["study", "variable", "location", "season", "program", "trait"]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 
