@@ -281,6 +281,8 @@ class Candidates:
     studies: list[KnownStudy]
     variables: list[KnownVariable]
     decision_words: list[str]
+    exact_variable_ids: list[str] = field(default_factory=list)   # the candidates the person names exactly (_exact_ids; P1 / P2)
+    unmatched_terms: list[str] = field(default_factory=list)       # ontology terms in the question that no candidate carries (P2)
 
 
 def _tokens(text: str) -> set[str]:
@@ -296,34 +298,73 @@ def _variable_named_in(v: KnownVariable, lowered: str, raw_words: set[str]) -> b
     return any(len(n.strip()) >= 4 and n.strip().lower() in lowered for n in names)
 
 
+_TERM = re.compile(r"(?<![\w])[a-z][a-z0-9_]*:\d{4,}(?![\w])")       # an ontology term in lowered text, such as co_331:0000297
+
+
+def _whole_in(name: str, text: str) -> bool:
+    """The (lowered) name stands in the (lowered) text as a whole: not glued to a letter or digit on either side."""
+    return re.search(r"(?<![\w])" + re.escape(name) + r"(?![\w])", text) is not None
+
+
+def _exact_ids(metadata: KnownMetadata, named: list[KnownVariable], lowered: str, answer_words: set[str]) -> set[str]:
+    """The named variables the person names EXACTLY (P1 / P2, 2026-10-22, with the guards of their review): its ID as a word in
+    an ANSWER to our question (a number in the question itself — "76605 plots", "3 reps" — is not enough), or its whole name WITH
+    an ontology suffix (a "|" in the name) standing whole in the question, when no other variable has that same name and it is not
+    part of a longer whole name the question also holds. A name without a suffix is never more exact than the words it shares."""
+    shared: dict[str, int] = {}
+    for v in metadata.variables:
+        shared[v.name.strip().lower()] = shared.get(v.name.strip().lower(), 0) + 1
+    by_name = {v.variable_id: v.name.strip().lower() for v in named
+               if "|" in v.name and shared[v.name.strip().lower()] == 1 and _whole_in(v.name.strip().lower(), lowered)}
+    exact = {vid for vid, name in by_name.items() if not any(other != name and name in other for other in by_name.values())}
+    return exact | {v.variable_id for v in named if v.variable_id.lower() in answer_words}
+
+
+def _base_name(v: KnownVariable) -> str:
+    """The name before its first "|" (before the ontology suffix and any time point), which same-named variables share."""
+    return v.name.split("|", 1)[0].strip().lower()
+
+
 def find_candidates(question: str, metadata: KnownMetadata | None) -> Candidates:
-    """Exact naming wins: a variable the question names outright (ID, full name or trait) is the only candidate; only when the
-    question names none does word overlap decide. On a real catalog a common word such as 'estimating' occurs in hundreds of
-    variable names, so overlap alone turned a question that quoted one variable into 'more than one trait matches'.
+    """Naming wins over word overlap: the variables the question names outright (ID, full name, the name before its first "|",
+    or trait) are the candidates; only when it names none does word overlap decide. On a real catalog a common word such as
+    'estimating' occurs in hundreds of variable names, so overlap alone turned a question that quoted one variable into 'more than
+    one trait matches'. Among variables of one name before the "|", those named EXACTLY (_exact_ids) drop their siblings (P1);
+    the exact ones and the ontology terms no candidate carries are returned for the planner's P2 rule.
 
     Only the person's words count (person_words): our own clarification labels never name anything. Decision words are read in
     what the person said LAST (latest_words): once they have answered the 'breeding judgement' question, the 'best' of their
     first question is not asked about again, while every word they typed still counts for studies and traits."""
     latest = latest_words(question)
+    answer_words = {t.lower().strip(".,;:!?") for answer in _CLARIFIED.split(question)[2::2] for t in _WORD.findall(answer)}   # in answers only
     question = person_words(question)
     words = _tokens(question)                                          # meaningful words, for names
     raw_words = {t.lower().strip(".,;:!?") for t in _WORD.findall(question)}   # every token, for exact IDs such as S1 or V1 ("S1." at a sentence end is S1)
     lowered = question.lower()
     studies: list[KnownStudy] = []
     variables: list[KnownVariable] = []
+    exact_ids: list[str] = []
     if metadata is not None:
         for s in metadata.studies:
             if s.study_id.lower() in raw_words or (s.name and s.name.lower() in lowered):
                 studies.append(s)
         named = [v for v in metadata.variables if _variable_named_in(v, lowered, raw_words)]
+        # P1 (2026-10-22): a variable named exactly wins over its siblings that share the name before the "|"
+        # ("...|CO_331:0000297" vs "...|day 1|after harvest|COMP:0000102").
+        exact = _exact_ids(metadata, named, lowered, answer_words)
+        exact_bases = {_base_name(v) for v in named if v.variable_id in exact}
+        named = [v for v in named if _base_name(v) not in exact_bases or v.variable_id in exact]
         if named:
             variables = named
+            exact_ids = [v.variable_id for v in named if v.variable_id in exact]
         else:
             for v in metadata.variables:
                 name_tokens = _tokens(f"{v.name} {v.trait or ''}")
                 if name_tokens & words:
                     variables.append(v)
-    return Candidates(studies=studies, variables=variables, decision_words=sorted({m.group(0).lower() for m in DECISION_WORDS.finditer(latest)}))
+    carried = {term for v in variables for term in _TERM.findall(v.name.lower())}
+    return Candidates(studies=studies, variables=variables, decision_words=sorted({m.group(0).lower() for m in DECISION_WORDS.finditer(latest)}),
+                      exact_variable_ids=exact_ids, unmatched_terms=sorted(set(_TERM.findall(lowered)) - carried))
 
 
 # --------------------------------------------------------------------------
@@ -602,6 +643,17 @@ def assemble_plan(question: str, draft: PlanDraft, metadata: KnownMetadata | Non
         if len(cands.variables) == 0:
             names = ", ".join(f"{v.variable_id} ({v.name})" for v in metadata.variables) or "none"
             clarifications = _ensure_clarification(clarifications, f"The question names no known trait. Which variable is meant: {names}?", r"which variable", notes)
+        elif (len(cands.variables) > 1 and not cands.unmatched_terms
+              and set(cands.exact_variable_ids) == {v.variable_id for v in cands.variables}):
+            # P2 (2026-10-22): every matching variable is named exactly (_exact_ids), and the question holds no ontology term that
+            # no candidate carries (review: E14.4 named iron only by its term), so the plan uses all of them and no "Which one?"
+            # is asked. Numeric statistics only (not counts), and not under discovery; each table still counts against the fetch
+            # limit of the run.
+            missing = [v for v in cands.exact_variable_ids if v not in scope.variable_ids]
+            if missing:
+                problems.append(f"the question names the variables {cands.exact_variable_ids} exactly; plan with all of them - "
+                                f"scope.variable_ids lacks {missing}")
+            notes.append(f"the question names {cands.exact_variable_ids} exactly; all of them are required in the plan")
         elif len(cands.variables) > 1:
             names = ", ".join(f"{v.variable_id} ({v.name})" for v in cands.variables)
             clarifications = _ensure_clarification(clarifications, f"More than one trait matches the question: {names}. Which one?", r"more than one trait|which one", notes)
