@@ -51,6 +51,7 @@ class ToolContext:
     approval: FetchApproval | None = None     # set ONLY by controller code, never from a tool argument
     search_max_pages: int = 5                 # bounded paging for metadata searches
     export_max_pages: int = 20                # bounded paging for full metadata exports
+    observation_max_pages: int = 1            # pages per plot-record fetch: 1 in the app, up to 10 in the benchmark (run setting)
     preview_rows: int = 5
     # Controller-owned metadata, keyed by the exact validated variable ID. Never a tool argument.
     variable_measurements: dict[str, MeasurementMeta] = field(default_factory=dict)
@@ -385,7 +386,8 @@ def tool_get_observations(ctx: ToolContext, a: GetObservationsArgs) -> ToolResul
     study-status ledger. The full table is never returned in the message; the Analyst reads the
     artifact by handle. An incomplete fetch stays incomplete (complete=False, status). Live access
     requires a FetchApproval held by the controller; tool arguments cannot supply one."""
-    result = ctx.client.observations(a.study_db_id, a.variable_db_id, approval=ctx.approval)
+    result = ctx.client.observations(a.study_db_id, a.variable_db_id, approval=ctx.approval, paging=ctx.observation_max_pages > 1,
+                                     max_pages=ctx.observation_max_pages)
     rows = [{k: _text(r.get(k)) for k in OBSERVATION_COLUMNS} for r in result.records]
     variable_names = {str(r.get("observationVariableName")) for r in result.records if r.get("observationVariableName")}
     known = ctx.variable_measurements.get(a.variable_db_id)
@@ -473,7 +475,8 @@ def tool_get_observation_units(ctx: ToolContext, a: GetObservationUnitsArgs) -> 
     level names/codes and the full position object so independence can be judged later (several rows
     from one plot are not several plots). Returns handle, preview, true row count, level counts and
     completeness. Never the full table in the message."""
-    result = ctx.client.observation_units(a.study_db_id, approval=ctx.approval)
+    result = ctx.client.observation_units(a.study_db_id, approval=ctx.approval, paging=ctx.observation_max_pages > 1,
+                                          max_pages=ctx.observation_max_pages)
     rows = [_unit_row(r) for r in result.records]
     manifest, preview = _save_and_preview(ctx, result, rows, kind="observation_units", columns=UNIT_COLUMNS,
                                           study_ids=[a.study_db_id], variable_ids=[])

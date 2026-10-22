@@ -65,6 +65,7 @@ __all__ = [
     "RunResult",
     "approval_mismatches",
     "MAX_PLAN_STEPS",
+    "DEFAULT_PLAN_STEPS",
     "dump_json",
 ]
 
@@ -841,7 +842,10 @@ class AnalysisReport(StrictRecord):
 # 11. Plan (Stage 5): what a run intends to do, written down BEFORE any authority exists
 # --------------------------------------------------------------------------
 
-MAX_PLAN_STEPS = 12
+# Steps one plan may have. Each run sets its own limit (RunConfig.max_plan_steps: 12, the app's own; the benchmark may pass up
+# to 30, Bidhan 2026-10-21), checked in agents/coordinator.py assemble_plan; the contract caps every plan at 30.
+DEFAULT_PLAN_STEPS = 12
+MAX_PLAN_STEPS = 30
 PlanInputValue = str | int | bool | list[str]       # explicit typed inputs; never a blob of JSON text
 _STEP_ID = Annotated[str, Field(pattern=r"^step_[A-Za-z0-9_-]+$")]
 _PLAN_ID = Annotated[str, Field(pattern=r"^plan_[A-Za-z0-9_-]+$")]

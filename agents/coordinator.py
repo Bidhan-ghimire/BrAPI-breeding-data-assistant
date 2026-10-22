@@ -40,6 +40,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from artifacts import ArtifactRegistry
 from contracts import (
+    DEFAULT_PLAN_STEPS,
     AgentResult,
     AnalysisReport,
     Claim,
@@ -486,7 +487,8 @@ def study_program_metadata_question(question: str, draft: PlanDraft, metadata: K
 
 
 def assemble_plan(question: str, draft: PlanDraft, metadata: KnownMetadata | None, *, base_url: str, now: datetime,
-                  plan_id: str, person_reviews_scope: bool = False) -> tuple[Plan | None, list[str], list[str]]:
+                  plan_id: str, person_reviews_scope: bool = False,
+                  max_plan_steps: int = DEFAULT_PLAN_STEPS) -> tuple[Plan | None, list[str], list[str]]:
     """Turn a draft into a validated Plan. Returns (plan, hard_problems, notes); hard problems mean 'send it back'.
 
     person_reviews_scope: a person will see the approval screen before anything is fetched (the chat, or the command line
@@ -595,6 +597,9 @@ def assemble_plan(question: str, draft: PlanDraft, metadata: KnownMetadata | Non
         clarifications = [c for c in clarifications if not re.search(r"program membership", c.question, re.IGNORECASE)]
         clarifications.append(Clarification(question=metadata_question, required=True, answer=None))
         notes.append("program membership is not established; a fresh required clarification keeps matching_study_count unknown")
+    if len(draft.steps) > max_plan_steps:          # the run's own limit (RunConfig.max_plan_steps); the contract caps at 30
+        problems.append(f"plan has {len(draft.steps)} steps; at most {max_plan_steps} are allowed for one question - combine "
+                        "or drop steps")
     if problems:
         return None, problems, notes
 
@@ -755,6 +760,7 @@ async def draft_plan(
     person_reviews_scope: bool = False,
     earlier_questions: list[str] | None = None,
     supervisor_instruction: str | None = None,
+    max_plan_steps: int = DEFAULT_PLAN_STEPS,
 ) -> CoordinatorResult:
     """Ask the model for a draft, validate it in code, send rejections back at most max_replans times.
     person_reviews_scope: see assemble_plan (True when a person will see the approval screen); the planner is also told so.
@@ -787,7 +793,8 @@ async def draft_plan(
             result.notes.append(f"attempt {attempt}: {problems[0]}")
             continue
         plan, problems, notes = assemble_plan(question, draft, metadata, base_url=base_url, now=now,
-                                              plan_id=f"plan_{run_id}_{uuid.uuid4().hex[:6]}", person_reviews_scope=person_reviews_scope)
+                                              plan_id=f"plan_{run_id}_{uuid.uuid4().hex[:6]}", person_reviews_scope=person_reviews_scope,
+                                              max_plan_steps=max_plan_steps)
         result.notes.extend(notes)
         if plan is not None:
             result.plan = plan

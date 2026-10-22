@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import dataclasses
 import json
 import math
 import re
@@ -350,9 +351,35 @@ def results_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def main(argv: list[str] | None = None, *, base_config: Callable[[str], Any] | None = None,
-         make_models: Callable[[], Any] | None = None, triage_model: Callable[[], Any] | None = None,
-         preflight: Callable[[str], list[str]] | None = None) -> int:
+# The budgets the benchmark may pass per run, above the app's own (5 fetches, 1 page per plot-record fetch, 12 plan steps).
+# Bidhan, 2026-10-21 ~17:58 UTC (answering Q1-Q3 of the baseline report): "yes, as benchmark-only settings the harness passes per
+# run (24 fetches, 10 pages, 30 steps); the app's defaults stay 5 / 1 / 12". The HTTP attempt cap of the approval follows them:
+# fetches x pages, never below the app's own. The time budget is not raised.
+BUDGET_LIMITS = {"max_fetches": 24, "max_pages": 10, "max_plan_steps": 30}
+
+
+def budgeted(base_config: Callable[[str], Any], *, max_fetches: int | None = None, max_pages: int | None = None,
+             max_plan_steps: int | None = None) -> Callable[[str], Any]:
+    """The run settings with the benchmark's budgets, or the settings unchanged when none is given. A budget above what Bidhan
+    allowed, or below 1, is refused."""
+    budgets = {"max_fetches": max_fetches, "max_pages": max_pages, "max_plan_steps": max_plan_steps}
+    for name, value in budgets.items():
+        if value is not None and not 1 <= value <= BUDGET_LIMITS[name]:
+            raise ValueError(f"{name} must be between 1 and {BUDGET_LIMITS[name]}, not {value}")
+    if all(value is None for value in budgets.values()):
+        return base_config
+
+    def make(question: str) -> Any:
+        config = base_config(question)
+        fetches = max_fetches or config.max_fetches
+        pages = max_pages or config.max_observation_pages
+        return dataclasses.replace(config, max_fetches=fetches, max_observation_pages=pages,
+                                   max_plan_steps=max_plan_steps or config.max_plan_steps,
+                                   max_http_attempts=max(config.max_http_attempts, fetches * pages))
+    return make
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the benchmark's sub-questions through the app and grade them by code.")
     parser.add_argument("--cache", required=True, type=Path, help="the cache folder to copy (it is never changed)")
     parser.add_argument("--subquestions", type=Path, default=SUBQUESTIONS)
@@ -361,7 +388,26 @@ def main(argv: list[str] | None = None, *, base_config: Callable[[str], Any] | N
     parser.add_argument("--only", default="", help="comma-separated sub_ids")
     parser.add_argument("--allow-live", action="store_true", help="let the app fetch what the copy lacks, after the scripted approval")
     parser.add_argument("--confirm", action="store_true", help="really run (uses the configured model; costs model calls)")
-    args = parser.parse_args(argv)
+    parser.add_argument("--max-fetches", type=int, default=None, help="benchmark budget: fetch calls per question (app: 5; at most 24)")
+    parser.add_argument("--max-pages", type=int, default=None, help="benchmark budget: pages per plot-record fetch (app: 1; at most 10)")
+    parser.add_argument("--max-plan-steps", type=int, default=None, help="benchmark budget: steps per plan (app: 12; at most 30)")
+    return parser.parse_args(argv)
+
+
+def budgets_record(args: argparse.Namespace, make_config: Callable[[str], Any]) -> dict[str, int]:
+    """What results.json says about the budgets the runs had ({} = the app's own settings), read from the same settings the
+    runs got (review of 2026-10-22: not recomputed from the live settings)."""
+    if args.max_fetches is None and args.max_pages is None and args.max_plan_steps is None:
+        return {}
+    config = make_config("budget record")
+    return {"max_fetches": config.max_fetches, "max_observation_pages": config.max_observation_pages,
+            "max_plan_steps": config.max_plan_steps, "max_http_attempts": config.max_http_attempts}
+
+
+def main(argv: list[str] | None = None, *, base_config: Callable[[str], Any] | None = None,
+         make_models: Callable[[], Any] | None = None, triage_model: Callable[[], Any] | None = None,
+         preflight: Callable[[str], list[str]] | None = None) -> int:
+    args = parse_args(argv)
     subs = load_subquestions(args.subquestions)
     tiers = [t.strip() for t in args.tiers.split(",") if t.strip()]
     not_checkable = [s["sub_id"] for s in subs if not s.get("checkable", True)]
@@ -382,13 +428,16 @@ def main(argv: list[str] | None = None, *, base_config: Callable[[str], Any] | N
     folder.mkdir(parents=True, exist_ok=False)
     cache_copy = folder / "cache"
     shutil.copytree(args.cache, cache_copy)
-    report = run_subquestions(subs, cache_copy=cache_copy, out_dir=folder / "out", base_config=base_config or harness.app.live_config,
+    config = budgeted(base_config or harness.app.live_config, max_fetches=args.max_fetches, max_pages=args.max_pages,
+                      max_plan_steps=args.max_plan_steps)
+    report = run_subquestions(subs, cache_copy=cache_copy, out_dir=folder / "out", base_config=config,
                               make_models=make_models or harness.app.default_models,
                               triage_model=triage_model if scripted else harness.app.default_triage_model,
                               preflight=preflight, allow_live=args.allow_live)
     models = "scripted" if scripted else "configured model: " + (", ".join(sorted({m for r in report["subquestions"]
                                                                                     for m in r["tokens"].get("models", [])})) or "see run logs")
-    report = {"started_utc": started.isoformat(), "models": models, "cache_copy": str(cache_copy), "not_checkable": not_checkable, **report}
+    report = {"started_utc": started.isoformat(), "models": models, "cache_copy": str(cache_copy), "not_checkable": not_checkable,
+              "budgets": budgets_record(args, config), **report}
     (folder / "results.json").write_text(json.dumps(report, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
     (folder / "results.md").write_text(results_markdown(report), encoding="utf-8")
     print(f"{sum(c['pass'] for c in report['by_tier'].values())} pass of {len(report['subquestions'])}; invented: "

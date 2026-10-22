@@ -37,6 +37,8 @@ from agents.retriever import RETRIEVER_SYSTEM_PROMPT, RETRIEVER_TOOLS, ApprovedT
 from brapi_client import PART2_DIR, Settings, load_settings
 from brapi_mcp_server import ToolContext, build_context
 from contracts import (
+    DEFAULT_PLAN_STEPS,
+    MAX_PLAN_STEPS,
     AnalysisReport,
     Claim,
     FetchApproval,
@@ -103,6 +105,7 @@ DATA_REVIEW_PROMPT = "continue to analysis / cancel: "
 _ASKED = "clarification needed: "            # how agents.analyst records the Analyst's question in the report's caveats
 _clock = time.monotonic                      # the clock the budget uses (llm.run_agent_loop's default); tests replace it
 MAX_CLARIFICATION_ROUNDS = 5       # an upper bound for any caller; the command line uses 1, the chat 3
+MAX_OBSERVATION_PAGES = 10         # pages per plot-record fetch any run may ask for (the benchmark's budget; the app's own is 1)
 STATES = ("supervise", "config", "plan", "clarify", "metadata", "catalog_list", "catalog_setup", "resolve", "approve", "retrieve", "review_data", "analyze",
           "render", "accept", "record")
 AnswerFn = Callable[[str], str]
@@ -121,6 +124,10 @@ class RunConfig:
     auto: bool = False
     max_fetches: int = 5
     max_http_attempts: int = 20
+    # Pages per plot-record fetch (observations, the plot list) and steps per plan. The app keeps 1 and 12; the benchmark may
+    # pass up to 10 and 30 (Bidhan, 2026-10-21: benchmark-only settings passed per run).
+    max_observation_pages: int = 1
+    max_plan_steps: int = DEFAULT_PLAN_STEPS
     out_dir: Path = PART2_DIR / "out"
     cache_dir: Path | None = None
     access_notes: Path = ACCESS_NOTES_PATH
@@ -175,6 +182,10 @@ class RunConfig:
             problems.append("max_fetches must be at least 1")
         if self.max_http_attempts < 1:
             problems.append("max_http_attempts must be at least 1")
+        if type(self.max_observation_pages) is not int or not 1 <= self.max_observation_pages <= MAX_OBSERVATION_PAGES:
+            problems.append(f"max_observation_pages must be an integer between 1 and {MAX_OBSERVATION_PAGES}")
+        if type(self.max_plan_steps) is not int or not 1 <= self.max_plan_steps <= MAX_PLAN_STEPS:
+            problems.append(f"max_plan_steps must be an integer between 1 and {MAX_PLAN_STEPS}")
         problems.extend(catalog_lists.config_problems(self.catalog_list, self.catalog_list_word))
         if (self.follow_up_of is None) != (self.carried_over is None):
             problems.append("follow_up_of and carried_over are set together")
@@ -626,8 +637,10 @@ class Controller:
         offline = cache_only or self.config.offline
         if offline:
             settings = replace(settings, mode="offline")
-        return build_context(cache_dir=self.cache_dir, out_dir=out_dir, run_id=run_id or self.run_id,
-                             offline=offline, settings=settings)
+        ctx = build_context(cache_dir=self.cache_dir, out_dir=out_dir, run_id=run_id or self.run_id,
+                            offline=offline, settings=settings)
+        ctx.observation_max_pages = self.config.max_observation_pages      # pages per plot-record fetch; the app's own is 1
+        return ctx
 
     @asynccontextmanager
     async def _memory_tools(self, ctx: ToolContext, phase: str, *, server_factory=None):
@@ -928,7 +941,7 @@ class Controller:
                                              base_url=server, budget=self.budget, run_id=self.run_id,
                                              log_dir=self.run_dir.parent, model_requested=self.models.requested, now=self.now(),
                                              person_reviews_scope=not self.config.auto,    # a person sees the approval screen first
-                                             earlier_questions=list(self.planner_questions),
+                                             earlier_questions=list(self.planner_questions), max_plan_steps=self.config.max_plan_steps,
                                              **({"supervisor_instruction": self._supervisor_revision}
                                                 if self._supervisor_revision else {}))   # so a reply such as "yes" makes sense
         self.agents.extend(self.coordination.agents)

@@ -156,7 +156,9 @@ def test_step_dependencies_must_be_earlier_steps():
 
 def test_plans_are_bounded_and_analysts_need_evidence():
     too_many = [step(f"step_{i}") for i in range(1, c.MAX_PLAN_STEPS + 2)]
-    rejects(lambda: c.Plan(**plan(steps=too_many)), "at most 12")
+    # The contract's absolute cap (30 since 2026-10-22: the benchmark may pass up to 30 plan steps). Each run's own limit, 12 in
+    # the app, is checked when a plan is assembled: tests/test_benchmark_budgets.py test_a_plan_longer_than_the_runs_limit_is_refused.
+    rejects(lambda: c.Plan(**plan(steps=too_many)), f"at most {c.MAX_PLAN_STEPS}")
     rejects(lambda: c.Plan(**plan(steps=[])), "at least 1")
     rejects(lambda: c.Plan(**plan(steps=[step("step_1", "analyst", "numeric_summary")])), "must depend on at least one retriever step")
     # a chain of analyst steps traces back to the retriever step it started from (export -> filter -> count): accepted since 2026-09-29;
