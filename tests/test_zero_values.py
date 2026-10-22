@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 import analyst_tools as at
+import brapi_client as bc
 import brapi_mcp_server as srv
 import chat_presenter as cp
 import run as ctl
@@ -69,10 +70,20 @@ def test_answers_from_sweetpotatobase_observations_carry_the_note_once(ctx):
     assert "source 2" in cp.answer_summary(answers["two tables"])
 
 
-@pytest.mark.parametrize("server, expected", [(SPB, 1), ("https://www.sweetpotatobase.org/brapi/v2", 1),
-                                              ("https://synthetic.invalid/brapi/v2", 0), ("https://cassavabase.org/brapi/v2", 0)])
-def test_a_real_run_carries_the_note_only_on_sweetpotatobase(monkeypatch, tmp_path, server, expected):
-    """The real Controller, offline, with the synthetic study cached under each address (review 2026-10-22)."""
+@pytest.mark.parametrize("server, plot_records", [(SPB, True), ("https://www.sweetpotatobase.org/brapi/v2", True),
+                                                  ("https://synthetic.invalid/brapi/v2", False), ("https://cassavabase.org/brapi/v2", False)])
+def test_a_real_run_reads_the_plot_records_on_sweetpotatobase_and_never_needs_the_note(monkeypatch, tmp_path, server, plot_records):
+    """The real Controller, offline, with the synthetic study cached under each address (review 2026-10-22). Until item (3)
+    of 2026-10-22 a run on sweetpotatobase.org read /observations and carried the note (expected 1); it now reads the plot
+    records, which keep the zeros, so the note would be false there: no real run carries it. The note itself is still pinned
+    for an /observations table of that server by the tests above. Both paths give the same answer on the synthetic study."""
+    controller = real_run(monkeypatch, tmp_path, server)
+    tables = [a for a in controller.retrieval.artifacts if a.kind == "observations"]
+    assert tables and all(any(note.startswith(bc.PLOT_RECORDS_NOTE) for note in a.quality_notes) is plot_records for a in tables)
+    assert n(cp.answer_summary(controller)) == 0
+
+
+def real_run(monkeypatch, tmp_path, server):
     part2_runtime(monkeypatch, server=server)
     seed_synthetic(CacheStore(tmp_path / "cache"), server)
     config = part2_config(question="For synthetic study S1, give mean yield and clone means with n.", offline=False,
@@ -81,7 +92,15 @@ def test_a_real_run_carries_the_note_only_on_sweetpotatobase(monkeypatch, tmp_pa
     controller = ctl.Controller(config, models=synthetic_models())
     result = asyncio.run(controller.run())
     assert result.execution_status == "completed" and controller.base_url == server
-    assert n(cp.answer_summary(controller)) == expected
+    return controller
+
+
+def test_both_paths_give_the_same_numbers_on_the_synthetic_study(monkeypatch, tmp_path):
+    """The synthetic plot records hold the same V1 values as the synthetic /observations reply (plus an other trait's values,
+    which are dropped), so a run on sweetpotatobase.org (plot records) and on cassavabase.org (/observations) state the same."""
+    numbers = [sorted((c.transformation, c.value) for c in real_run(monkeypatch, tmp_path / name, server).analysis.claims)
+               for name, server in (("spb", SPB), ("cassava", "https://cassavabase.org/brapi/v2"))]
+    assert numbers[0] and numbers[0] == numbers[1]
 
 
 def test_stop_and_failure_screens_never_carry_it(ctx):

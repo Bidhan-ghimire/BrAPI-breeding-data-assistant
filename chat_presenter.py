@@ -7,6 +7,7 @@ import re
 from collections import Counter, defaultdict
 from typing import Any
 
+import brapi_client
 from analyst_tools import MISSING_GROUP
 from catalog_answers import plain_reason as catalog_plain
 from contracts import Claim
@@ -548,15 +549,15 @@ def _empty_tables(controller: Any) -> list[str]:
 # benchmark grader reads every digit of the answer.
 ZEROS_LEFT_OUT = ("This database's /observations service leaves out values recorded as zero, so measurements of zero (such as a "
                   "failed plot's yield or a white-fleshed clone's beta-carotene) are missing from these numbers.")
-_ZEROS_LEFT_OUT_HOSTS = ("sweetpotatobase.org",)
-
-
 def _zeros_left_out(controller: Any) -> bool:
-    """Was this answer built from an /observations table of a server known to leave out values recorded as 0?"""
-    host = source_host(getattr(controller, "base_url", None) or "").lower()
+    """Was this answer built from an /observations table of a server known to leave out values recorded as 0? The servers are
+    brapi_client.PLOT_RECORD_HOSTS; since item (3) of 2026-10-22 get_observations reads their plot records, which keep the
+    zeros, and such a table carries brapi_client.PLOT_RECORDS_NOTE among its quality notes: it needs no note."""
     artifacts = getattr(getattr(controller, "retrieval", None), "artifacts", None) or []
-    return (any(host == known or host.endswith("." + known) for known in _ZEROS_LEFT_OUT_HOSTS)
-            and any(getattr(artifact, "kind", None) == "observations" for artifact in artifacts))
+    return (brapi_client.reads_plot_records(getattr(controller, "base_url", None) or "")
+            and any(getattr(artifact, "kind", None) == "observations"
+                    and not any(str(note).startswith(brapi_client.PLOT_RECORDS_NOTE) for note in getattr(artifact, "quality_notes", None) or [])
+                    for artifact in artifacts))
 
 
 def _caveats(controller: Any, claims: list[Claim]) -> list[str]:
@@ -743,8 +744,11 @@ def approval_summary(controller: Any) -> str:
                 _text(f"{variable_id} · {getattr(variables.get(variable_id), 'name', '') or 'name not stated'} "
                       f"({getattr(variables.get(variable_id), 'unit', None) or 'unit not stated'})")
                 for variable_id in manifest.observation_variable_ids) + "."]
+        excluded = ("the plot records also carry other traits' values, which are dropped before any table, preview or answer "
+                    "(the raw pages stay in the local request cache)"
+                    if brapi_client.reads_plot_records(manifest.base_url) else "other observations are excluded")   # C8, 2026-10-22
         lines += [f"At least {len(pairs) + len(units)} data fetches: {len(pairs)} study/trait requests and {len(units)} plot rosters.",
-                  "Approval covers only these observation study IDs and trait IDs; other observations are excluded."]
+                  f"Approval covers only these observation study IDs and trait IDs; {excluded}."]
     else:
         lines += ["", "**Catalog question: no observation requests.**"]
         scoped = list(plan.scope.study_ids)

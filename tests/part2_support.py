@@ -38,6 +38,7 @@ NORMAL_FIXTURES = [
     "synthetic_variables.json",
     "synthetic_observations_S1_V1.json",
     "synthetic_observationunits_S1.json",
+    "synthetic_plotrecords_S1.json",    # the same plots with their values (item (3), 2026-10-22): read on a server that drops zeros
     "synthetic_locations.json",
     "synthetic_programs.json",
     "synthetic_seasons.json",

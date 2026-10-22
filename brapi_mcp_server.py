@@ -19,7 +19,7 @@ from typing import Any, Callable, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from artifacts import ArtifactError, ArtifactRegistry, cell_text
-from brapi_client import PART2_DIR, BrapiClient, BrapiClientError, Settings, load_settings
+from brapi_client import PART2_DIR, BrapiClient, BrapiClientError, Settings, load_settings, reads_plot_records
 from cache_store import CacheStore
 from contracts import (
     CollectionResult,
@@ -385,9 +385,12 @@ def tool_get_observations(ctx: ToolContext, a: GetObservationsArgs) -> ToolResul
     and return its handle, a small preview, the true row count, the completeness status and the
     study-status ledger. The full table is never returned in the message; the Analyst reads the
     artifact by handle. An incomplete fetch stays incomplete (complete=False, status). Live access
-    requires a FetchApproval held by the controller; tool arguments cannot supply one."""
-    result = ctx.client.observations(a.study_db_id, a.variable_db_id, approval=ctx.approval, paging=ctx.observation_max_pages > 1,
-                                     max_pages=ctx.observation_max_pages)
+    requires a FetchApproval held by the controller; tool arguments cannot supply one. On a server whose
+    /observations leaves out values recorded as 0 (brapi_client.PLOT_RECORD_HOSTS), the values are read
+    from the plot records instead, the same columns, only this variable (item (3) of 2026-10-22)."""
+    fetch = ctx.client.plot_records if reads_plot_records(ctx.client.settings.base_url) else ctx.client.observations
+    result = fetch(a.study_db_id, a.variable_db_id, approval=ctx.approval, paging=ctx.observation_max_pages > 1,
+                   max_pages=ctx.observation_max_pages)
     rows = [{k: _text(r.get(k)) for k in OBSERVATION_COLUMNS} for r in result.records]
     variable_names = {str(r.get("observationVariableName")) for r in result.records if r.get("observationVariableName")}
     known = ctx.variable_measurements.get(a.variable_db_id)

@@ -39,6 +39,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from cache_store import CacheEntry, CacheIdentity, CacheStore, sha256_bytes
 from contracts import (
@@ -267,10 +268,107 @@ def _family_for(endpoint: str) -> str:
     raise BrapiClientError("invalid_argument", f"endpoint {endpoint!r} is not on the allowlist")
 
 
+def _measurement_family(endpoint: str, authorize_as: str | None, params: Mapping[str, Any] | None = None) -> str:
+    """The approval family a request is checked against: its endpoint's, except a plot-record fetch (/observationunits with
+    includeObservations), which reads measurements and is checked as "observations" — the study, the variable and the
+    measurement approval (safety review of 2026-10-22, C6: adding the plot-list family to the approval instead also let plain
+    plot lists through that the plan never asked for). Nothing else may be authorized as anything but its own family, and the
+    request must ask for the observations (second review: a plain plot list could otherwise go out under the measurement check)."""
+    family = _family_for(endpoint)
+    if authorize_as is None:
+        return family
+    if (authorize_as, family) != ("observations", "observationunits") or str((params or {}).get("includeObservations")).lower() != "true":
+        raise BrapiClientError("invalid_argument", f"only a plot-record fetch (includeObservations=true) is checked as measurements, "
+                                                   f"not {endpoint!r} as {authorize_as!r}")
+    return authorize_as
+
+
 def _check_id(value: str, label: str) -> str:
     if not isinstance(value, str) or not _ID_RE.match(value) or ".." in value or set(value) <= {"."}:
         raise BrapiClientError("invalid_argument", f"{label} must be a plain ID string, got {value!r}")
     return value
+
+
+PLOT_RECORD_PAGE_SIZE = 250          # sweetpotatobase.org caps /observationunits pages at 250 (1000 per page was too large, 2026-10-21)
+# The servers whose /observations leaves out every value recorded as 0 (size check of 2026-10-21). There, get_observations reads
+# the plot records instead (item (3) of 2026-10-22); the approval covers them and the answer's zeros note is not needed. The one
+# list for the switch, the approval and the note; a server is added only once measured.
+PLOT_RECORD_HOSTS = ("sweetpotatobase.org",)
+PLOT_RECORDS_NOTE = "source: the plot records (observationunits?includeObservations=true), which keep values recorded as 0"
+
+
+def reads_plot_records(base_url: str) -> bool:
+    """Are this server's measurements read from the plot records? Matched by host, exactly or as a subdomain, in any case and
+    with any port; anything else (another host, a longer name that only starts with a listed one, no host) is not."""
+    host = (urlsplit(base_url or "").hostname or "").lower()
+    return bool(host) and any(host == known or host.endswith("." + known) for known in PLOT_RECORD_HOSTS)
+_UNIT_FIELDS = ("observationUnitDbId", "observationUnitName", "germplasmDbId", "germplasmName", "studyDbId")
+_OBSERVATION_FIELDS = ("observationDbId", "observationVariableDbId", "observationVariableName", "observationTimeStamp", "value")
+
+
+def _plot_record_rows(units: CollectionResult, study_id: str, variable_id: str) -> CollectionResult:
+    """The plot records' observations of ONE variable as /observations-shaped rows (the unit's identity fields plus the
+    observation's), with the units collection's own proof of completeness. Every other variable's value is dropped here, before
+    anything is cached as a table, previewed or saved. Units with no readable observations list at all mean the server ignored
+    includeObservations: "unsupported", not "empty". Safety review of 2026-10-22 (C11, C12.1; none of it seen on real data):
+    some units without a readable list, one observation listed under two plots, or a plot of another study make the result
+    "unknown" (never complete); a failed or incomplete fetch keeps its own status."""
+    rows: list[dict[str, Any]] = []
+    readable = other_study = unreadable = 0
+    for unit in units.records:
+        observations = unit.get("observations")
+        if not isinstance(observations, list):
+            continue
+        readable += 1
+        if unit.get("studyDbId") not in (None, "", study_id):
+            other_study += 1                                     # a plot of another study: its values are not this study's
+            continue
+        for observation in observations:
+            if not isinstance(observation, dict) or observation.get("observationVariableDbId") in (None, ""):
+                unreadable += 1                                  # it could be a value of this variable: no proof of completeness
+                continue
+            if str(observation.get("observationVariableDbId")) != variable_id:
+                continue
+            row: dict[str, Any] = {field: unit.get(field) for field in _UNIT_FIELDS}
+            row["studyDbId"] = row["studyDbId"] or study_id
+            row.update({field: observation.get(field) for field in _OBSERVATION_FIELDS})
+            rows.append(row)
+    status, complete, warnings = units.status, units.complete, list(units.warnings)
+    settled = status not in ("failed", "incomplete")          # a failed or incomplete fetch keeps its own status
+
+    def doubt(new_status: str, warning: str) -> None:
+        nonlocal status, complete
+        if settled:
+            status, complete = new_status, False
+        warnings.append(warning)
+
+    ids = [row.get("observationDbId") for row in rows if row.get("observationDbId") not in (None, "")]
+    twice, without_id = len(ids) - len(set(ids)), len(rows) - len(ids)
+    if units.records and readable == 0:
+        doubt("unsupported", "the plot records came without observations: this server does not honour includeObservations=true, "
+                             "so no measurement was read from them")
+    else:
+        if readable < len(units.records):
+            doubt("unknown", f"{len(units.records) - readable} of {len(units.records)} plots came without readable observations; "
+                             "their values could not be read")
+        if other_study:
+            doubt("unknown", f"{other_study} plot{'' if other_study == 1 else 's'} of another study were dropped")
+        if twice:
+            doubt("unknown", f"{twice} observation{'' if twice == 1 else 's'} of variable {variable_id} listed twice (under more "
+                             "than one plot)")
+        if without_id:
+            doubt("unknown", f"{without_id} value{'' if without_id == 1 else 's'} of variable {variable_id} without an observation "
+                             "ID, so a value listed twice could not be seen")
+        if unreadable:
+            doubt("unknown", f"{unreadable} observation{'' if unreadable == 1 else 's'} could not be read (not an object, or "
+                             "without a variable ID)")
+        if status == "complete" and not rows:
+            status = "empty"
+    warnings.append(f"{PLOT_RECORDS_NOTE}: {len(units.records)} units read, {len(rows)} values of variable {variable_id} kept; "
+                    "values of other variables were dropped before any table, preview or answer (the raw pages stay in the local "
+                    "request cache)")
+    return units.model_copy(update={"records": rows, "returned_count": len(rows), "reported_total": None, "status": status,
+                                    "complete": complete, "warnings": warnings})
 
 
 # --------------------------------------------------------------------------
@@ -401,6 +499,7 @@ class BrapiClient:
         deadline_at: float | None = None,
         study_id: str | None = None,
         variable_id: str | None = None,
+        authorize_as: str | None = None,
     ) -> tuple[dict[str, Any], RequestRecord]:
         """Cache first; then, only in live mode with a valid approval, bounded HTTP attempts.
 
@@ -409,7 +508,7 @@ class BrapiClient:
         Raises BrapiClientError with a code when nothing valid could be obtained.
         """
         self._check_cancelled()
-        family = _family_for(endpoint)
+        family = _measurement_family(endpoint, authorize_as, params)
         identity = CacheIdentity(base_url=self.settings.base_url, endpoint=endpoint, params=dict(params or {}))
         deadline_at = self._clock() + self.settings.operation_deadline if deadline_at is None else deadline_at
 
@@ -533,8 +632,10 @@ class BrapiClient:
         expensive: bool = False,
         study_id: str | None = None,
         variable_id: str | None = None,
+        authorize_as: str | None = None,
     ) -> CollectionResult:
         """Fetch up to max_pages pages and say honestly whether the collection is complete."""
+        _measurement_family(endpoint, authorize_as, params)          # an authorize_as other than a plot-record fetch is refused here
         params = dict(params or {})
         if _RESERVED_PARAMS & params.keys():
             raise BrapiClientError("invalid_argument", "page and pageSize are managed by the client; do not pass them")
@@ -561,7 +662,8 @@ class BrapiClient:
             log_before = len(self.request_log)
             try:
                 envelope, record = self.get(endpoint, page_params, approval=approval, expensive=expensive,
-                                            deadline_at=deadline_at, study_id=study_id, variable_id=variable_id)
+                                            deadline_at=deadline_at, study_id=study_id, variable_id=variable_id,
+                                            authorize_as=authorize_as)
             except BrapiClientError as exc:
                 warnings.append(f"page {page_number}: {exc}")
                 request_ids.extend(r.request_id for r in self.request_log[log_before:])   # failed attempts count too
@@ -792,6 +894,21 @@ class BrapiClient:
         _check_id(study_id, "study_id")
         return self.get_all("/observationunits", {"studyDbId": study_id}, approval=approval,
                             max_pages=max_pages if paging else 1, expensive=True, study_id=study_id)
+
+    def plot_records(self, study_id: str, variable_id: str, *, approval: FetchApproval | None = None,
+                     paging: bool = False, max_pages: int = 1) -> CollectionResult:
+        """ONE study's plot records with their recorded values (GET /observationunits?includeObservations=true), flattened to
+        /observations-shaped rows and reduced to ONE approved variable: no other trait's value leaves the client. Why: this
+        database's /observations leaves out every value recorded as 0 (2026-10-21: 7 of the 388 yield values of study 4577);
+        the plot records carry them. Same allowlist, approval (the measurement approval: study, variable, observations), page cap,
+        timeouts and 429 rule as every collection; 250 units per page (the server's cap); timeouts are never retried. A server
+        that ignores includeObservations gives units without an observations key: the result is "unsupported", never "empty"."""
+        _check_id(study_id, "study_id")
+        _check_id(variable_id, "variable_id")
+        units = self.get_all("/observationunits", {"studyDbId": study_id, "includeObservations": "true"}, approval=approval,
+                             max_pages=max_pages if paging else 1, page_size=PLOT_RECORD_PAGE_SIZE, expensive=True,
+                             study_id=study_id, variable_id=variable_id, authorize_as="observations")
+        return _plot_record_rows(units, study_id, variable_id)
 
     def locations(self, *, approval: FetchApproval | None = None, max_pages: int = 1) -> CollectionResult:
         return self.get_all("/locations", approval=approval, max_pages=max_pages)

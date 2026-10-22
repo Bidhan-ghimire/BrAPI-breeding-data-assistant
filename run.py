@@ -34,7 +34,7 @@ from agents.coordinator import (
     sanitize_prose,
 )
 from agents.retriever import RETRIEVER_SYSTEM_PROMPT, RETRIEVER_TOOLS, ApprovedTools, build_report, catalog_export_records
-from brapi_client import PART2_DIR, Settings, load_settings
+from brapi_client import PART2_DIR, Settings, load_settings, reads_plot_records
 from brapi_mcp_server import ToolContext, build_context
 from contracts import (
     DEFAULT_PLAN_STEPS,
@@ -420,7 +420,12 @@ def approval_lead(manifest: FetchManifest, plan: Plan) -> str:
     pairs, units = required_fetches(plan, manifest)
     parts = []
     if pairs:
-        parts.append(f"measurements of {_how_many(traits, 'trait', 'traits')} in {_how_many(studies, 'study', 'studies')}")
+        part = f"measurements of {_how_many(traits, 'trait', 'traits')} in {_how_many(studies, 'study', 'studies')}"
+        if reads_plot_records(manifest.base_url):         # item (3) of 2026-10-22; "zero" in words, like the answer's zeros note
+            kept = "only the approved trait is used" if traits == 1 else f"only the {traits} approved traits are used"
+            part += (", read from the plot records, which keep values recorded as zero (the plot records also carry other traits' "
+                     f"values; {kept})")
+        parts.append(part)
     if units:
         parts.append(f"the plot list{'' if len(units) == 1 else 's'} of {_how_many(len(units), 'study', 'studies')}")
     what = " and ".join(parts) or f"data for {_how_many(studies, 'study', 'studies')}"
