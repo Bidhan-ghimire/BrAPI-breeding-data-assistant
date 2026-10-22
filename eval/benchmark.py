@@ -57,6 +57,20 @@ _BLOCKED_STATUS = ("error", "stopped: the catalog setup needs an approval", "sto
 # A reply in the model's own words, with no run (the front door's talk reply): never an answer to score; the app's own
 # backstop allows only numbers from the person's words in it, so any other number is the red flag (review 10).
 MODEL_REPLY_STATUS = "no run: the app answered without starting one"
+# Report lines that quote the model, not what code did: its notes; the IDs it named that nothing fetched, returned or produced
+# (agents/retriever.py build_report and _drop_unknown_kinds, agents/analyst.py build_report); its rejected tool arguments; the
+# agents' questions, with any answer to them (run.py's clarification notes; the harness never answers); the supervisor's stop
+# reason. They back no number: an ID on the run's record only because the model named it is an invented ID's path (coach,
+# 2026-10-21 20:50 UTC, answer 2; review 2026-10-22).
+_MODEL_QUOTED = ("model:", "model note:", "model declared ids", "model listed resolved entries", "model named claim ids",
+                 "studies named by the model", "clarification ", "retriever clarification ", "analyst clarification ",
+                 "agent error malformed_arguments", "coordinator stopped the run:")
+# Coordinator notes that code writes about the planner's draft: a rejected attempt ("coordinator: attempt 2 rejected: ... at most
+# 12 items ..., not 14") and a dropped clarification. The draft's own IDs, names and questions sit in quotes or brackets
+# ("scope.study_ids names IDs that are not in the validated metadata: ['99991']", "dropped clarification 'Which 5 studies?'"):
+# those are blanked, the code's own numbers stay (review 2026-10-22).
+_DRAFT_LINES = ("coordinator: attempt", "coordinator: dropped clarification")
+_QUOTED_PART = re.compile(r"'[^']*'|\"[^\"]*\"|\{[^}]*\}|\[[^\]]*\]")
 # Runs whose answer is written by code from the saved catalog, not from claims about measurements: a list run.
 CATALOG_ACTIONS = ("list_catalog_names", "count_catalog_rows")
 
@@ -227,7 +241,8 @@ def run_numbers(run_dirs: Iterable[Path]) -> list[float]:
     code-written report fields (caveats, warnings, notes, exclusions) and the plain-digit study IDs of the study ledger (a
     refused fetch is reported as "Study 4777: ..."; variance run of 2026-10-21). Model text is not among them: a ledger
     entry's reason quotes the model's arguments, and its study_id is the model's own argument, so only an all-digit ID counts
-    (review 2026-10-21: "mean=12.5" as a study ID must stay unbacked)."""
+    (review 2026-10-21: "mean=12.5" as a study ID must stay unbacked); a report line that quotes the model (_MODEL_QUOTED)
+    backs nothing, and the planner draft's quoted IDs and questions in coordinator notes (_DRAFT_LINES) are blanked first."""
     found: list[float] = []
     for run_dir in run_dirs:
         for table in sorted((Path(run_dir) / "artifacts").glob("*.csv")):
@@ -242,8 +257,12 @@ def run_numbers(run_dirs: Iterable[Path]) -> list[float]:
                      *(doc.get("notes") or [])]
             found += [float(entry["study_id"]) for entry in (doc.get("retrieval") or {}).get("study_ledger") or []
                       if re.fullmatch(r"[0-9]+", str(entry.get("study_id") or ""))]
-            found += [n for t in texts if not str(t).lower().startswith(("model:", "model note:"))
-                      for n, *_ in _numbers(str(t))]
+            for text in map(str, texts):
+                if text.lower().startswith(_MODEL_QUOTED):
+                    continue
+                if text.lower().startswith(_DRAFT_LINES):
+                    text = _QUOTED_PART.sub(" ", text)
+                found += [n for n, *_ in _numbers(text)]
     return found
 
 

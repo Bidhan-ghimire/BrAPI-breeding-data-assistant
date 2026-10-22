@@ -321,3 +321,93 @@ def test_model_text_in_the_ledger_backs_nothing(tmp_path):
     shown = "**Question blocked.**\n\nThe mean is 12.5 t/ha; the other study gives 3.7."
     g = bench.grade(sub(), shown=shown, status="run ended", claims=[], backed_extra=backed)
     assert g["bucket"] == "invented" and sorted(i["value"] for i in g["invented"]) == [3.7, 12.5]
+
+
+def _with_report_lines(run, *, warnings=(), caveats=(), notes=()):
+    doc = json.loads((run / "answer.json").read_text(encoding="utf-8"))
+    doc["retrieval"]["warnings"], doc["analysis"], doc["notes"] = list(warnings), {"caveats": list(caveats)}, list(notes)
+    (run / "answer.json").write_text(json.dumps(doc), encoding="utf-8")
+    return run
+
+
+def test_an_id_the_model_only_named_stays_invented(tmp_path):
+    """Coach 2026-10-21 (20:50, answer 2): an ID that reaches the run's record only because the model NAMED it is an invented
+    ID's path. The study ledger holds only IDs passed to a fetch (fetched, or refused by the approval check), but report lines
+    quote IDs the model only named, and until now they backed them: the retriever's "studies named by the model but never
+    fetched: [...]" and its siblings, the analyst's unknown claim IDs, a rejected plan draft's study IDs (review 2026-10-22)."""
+    run = _with_report_lines(_run_dir(tmp_path, []), warnings=[
+        "studies named by the model but never fetched: ['99991']",
+        "studies named by the model for a catalog plan (no observation step; nothing to fetch for them): ['99992']",
+        "model declared IDs that no tool returned: ['study 99993']",
+        "model listed resolved entries of no entity kind, dropped: [\"'studies' '99994'\"]"],
+        caveats=["model named claim IDs that no tool produced: ['99995']"],
+        notes=["coordinator: attempt 1 rejected: scope.study_ids names IDs that are not in the validated metadata: ['99996']"])
+    backed = bench.run_numbers([run])
+    assert backed == [1.0]                                                     # the attempt number is the code's own
+    shown = "**Incomplete result.**\n\nStudies 99991, 99992, 99993, 99994, 99995 and 99996 were named but never fetched."
+    g = bench.grade(sub(), shown=shown, status="run ended", claims=[], backed_extra=backed)
+    assert g["bucket"] == "invented" and sorted(i["value"] for i in g["invented"]) == [99991, 99992, 99993, 99994, 99995, 99996]
+
+
+def test_report_lines_that_quote_the_model_back_nothing_and_code_lines_still_do(tmp_path):
+    """The model's notes, its rejected tool arguments, the agents' questions (with any answer: the harness never answers) and
+    the supervisor's stop reason are model text too. A line the code wrote still backs its numbers, in warnings, caveats and
+    notes alike; a model-quoting phrase inside a code line does not silence it (prefixes, not substrings)."""
+    run = _with_report_lines(_run_dir(tmp_path, []),
+                             warnings=["clarification needed: Is it study 4612 or 4614?", "model note: Fetched 952 rows.",
+                                       "agent error malformed_arguments: 'get_observations': 99993 is not of type 'string'",
+                                       "get_observation_units: stopped after 3 page(s)"],
+                             caveats=["clarification needed: The artifact has 40 plot records; which 12?", "model: The mean is 12.5.",
+                                      "group_stats: Measurement dates are not recorded for 951 of 951 valid source rows"],
+                             notes=["coordinator stopped the run: The analysis omits 26 claims.",
+                                    "clarification needed but --auto never asks: Which of 2 traits?",
+                                    "clarification 1: the planner asked: Which of 2 traits? - answer: 76581",
+                                    "retriever clarification 1: asked Is it study 4612?; answer: 4614",
+                                    "analyst clarification 1: the analyst asked: Which 13 plots? - answer: all 40",
+                                    "coordinator: matching_study_count=7 was counted by code from the scope, not taken from the model",
+                                    "coordinator: dropped clarification 'Which 5 studies?': study 4610 is uniquely named and its "
+                                    "metadata supplies location and season",
+                                    "coordinator: attempt 2 rejected: plan contract rejected the draft at steps: List should have "
+                                    "at most 12 items after validation, not 14"])
+    assert sorted(set(bench.run_numbers([run]))) == [2.0, 3.0, 7.0, 12.0, 14.0, 951.0, 4610.0]
+
+
+def test_a_model_quoting_line_backs_nothing_in_any_of_the_runs(tmp_path):
+    """Review 2026-10-22: every run folder of a sub-question is read the same way, whichever comes first."""
+    named = _with_report_lines(_run_dir(tmp_path / "a", []), warnings=["studies named by the model but never fetched: ['99991']"])
+    code = _with_report_lines(_run_dir(tmp_path / "b", []), warnings=["get_observation_units: stopped after 3 page(s)"])
+    assert bench.run_numbers([named, code]) == bench.run_numbers([code, named]) == [3.0]
+
+
+def test_the_lines_the_app_writes_back_nothing(tmp_path):
+    """Review 2026-10-22: the prefixes are pinned against the lines the app itself writes, so a reworded warning fails here
+    instead of quietly backing a model-named ID again."""
+    from types import SimpleNamespace
+
+    import agents.analyst as an
+    import test_retriever as tr
+    from contracts import AgentResult
+    from llm import Budget, FakeModelClient, reply_text, reply_tools
+
+    def payload_model(payload):
+        return FakeModelClient([reply_tools([("get_observation_units", json.dumps({"study_db_id": "S1"}))]),
+                                reply_text(json.dumps({"status": "completed", "payload": payload}))], reported_model="mock-model")
+
+    lines = []
+    for n, payload in enumerate(({"resolved": [], "studies": ["S1", "99991"], "notes": []},                    # named, never fetched
+                                 {"resolved": [{"kind": "study", "id": "99993"}], "studies": ["S1"], "notes": []},   # never returned
+                                 {"resolved": [{"kind": "studies", "id": "99994"}], "studies": ["S1"], "notes": []})):  # no such kind
+        report, *_ = tr.run_script(tmp_path / f"r{n}", "valid_request.json", model=payload_model(payload), request="How many plots?")
+        lines += report.warnings
+    malformed = FakeModelClient([reply_tools([("get_observations", json.dumps({"study_db_id": 99995, "variable_db_id": "V1"}))])],
+                                reported_model="mock-model")
+    report, *_ = tr.run_script(tmp_path / "r3", "valid_request.json", model=malformed, budget=Budget(max_repairs=0))
+    lines += report.warnings
+    agent = AgentResult(status="completed", payload={"methods": [], "caveats": [], "narrative": "n", "key_claim_ids": ["99992"]},
+                        model_requested="m", model_calls=1, tool_calls=0, elapsed_seconds=0.0)
+    caveats = an.build_report(agent, SimpleNamespace(records=[], claim_refs={}), SimpleNamespace(artifact_ids=[]))[0].caveats
+    for value in ("99991", "99993", "99994", "99995"):
+        assert any(value in line for line in lines), value                    # each was written by the app's own code
+    assert any("99992" in line for line in caveats)
+    run = _with_report_lines(_run_dir(tmp_path / "graded", []), warnings=lines, caveats=caveats)
+    assert not {99991.0, 99992.0, 99993.0, 99994.0, 99995.0} & set(bench.run_numbers([run]))
