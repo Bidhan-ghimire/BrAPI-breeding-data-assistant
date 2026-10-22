@@ -67,7 +67,7 @@ __all__ = [
 RETRIEVER_ACTIONS = frozenset({"server_info", "search_studies", "study_types", "get_study", "list_variables", "get_observations",
                                "list_locations", "list_programs", "list_seasons", "get_observation_units", "export_metadata"})
 ANALYST_ACTIONS = frozenset({"table_info", "numeric_summary", "group_stats", "filter_rows", "concat_tables", "missing_report", "count_records",
-                             "rank_entries", "threshold_count", "correlate_entry_means", "plot_design"})
+                             "rank_entries", "threshold_count", "correlate_entry_means", "plot_design", "anova_trial"})
 DISCOVERY_FAMILIES: frozenset[str] = frozenset({"serverinfo", "commoncropnames", "studies", "observationvariables", "locations", "programs", "seasons"})
 # Wording that makes a question about SEVERAL studies (so "all known studies" may be its scope). A question that names one study
 # by an unknown name has none of these, and then no study may be chosen for the user. Seen 2026-09-28: a strong model answered
@@ -444,7 +444,7 @@ Rules:
    A uniquely named study already tells us its location and season; do not ask for them.
 4. Steps: retriever actions are search_studies, list_variables, get_observations, get_observation_units, export_metadata,
    list_locations, list_seasons, get_study; analyst actions are table_info, numeric_summary, group_stats, count_records,
-   rank_entries, missing_report, filter_rows, concat_tables, threshold_count, correlate_entry_means, plot_design. Each step depends only on earlier steps; every analyst step traces back to a
+   rank_entries, missing_report, filter_rows, concat_tables, threshold_count, correlate_entry_means, plot_design, anova_trial. Each step depends only on earlier steps; every analyst step traces back to a
    retriever step, directly or through the earlier analyst steps it depends on (export -> filter -> count is fine; a step that
    depends on nothing is not). The list_* and search_* actions return
    previews only, never a table the analyst can use: a count over catalog rows (variables, studies, seasons, locations) needs an
@@ -487,6 +487,10 @@ Rules:
      and count_records(distinct_by="germplasmDbId") for the check entries (plot_design writes entryType in lower case, so
      "check" also finds CHECK and Check). The design fields are only what each plot's position states; nothing is read
      from names.
+   - the analysis of variance of ONE trial's plot values for one trait (ANOVA table, CV, LSD, variance components, entry-mean
+     heritability): get_observation_units and get_observations of that study, then plot_design(roster_artifact_id=...,
+     artifact_id=<the observations>) so each plot carries its rep, then anova_trial(artifact_id="<the table plot_design saved>")
+     - an RCBD with the reps, one-way when no plot states a rep; statistic kind "anova"; descriptive numbers, never "best".
    - narrowing a table: filter_rows(column="studyType", op="eq", value="Advanced Yield Trial"); op is one of eq, ne, contains,
      gt, ge, lt, le, is_missing, is_valid_number. A catalog table comes from export_metadata(entity="variables"); entity is one
      of studies, variables, locations, programs, seasons.

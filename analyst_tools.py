@@ -47,6 +47,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from artifacts import ArtifactError, ArtifactRegistry
 from contracts import ArtifactId, ArtifactManifest, Claim, Denominator, Exclusion, ToolError, ToolResult
+import pvalues
 
 __all__ = [
     "MISSING_TOKENS", "PLOTTING_ENABLED", "AnalystError", "classify_value", "ANALYST_TOOLS", "ANALYST_TOOL_NAMES",
@@ -471,8 +472,19 @@ class PlotDesignArgs(ToolArgs):
     allow_incomplete: bool = Field(default=False)
 
 
+class AnovaTrialArgs(ToolArgs):
+    artifact_id: ArtifactId = Field(description="the plot values of ONE study and ONE variable: for an RCBD the table plot_design saved "
+                                                "with each plot's rep column (a registered handle such as art_3f9a2c_0001)")
+    value: str = Field(default=VALUE_COL, description="the value column")
+    entry: str = Field(default="germplasmDbId", description="the entry (genotype) column")
+    rep: str = Field(default="rep", description="the replicate column (plot_design's rep); when the table has none, or no plot states "
+                                                "one, the analysis is one-way (entries only)")
+    duplicate_policy: DuplicatePolicy = Field(default="reject", description="what to do with repeated measurements of one plot")
+    allow_incomplete: bool = Field(default=False, description="analyse an incomplete artifact anyway, clearly labelled")
+
+
 # --------------------------------------------------------------------------
-# The twelve tools
+# The thirteen tools
 # --------------------------------------------------------------------------
 
 def tool_table_info(registry: ArtifactRegistry, a: TableInfoArgs) -> ToolResult:
@@ -1819,8 +1831,353 @@ def tool_plot_design(registry: ArtifactRegistry, a: PlotDesignArgs) -> ToolResul
     return ToolResult(ok=True, data=data, artifact_ids=ids, complete=complete, warnings=warnings)
 
 
+# The analysis of variance of one trial (T2, coach 2026-10-22 20:48 UTC; research build order tool 2; notes Q1, Q2 and Q11 of
+# Claude outputs/research_stats_tools_20261022/NOTES_plain_python_implementation.md): closed forms on complete data, and on an RCBD
+# with missing plots the least-squares (fitting-constants) analysis with reps first, from a small reps x reps system.
+ANOVA_NOTE = "descriptive analysis of variance of recorded plot values within one trial, not a recommendation"
+ANOVA_RESULT_COLUMNS = {
+    "source": "rep, entry, error or total (an RCBD with missing plots: entries adjusted for reps, reps first)",
+    "df": "degrees of freedom",
+    "ss": "sum of squares",
+    "ms": "mean square = SS / df ('' for total)",
+    "f": "F = MS / MS of error ('' for error and total)",
+    "p": "upper-tail probability of F ('' for error and total)",
+}
+ZERO_ERROR = "the error mean square is 0: the plots of each entry are identical, or the reps explain them exactly"
+BLOCK_COL = "block"                                       # plot_design's column (DESIGN_COLUMNS)
+H2_TEXT = ("entry-mean heritability H2 = sigma2 g / (sigma2 g + sigma2 e / r) = 1 - MS error / MS entry, broad sense and within this "
+           "trial: the genotype variance is confounded with genotype x environment here, which is why some tools call it repeatability")
+
+
+def _solve(matrix: list[list[float]], vector: list[float]) -> list[float] | None:
+    """The solution of matrix @ x = vector by Gaussian elimination with partial pivoting; None when the system is singular."""
+    n = len(vector)
+    m = [list(row) + [vector[i]] for i, row in enumerate(matrix)]
+    scale = max((abs(x) for row in matrix for x in row), default=0.0) or 1.0
+    for col in range(n):
+        pivot = max(range(col, n), key=lambda r: abs(m[r][col]))
+        if abs(m[pivot][col]) <= 1e-12 * scale:
+            return None
+        m[col], m[pivot] = m[pivot], m[col]
+        for r in range(n):
+            if r != col and m[r][col]:
+                factor = m[r][col] / m[col][col]
+                for k in range(col, n + 1):
+                    m[r][k] -= factor * m[col][k]
+    return [m[i][n] / m[i][i] for i in range(n)]
+
+
+def _groups_linked(cells: list[tuple[str, str]]) -> int:
+    """How many separate groups the entries and reps fall into when each plot links its entry and its rep (1 = connected)."""
+    parent: dict[tuple[str, str], tuple[str, str]] = {}
+
+    def root(node: tuple[str, str]) -> tuple[str, str]:
+        while parent.setdefault(node, node) != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    for entry, rep in cells:
+        parent[root(("entry", entry))] = root(("rep", rep))
+    return len({root(node) for node in list(parent)})
+
+
+@dataclass
+class _AnovaResult:
+    design: str                           # "RCBD" or "one-way"
+    rows: list[dict[str, Any]]            # source, df, ss, ms, f, p (None where not defined)
+    n: int
+    entries: int
+    reps: int | None
+    balanced: bool
+    adjusted: bool
+    empty_cells: int
+    plots_per_entry: dict[str, int]
+    grand_mean: float
+    ms_entry: float
+    ms_error: float
+    df_error: int
+
+
+def _row(source: str, df: int, ss: float, ms_error: float) -> dict[str, Any]:
+    """One ANOVA row, with its F against the error mean square (None when that is 0); p is added once the error df is known."""
+    ms = ss / df
+    return {"source": source, "df": df, "ss": ss, "ms": ms, "f": ms / ms_error if ms_error > 0 else None, "p": None}
+
+
+def _anova(plots: list[tuple[str, str | None, float]]) -> _AnovaResult:
+    """(entry, rep or None, value) per plot -> the analysis of variance. No rep anywhere: one-way (exact with unequal plot
+    counts). Reps: an RCBD; complete -> the closed form; missing plots -> fitting constants, reps first: with entries absorbed,
+    C beta = Q (C = diag(plots per rep) - N' diag(1 / plots per entry) N, Q the adjusted rep totals) gives SS reps adjusted for
+    entries = beta'Q, and SS entries adjusted for reps = SS entries ignoring reps + beta'Q - SS reps ignoring entries. Values are
+    centred on the grand mean first (the sums of squares do not change; less cancellation)."""
+    n = len(plots)
+    grand = math.fsum(v for _, _, v in plots) / n
+    centred = [(e, r, v - grand) for e, r, v in plots]
+    entries = sorted({e for e, _, _ in plots})
+    per_entry = Counter(e for e, _, _ in plots)
+    total_e = {e: 0.0 for e in entries}
+    for e, _, v in centred:
+        total_e[e] += v
+    ss_total = math.fsum(v * v for _, _, v in centred)
+    ss_entry_raw = math.fsum(total_e[e] ** 2 / per_entry[e] for e in entries)
+    t = len(entries)
+    if plots[0][1] is None:                                   # one-way
+        df_e = n - t
+        ss_error = math.fsum((v - total_e[e] / per_entry[e]) ** 2 for e, _, v in centred)   # from the residuals (review 2)
+        if ss_error <= 1e-14 * ss_total:
+            ss_error = 0.0                                    # an exact fit: floating residue, not error variance (review)
+        ms_error = ss_error / df_e
+        rows = [_row("entry", t - 1, ss_entry_raw, ms_error), {"source": "error", "df": df_e, "ss": ss_error, "ms": ms_error, "f": None, "p": None},
+                {"source": "total", "df": n - 1, "ss": ss_total, "ms": None, "f": None, "p": None}]
+        return _AnovaResult("one-way", rows, n, t, None, len(set(per_entry.values())) == 1, False, 0, dict(per_entry), grand,
+                            rows[0]["ms"], ms_error, df_e)
+    reps = sorted({r for _, r, _ in plots})  # type: ignore[type-var]
+    per_rep = Counter(r for _, r, _ in plots)
+    total_r = {r: 0.0 for r in reps}
+    for _, r, v in centred:
+        total_r[r] += v                                        # type: ignore[index]
+    ss_rep_raw = math.fsum(total_r[r] ** 2 / per_rep[r] for r in reps)
+    cell = {(e, r) for e, r, _ in plots}
+    q = [total_r[r] - math.fsum(total_e[e] / per_entry[e] for e in entries if (e, r) in cell) for r in reps]
+    c = [[(per_rep[r] if r == s else 0.0) - math.fsum(1.0 / per_entry[e] for e in entries if (e, r) in cell and (e, s) in cell)
+          for s in reps] for r in reps]
+    k = len(reps) - 1
+    beta = _solve([row[:k] for row in c[:k]], q[:k]) if k else []
+    if beta is None:
+        raise AnalystError("unsupported", "the entries and reps cannot be separated (singular design); no analysis of variance")
+    rep_effect = dict(zip(reps, [*beta, 0.0]))                # the last rep's effect fixed at 0
+    entry_effect = {e: (total_e[e] - math.fsum(rep_effect[r] for r in reps if (e, r) in cell)) / per_entry[e] for e in entries}
+    ss_error = math.fsum((v - entry_effect[e] - rep_effect[r]) ** 2 for e, r, v in centred)   # from the residuals (review 2)
+    if ss_error <= 1e-14 * ss_total:
+        ss_error = 0.0                                        # an exact fit: floating residue, not error variance (review)
+    ss_entry = ss_total - ss_error - ss_rep_raw               # sequential, reps first: SS model - SS reps ignoring entries
+    df_e = n - t - len(reps) + 1
+    ms_error = ss_error / df_e
+    rows = [_row("rep", len(reps) - 1, ss_rep_raw, ms_error), _row("entry", t - 1, ss_entry, ms_error),
+            {"source": "error", "df": df_e, "ss": ss_error, "ms": ms_error, "f": None, "p": None},
+            {"source": "total", "df": n - 1, "ss": ss_total, "ms": None, "f": None, "p": None}]
+    empty = t * len(reps) - len(cell)
+    return _AnovaResult("RCBD", rows, n, t, len(reps), empty == 0, empty > 0, empty, dict(per_entry), grand, rows[1]["ms"], ms_error, df_e)
+
+
+def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResult:
+    """The analysis of variance of ONE trial's plot values for one trait (research build order, tool 2): an RCBD (entries +
+    replicates) when every plot states its rep (the table plot_design saves with the measurements), one-way (entries only)
+    when the table has no rep column or no plot states one. Returns the ANOVA table (source, df, SS, MS, F, p), the grand mean,
+    CV % = 100 x sqrt(MS error) / grand mean, the SE of an entry mean sqrt(MS error / r), the SED sqrt(2 MS error / r), the LSD
+    (5%) = t(0.975, df error) x SED, the variance components sigma2 e = MS error and sigma2 g = (MS entry - MS error) / r (set to
+    0 and flagged when negative) and the entry-mean heritability sigma2 g / (sigma2 g + sigma2 e / r), within this trial. An RCBD
+    with missing plots gets the least-squares analysis with reps first (entries adjusted for reps), labelled adjusted; with
+    unequal plot counts r is the harmonic mean of the entries' plot counts, flagged. Values are averaged per plot first only
+    with duplicate_policy='mean_per_unit'. Refused, never guessed: more than one study or variable, two plots of one entry in
+    one rep, a rep on only some plots, a design that is not connected, fewer than 2 entries, an RCBD with fewer than 2 reps, no
+    error degrees of freedom. Descriptive numbers of recorded values, never a choice of entries."""
+    table = _load(registry, a.artifact_id)
+    variable = _single_variable(table)
+    studies = set(table.manifest.study_ids)
+    if "studyDbId" in table.manifest.columns:
+        studies |= {r.get("studyDbId", "") for r in table.rows if r.get("studyDbId", "")}
+    if len(studies) != 1:
+        raise AnalystError("unsupported", f"{table.manifest.artifact_id} holds the plots of {len(studies)} studies {sorted(studies)}; an "
+                                          "analysis of variance of one trial needs the plots of one study")
+    _require_column(table, a.value, "value column")
+    _require_column(table, a.entry, "entry column")
+    gate = _completeness_gate(table, a.allow_incomplete)
+    classified = _classify(table, a.value)
+    used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy)
+    exclusions = _exclusions(classified)
+    no_entry = sum(1 for row, _ in used if not row.get(a.entry, "").strip())
+    if no_entry:
+        exclusions.append(Exclusion(reason="rows without an entry", count=no_entry))
+    used = [(row, value) for row, value in used if row.get(a.entry, "").strip()]
+    by_plot: dict[str, list[tuple[dict[str, str], float]]] = {}
+    for i, (row, value) in enumerate(used):
+        by_plot.setdefault(row.get(UNIT_COL, "").strip() or f"(row {i} without a plot ID)", []).append((row, value))
+    repeated = {plot: rows for plot, rows in by_plot.items() if len(rows) > 1}
+    if repeated:
+        plot, rows = sorted(repeated.items())[0]
+        if a.duplicate_policy != "mean_per_unit":
+            raise AnalystError("unsupported", f"plot {plot} has {len(rows)} values (several dates or timepoints), and {len(repeated) - 1} other "
+                                              "plot(s) more than one; an analysis of variance needs one value per plot: pass "
+                                              "duplicate_policy='mean_per_unit' to average each plot's values first")
+        for plot, rows in sorted(repeated.items()):
+            if len({(r.get(a.entry, "").strip(), r.get(a.rep, "").strip()) for r, _ in rows}) > 1:
+                raise AnalystError("unsupported", f"plot {plot} is recorded with more than one entry or rep; its values cannot be averaged")
+        used = [(rows[0][0], math.fsum(v for _, v in rows) / len(rows)) for rows in by_plot.values()]
+        averaged = (f"each plot's values averaged over its dates ({sum(len(rows) for rows in repeated.values())} values in "
+                    f"{len(repeated)} plots)")
+        transformation = averaged if transformation.startswith("valid values used as recorded") else f"{transformation}; {averaged}"
+    has_reps = a.rep in table.manifest.columns
+    stated = sum(1 for row, _ in used if row.get(a.rep, "").strip()) if has_reps else 0
+    if 0 < stated < len(used):
+        raise AnalystError("unsupported", f"{len(used) - stated} plot(s) state no rep in column {a.rep!r} while {stated} do; an RCBD needs "
+                                          "every plot's rep (and a one-way analysis none)")
+    rcbd = stated > 0
+    if rcbd:
+        written: dict[Decimal, set[str]] = {}
+        for row, _ in used:
+            code = row[a.rep].strip()
+            if not _NUMERAL.fullmatch(code):
+                continue                                      # as the plot list: only numerals are compared as numbers
+            try:
+                number = Decimal(code)
+            except InvalidOperation:
+                continue
+            if number.is_finite():
+                written.setdefault(number, set()).add(code)
+        clashes = sorted(sorted(codes) for codes in written.values() if len(codes) > 1)
+        if clashes:
+            raise AnalystError("unsupported", f"rep codes {' and '.join(repr(c) for c in clashes[0])} are the same number written "
+                                              "differently, so they would count as different reps; write each rep one way")
+    stated_blocks = BLOCK_COL in table.manifest.columns and any(row.get(BLOCK_COL, "").strip() for row, _ in used)
+    blocks_in_reps = False
+    if stated_blocks and rcbd:
+        per_rep: dict[str, set[str]] = {}
+        for row, _ in used:
+            per_rep.setdefault(row[a.rep].strip(), set()).add(row.get(BLOCK_COL, "").strip())
+        blocks_in_reps = any(len(codes - {""}) > 1 for codes in per_rep.values())
+    plots = [(row[a.entry].strip(), row[a.rep].strip() if rcbd else None, value) for row, value in used]
+    entries = sorted({e for e, _, _ in plots})
+    if len(entries) < 2:
+        raise AnalystError("unsupported", f"an analysis of variance needs at least 2 entries; the table has {len(entries)} with a valid value")
+    if rcbd:
+        cells = Counter((e, r) for e, r, _ in plots)
+        doubled = [(e, r, k) for (e, r), k in sorted(cells.items()) if k > 1]
+        if doubled:
+            e, r, k = doubled[0]
+            raise AnalystError("unsupported", f"entry {e} has {k} plots in rep {r}: not an RCBD (one plot per entry and rep); "
+                                              f"{len(doubled)} entry x rep cell(s) hold more than one plot")
+        reps = sorted({r for _, r, _ in plots})  # type: ignore[type-var]
+        if len(reps) < 2:
+            raise AnalystError("unsupported", f"an RCBD needs at least 2 reps; every plot states rep {reps[0]!r}")
+        groups = _groups_linked(list(cells))
+        if groups > 1:
+            raise AnalystError("unsupported", f"the design is not connected: its entries and reps fall into {groups} separate groups, "
+                                              "so entry and rep effects cannot be told apart")
+        df_error = len(plots) - len(entries) - len(reps) + 1
+    else:
+        df_error = len(plots) - len(entries)
+    if df_error < 1:
+        raise AnalystError("unsupported", f"no error degrees of freedom ({len(plots)} plots, {len(entries)} entries"
+                                          + (f", {len({r for _, r, _ in plots})} reps" if rcbd else "") + "): at least 2 plots of some entry are needed")
+    res = _anova(plots)
+    counts = list(res.plots_per_entry.values())
+    equal = len(set(counts)) == 1
+    r_eff = float(counts[0]) if equal else len(counts) / math.fsum(1.0 / k for k in counts)
+    approximate = res.adjusted or not equal
+    if not approximate:
+        basis = f"every entry has {counts[0]} plot(s)"
+    elif equal:
+        basis = (f"r = {r_eff:.6g} plots per entry, but {res.empty_cells} entry x rep cell(s) have no plot, so the adjusted entry means "
+                 "are correlated: SE, SED and LSD are approximate (the SED of adjusted means differs per pair: larger on average, and "
+                 "for some pairs much larger)")
+    else:
+        basis = (f"r = {r_eff:.6g}, the harmonic mean of the entries' plot counts ({min(counts)} to {max(counts)}): SE, SED, LSD and H2 "
+                 "are approximate")
+    ms_e, ms_g = res.ms_error, res.ms_entry
+    zero_error = ms_e == 0
+    se, sed = math.sqrt(ms_e / r_eff), math.sqrt(2 * ms_e / r_eff)
+    lsd = None if zero_error else pvalues.t_quantile(0.975, res.df_error) * sed
+    cv = 100 * math.sqrt(ms_e) / res.grand_mean if res.grand_mean > 0 else None
+    s2g_raw = (ms_g - ms_e) / r_eff
+    set_to_zero = s2g_raw < 0
+    s2g = 0.0 if set_to_zero else s2g_raw
+    h2 = (s2g / (s2g + ms_e / r_eff)) if (s2g + ms_e / r_eff) > 0 else None
+    for row in res.rows:                                      # p of each F, from pvalues (T1)
+        if row["f"] is not None:
+            row["p"] = pvalues.f_upper_p(row["f"], row["df"], res.df_error)
+
+    aid = table.manifest.artifact_id
+    measurement = table.manifest.measurement
+    unit = getattr(measurement, "unit", None)
+    trait = getattr(measurement, "trait", None) or variable
+    study = next(iter(studies))
+    variant = hashlib.sha256(json.dumps([a.value, a.entry, a.rep, a.duplicate_policy, a.allow_incomplete]).encode()).hexdigest()[:8]
+    namespace = f"anova-{variant}"
+    shape = f"{res.n} plots: {res.entries} entries x {res.reps} reps" if rcbd else f"{res.n} plots: {res.entries} entries, no reps"
+    context = [f"{trait} in study {study}", shape]
+    if res.adjusted:
+        context.append(f"adjusted: least squares (fitting constants), reps first, {res.empty_cells} entry x rep cell(s) without a plot")
+    if approximate:
+        context.append(basis)
+    if blocks_in_reps:
+        context.append("incomplete blocks not modelled: the plots state several blocks within a rep (an incomplete-block design such as "
+                       "an alpha lattice); this analyses the enclosing RCBD, so any block variance stays in the error: if the blocks differ, "
+                       "MS error, CV, SED and LSD are larger and H2 lower than an incomplete-block analysis would give")
+    elif stated_blocks and not rcbd:
+        context.append("blocks not modelled: the plots state blocks but no reps; this one-way analysis ignores the blocks (if the "
+                       "blocks are the reps, pass rep='block')")
+    context += [transformation, ANOVA_NOTE] + ([gate] if gate else [])
+    tail = " | " + " | ".join(context)
+    n_units = len({row[UNIT_COL] for row, _ in used}) if classified.units_known else None
+    common = {"denominator": Denominator(name="plots in the analysis", n=res.n), "n_independent_units": n_units,
+              "source_artifact_hashes": [table.manifest.sha256], "grouping": [a.entry] + ([a.rep] if rcbd else []), "exclusions": exclusions}
+    claims: list[Claim] = []
+    for row in res.rows:
+        for quantity in ("df", "ss", "ms", "f", "p"):
+            value = row[quantity]
+            if value is None and not (quantity in ("f", "p") and row["source"] in ("rep", "entry")):
+                continue                                      # not part of the table: MS of total, F and p of error and total
+            claims.append(Claim(claim_id=_claim_id(aid, "anova", row["source"], quantity, namespace=namespace), kind="anova",
+                                value=value, missing_reason=ZERO_ERROR if value is None else None,
+                                transformation=f"{res.design} ANOVA: {quantity} of {row['source']}{tail}", **common))
+    claims.append(Claim(claim_id=_claim_id(aid, "mean", "grand", namespace=namespace), kind="mean", value=res.grand_mean, unit=unit,
+                        transformation=f"grand mean{tail}", **common))
+    for name, value, value_unit, reason in (("CV", cv, "%", "the grand mean is not above 0"),
+                                            ("SE of an entry mean", se, unit, None), ("SED", sed, unit, None), ("LSD (5%)", lsd, unit, ZERO_ERROR)):
+        claims.append(Claim(claim_id=_claim_id(aid, "precision", name, namespace=namespace), kind="precision", value=value, unit=value_unit,
+                            missing_reason=reason if value is None else None, transformation=f"{name}{tail}", **common))
+    flag = " | sigma2 g estimate negative, set to 0" if set_to_zero else ""
+    for name, value in (("genotype variance sigma2 g", s2g), ("error variance sigma2 e", ms_e)):
+        claims.append(Claim(claim_id=_claim_id(aid, "variance", name, namespace=namespace), kind="variance", value=value,
+                            transformation=f"{name}{tail}{flag if name.startswith('genotype') else ''}", **common))
+    claims.append(Claim(claim_id=_claim_id(aid, "heritability", "entry-mean", namespace=namespace), kind="heritability", value=h2,
+                        missing_reason=None if h2 is not None else "no variance between or within entries",
+                        transformation=f"entry-mean heritability H2{tail} | {H2_TEXT}{flag}", **common))
+
+    result_rows = [{"source": row["source"], "df": str(row["df"]),
+                    **{q: "" if row[q] is None else repr(row[q]) for q in ("ss", "ms", "f", "p")}} for row in res.rows]
+    lineage = [f"lineage: anova_trial of {aid} sha256={table.manifest.sha256}", f"design: {res.design}" + (", adjusted" if res.adjusted else ""),
+               f"analysis target: {ANALYSIS_TARGET}"]
+    manifest = registry.save_table(result_rows, kind="analysis_result", columns=ANOVA_RESULT_COLUMNS, complete=table.manifest.complete,
+                                   source_request_ids=list(table.manifest.source_request_ids), study_ids=[study], variable_ids=[variable],
+                                   quality_notes=lineage)
+    warnings = [w for w in (gate, classified.duplicate_note if a.duplicate_policy != "reject" else None) if w]
+    if not has_reps:
+        warnings.append(f"the table has no {a.rep!r} column: one-way analysis (entries only); for an RCBD, plot_design adds each plot's rep")
+    elif not rcbd:
+        warnings.append(f"no plot states a rep in column {a.rep!r}: one-way analysis (entries only)")
+    if res.adjusted:
+        warnings.append(f"{res.empty_cells} entry x rep cell(s) have no plot: entries adjusted for reps (least squares, reps first)")
+    if approximate:
+        warnings.append(f"approximate precision: {basis}")
+    if zero_error:
+        warnings.append(f"{ZERO_ERROR}; F, p and the LSD are not available")
+    if blocks_in_reps:
+        warnings.append("incomplete blocks not modelled: the plots state several blocks within a rep; analysed as the enclosing RCBD "
+                        "(any block variance stays in the error)")
+    elif stated_blocks and not rcbd:
+        warnings.append("blocks not modelled: the plots state blocks but no reps; this one-way analysis ignores them (if the blocks "
+                        "are the reps, pass rep='block')")
+    if set_to_zero:
+        warnings.append("MS entry is below MS error: the genotype variance estimate is negative and is set to 0, so H2 = 0")
+    if not classified.units_known:
+        warnings.append("independence unknown: some valid rows name no observation unit")
+    warnings.extend(_timing_warnings(table, a.value))
+    data = {"artifact_id": aid, "result_artifact_id": manifest.artifact_id, "design": res.design, "balanced": res.balanced,
+            "adjusted": res.adjusted, "anova": res.rows, "plots_used": res.n, "grand_mean": res.grand_mean, "cv_percent": cv, "se": se,
+            "sed": sed, "lsd_5pct": lsd, "t_0975": pvalues.t_quantile(0.975, res.df_error), "sigma2_g": s2g, "sigma2_e": ms_e,
+            "sigma2_g_estimate": s2g_raw, "h2": h2, "h2_set_to_zero": set_to_zero, "replication": r_eff, "replication_basis": basis,
+            "balance": {"entries": res.entries, "reps": res.reps, "plots": res.n, "empty_cells": res.empty_cells,
+                        "plots_per_entry_min": min(counts), "plots_per_entry_max": max(counts)},
+            "display": {k: _display(v) for k, v in (("grand_mean", res.grand_mean), ("cv_percent", cv), ("lsd_5pct", lsd), ("h2", h2))},
+            "claims": _claims_json(claims), "note": ANOVA_NOTE, "h2_text": H2_TEXT, "analysis_target": ANALYSIS_TARGET, "value_policy": VALUE_POLICY}
+    return ToolResult(ok=True, data=data, artifact_ids=[aid, manifest.artifact_id], complete=table.manifest.complete, warnings=warnings)
+
+
 # --------------------------------------------------------------------------
-# ONE registry of the twelve tools, schemas and dispatch
+# ONE registry of the thirteen tools, schemas and dispatch
 # --------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -1850,9 +2207,10 @@ ANALYST_TOOLS: dict[str, AnalystToolSpec] = {spec.name: spec for spec in [
     AnalystToolSpec("threshold_count", ThresholdCountArgs, tool_threshold_count),
     AnalystToolSpec("correlate_entry_means", CorrelateEntryMeansArgs, tool_correlate_entry_means),
     AnalystToolSpec("plot_design", PlotDesignArgs, tool_plot_design),
+    AnalystToolSpec("anova_trial", AnovaTrialArgs, tool_anova_trial),
 ]}
 ANALYST_TOOL_NAMES = list(ANALYST_TOOLS)
-assert len(ANALYST_TOOL_NAMES) == 12
+assert len(ANALYST_TOOL_NAMES) == 13
 
 
 def analyst_tool_schemas() -> list[dict[str, Any]]:

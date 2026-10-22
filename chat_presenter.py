@@ -157,7 +157,7 @@ def _mean_focus(controller: Any, claims: list[Claim]) -> bool:
     plan = getattr(controller, "plan", None)
     if getattr(getattr(plan, "statistic", None), "kind", None) != "mean" or sum(claim.kind == "mean" for claim in claims) != 1:
         return False
-    if any(claim.kind in ("rank", "correlation") or _THRESHOLD_ID.match(claim.claim_id) for claim in claims):
+    if any(claim.kind in ("rank", "correlation", "anova") or _THRESHOLD_ID.match(claim.claim_id) for claim in claims):
         return False
     words = person_words(getattr(plan, "question", ""))
     if not re.search(r"\b(?:mean|average)\b", words, re.I):
@@ -360,6 +360,97 @@ def _correlation_block(claims: list[Claim], source_labels: dict[tuple[str, ...],
     return lines, shown
 
 
+ANOVA_SENTENCE = "Descriptive numbers only: an analysis of variance of recorded plot values within one trial, not a recommendation."
+_ANOVA_CALL = re.compile(r"^(clm_v2_[0-9a-f]{6}_[0-9]{4,}_anova-[0-9a-f]{8})_")
+_ANOVA_KINDS = ("anova", "mean", "precision", "variance", "heritability")
+
+
+def _anova_number(value: float | int) -> str:
+    """4 decimals; 4 significant digits for a value below 0.001 or at 1e7 and above, so a small unit never reads as 0 (review)."""
+    if value == 0:
+        return "0"
+    if abs(value) < 0.001 or abs(value) >= 1e7:
+        return format(value, ".4g")
+    return _correlation(value)
+
+
+def _anova_cell(quantity: str, claim: Claim | None) -> str:
+    if claim is None:
+        return ""                                             # not part of the table (MS of total; F and p of error and total)
+    if claim.value is None:
+        return "n/a"                                          # the reason is stated under the table
+    if quantity == "df":
+        return str(int(claim.value))
+    if quantity == "p" and claim.value < 0.0001:
+        return "< 0.0001"
+    return _anova_number(claim.value)
+
+
+def _anova_block(claims: list[Claim], source_labels: dict[tuple[str, ...], str]) -> tuple[list[str], set[str]]:
+    """T2 (2026-10-22): the claims of one anova_trial call as the ANOVA table (Source, df, SS, MS, F, p), the trial and its shape,
+    the precision line (grand mean, CV, SE, SED, LSD), the variance components and the entry-mean heritability, then the
+    descriptive sentence. A number that is not available says why. Returns the lines and the IDs of the claims shown."""
+    calls: dict[str, list[Claim]] = defaultdict(list)
+    for claim in claims:
+        match = _ANOVA_CALL.match(claim.claim_id)
+        if match and claim.kind in _ANOVA_KINDS:
+            calls[match[1]].append(claim)
+    lines: list[str] = []
+    shown: set[str] = set()
+    for group in calls.values():
+        named = {claim.transformation.split(" | ")[0]: claim for claim in group}
+        first = next((claim for claim in group if claim.kind == "anova"), None)
+        if first is None:
+            continue
+        design = first.transformation.split(" ANOVA: ")[0]
+        rows = []
+        for source in ("rep", "entry", "error", "total"):
+            cells = [named.get(f"{design} ANOVA: {quantity} of {source}") for quantity in ("df", "ss", "ms", "f", "p")]
+            if cells[0] is not None:
+                rows.append([source.capitalize(), *(_anova_cell(q, c) for q, c in zip(("df", "ss", "ms", "f", "p"), cells))])
+        parts = first.transformation.split(" | ")[1:]
+        label = source_labels.get(tuple(sorted(first.source_artifact_hashes)), "")
+        lsd_claim = named.get("LSD (5%)")
+        unit_text = f" {_text(lsd_claim.unit)}" if lsd_claim is not None and lsd_claim.unit else ""
+
+        def stated(text: str, name: str, suffix: str) -> str | None:
+            claim = named.get(name)
+            if claim is None:
+                return None
+            if claim.value is None:
+                return f"{text} not available" + (f" ({_text(claim.missing_reason)})" if claim.missing_reason else "")
+            return f"{text} {_anova_number(claim.value)}{suffix}"
+
+        precision = [line for line in (stated("Grand mean", "grand mean", unit_text), stated("CV", "CV", " %"),
+                                       stated("SE of an entry mean", "SE of an entry mean", unit_text), stated("SED", "SED", unit_text),
+                                       stated("LSD (5%)", "LSD (5%)", unit_text)) if line]
+        variance = [line for line in (stated("genotype variance", "genotype variance sigma2 g", ""),
+                                      stated("error variance", "error variance sigma2 e", "")) if line]
+        h2 = stated("Entry-mean heritability (H²)", "entry-mean heritability H2", "")
+        h2_claim = named.get("entry-mean heritability H2")
+        undefined_f = next((c for c in group if c.kind == "anova" and c.value is None and c.missing_reason), None)
+        lines += [f"**Analysis of variance, {design}{label}**", "", _text("; ".join(parts[:2]) + "."), "",
+                  *_table(["Source", "df", "SS", "MS", "F", "p"], rows), ""]
+        if undefined_f is not None:
+            lines.append(f"F and p not available: {_text(undefined_f.missing_reason)}.")
+        if precision:
+            lines.append("; ".join(precision) + ".")
+        if variance:
+            lines.append("Variance components: " + ", ".join(variance) + ".")
+        if h2 is not None:
+            zero = h2_claim is not None and h2_claim.value is not None and "set to 0" in h2_claim.transformation
+            lines.append(h2 + (", within this trial" if h2_claim is not None and h2_claim.value is not None else "")
+                         + (" (set to 0: the genotype variance estimate was negative)" if zero else "") + ".")
+        for part in parts:
+            if part.startswith("r = "):
+                lines.append(_text("Replication: " + part + "."))
+            elif part.startswith(("adjusted:", "incomplete blocks not modelled:", "blocks not modelled:")):
+                lines.append(_text(part[0].upper() + part[1:] + "."))
+        lines += ["", ANOVA_SENTENCE, ""]
+        shown |= {claim.claim_id for claim in group}
+    return lines, shown
+
+
 def _numeric_blocks(claims: list[Claim], sources: _Sources, source_labels: dict[tuple[str, ...], str], *, focus_mean: bool = False) -> list[str]:
     groups: dict[tuple[Any, ...], list[Claim]] = defaultdict(list)
     for claim in claims:
@@ -369,7 +460,8 @@ def _numeric_blocks(claims: list[Claim], sources: _Sources, source_labels: dict[
         groups[key].append(claim)
     lines: list[str] = []
     labels = {"mean": "Mean", "median": "Median", "min": "Minimum", "max": "Maximum", "sd": "Sample standard deviation", "count": "Count",
-              "correlation": "Correlation"}
+              "correlation": "Correlation", "anova": "ANOVA", "precision": "Precision", "variance": "Variance component",
+              "heritability": "Heritability"}
     for key, group in groups.items():
         first = group[0]
         hashes = key[0]
@@ -666,7 +758,8 @@ def answer_summary(controller: Any) -> str:
     ranking, in_ranking = _ranking_block(claims, sources, source_labels)
     thresholds, in_threshold = _threshold_block(claims, sources, source_labels)
     correlations, in_correlation = _correlation_block(claims, source_labels)
-    in_ranking |= in_threshold | in_correlation
+    anova_lines, in_anova = _anova_block(claims, source_labels)
+    in_ranking |= in_threshold | in_correlation | in_anova
     # a mean the ranking table shows is not shown again (group_stats on the same table states the same entry mean; review)
     ranked_means = {(tuple(sorted(c.source_artifact_hashes)), tuple(sorted(c.filters.items())), c.value)
                     for c in claims if c.claim_id in in_ranking and c.kind == "mean" and c.claim_id not in in_threshold}
@@ -682,7 +775,7 @@ def answer_summary(controller: Any) -> str:
             buckets[(tuple(sorted(claim.source_artifact_hashes)), claim.grouping[0], claim.denominator.name, claim.denominator.n)].append(claim)
         else:
             other.append(claim)
-    lines: list[str] = [*ranking, *thresholds, *correlations]
+    lines: list[str] = [*ranking, *thresholds, *correlations, *anova_lines]
     in_catalog_titles: set[str] = set()              # distinct counts a catalog block's title already leads with
     for key, group in buckets.items():
         block = _catalog_block(group, sources, source_labels.get(key[0], ""), focus_count=focus_count)
