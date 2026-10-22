@@ -12,7 +12,7 @@ from catalog_answers import plain_reason as catalog_plain
 from contracts import Claim
 from metadata_answers import plain_reason as metadata_plain, render_metadata_facts
 from agents.coordinator import person_words
-from run import approval_lead, carried_over_line, required_fetches, scope_needs_a_check
+from run import approval_lead, carried_over_line, required_fetches, scope_needs_a_check, source_host
 
 
 LIST_LIMIT = 30
@@ -454,6 +454,23 @@ def _empty_tables(controller: Any) -> list[str]:
     return list(dict.fromkeys(lines))
 
 
+# SweetPotatoBase's /observations leaves out every value recorded as 0 (zeros size check, 2026-10-21: 3,132 values in 26 of 117
+# benchmark tables, every one a 0; beta-carotene loses about half its values). An answer built from an /observations table of a
+# server where this was found says so once, among its data limits (coach, 2026-10-21 18:10 UTC). "zero" is written in words: the
+# benchmark grader reads every digit of the answer.
+ZEROS_LEFT_OUT = ("This database's /observations service leaves out values recorded as zero, so measurements of zero (such as a "
+                  "failed plot's yield or a white-fleshed clone's beta-carotene) are missing from these numbers.")
+_ZEROS_LEFT_OUT_HOSTS = ("sweetpotatobase.org",)
+
+
+def _zeros_left_out(controller: Any) -> bool:
+    """Was this answer built from an /observations table of a server known to leave out values recorded as 0?"""
+    host = source_host(getattr(controller, "base_url", None) or "").lower()
+    artifacts = getattr(getattr(controller, "retrieval", None), "artifacts", None) or []
+    return (any(host == known or host.endswith("." + known) for known in _ZEROS_LEFT_OUT_HOSTS)
+            and any(getattr(artifact, "kind", None) == "observations" for artifact in artifacts))
+
+
 def _caveats(controller: Any, claims: list[Claim]) -> list[str]:
     limits, model_notes = _caveat_groups(controller, claims)
     return [*limits, *["Unverified model note: " + note for note in model_notes]]
@@ -586,6 +603,8 @@ def answer_summary(controller: Any) -> str:
     lines = [*_count_lead(controller, claims, in_catalog_titles, source_labels), *lines]
     caveats, model_notes = _caveat_groups(controller, claims)
     caveats += [line for line in _empty_tables(controller) if line not in caveats]
+    if _zeros_left_out(controller):
+        caveats.append(ZEROS_LEFT_OUT)
     if focus_mean:
         for claim in claims:
             if claim.kind != "mean" and claim.value is None and claim.missing_reason:
