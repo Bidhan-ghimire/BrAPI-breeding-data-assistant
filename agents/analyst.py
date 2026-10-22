@@ -30,13 +30,13 @@ __all__ = [
 
 FIXTURE_DIR = PART2_DIR / "tests" / "fixtures" / "model_analyst"
 NUMERIC_TOOLS = frozenset({"numeric_summary", "group_stats", "count_records", "rank_entries", "threshold_count", "correlate_entry_means"})   # return claims
-DERIVING_TOOLS = frozenset({"group_stats", "filter_rows", "concat_tables", "rank_entries", "threshold_count", "correlate_entry_means"})       # save new artifacts
+DERIVING_TOOLS = frozenset({"group_stats", "filter_rows", "concat_tables", "rank_entries", "threshold_count", "correlate_entry_means", "plot_design"})       # save new artifacts
 # Review 2 of R1 (2026-10-21): without "highest-yielding" this filter let "the highest-yielding clone, so it should be advanced"
 # through, so it stays until Bidhan decides how advice that rides on an ordering is caught (asked, not changed).
 _SUPERIORITY = re.compile(r"\b(best|superior|outperform\w*|top[- ]performing|winner|genetically (better|superior)|highest[- ]yielding)\b", re.IGNORECASE)
 
 ANALYST_SYSTEM_PROMPT = """You are the Analyst for a read-only plant-breeding database. You compute NOTHING yourself.
-You have eleven fixed tools that read registered artifacts (handles like art_3f9a2c_0001) and return typed claims.
+You have twelve fixed tools that read registered artifacts (handles like art_3f9a2c_0001) and return typed claims.
 Rules:
 1. Start with table_info for EVERY supplied artifact. Check that it is complete, that it measures the variable the
    question is about (trait, unit, timepoint), and whether duplicates or unknown independence are reported.
@@ -46,9 +46,11 @@ Rules:
    ranks) call rank_entries; for how many or what share of entries or plots are above / below a number or a named entry's
    mean call threshold_count (threshold_entries=["Beauregard"] for that entry's mean, computed per study; exclude=[...] for
    the other checks; name_prefix="PH17." for one family); for the correlation of two tables' entry means (one trait in two
-   studies, or two traits of the same studies) call correlate_entry_means(artifact_ids=[A, B]); for catalog questions call
-   count_records. Use exact column names from table_info. Never pass a file path, never invent a handle, never ask for a tool
-   you do not have.
+   studies, or two traits of the same studies) call correlate_entry_means(artifact_ids=[A, B]); for replicates, blocks, plots per
+   replicate or check entries call plot_design on the plot list (roster_artifact_id), then count_records or filter_rows on its
+   rep / block / entryType columns (pass a measurements table as artifact_id too to group its values by rep); for catalog
+   questions call count_records. Use exact column names from table_info. Never pass a file path, never invent a handle, never
+   ask for a tool you do not have.
 4. If a tool refuses (duplicates, incomplete data), read its message: either name the aggregation rule it asks for
    (duplicate_policy) or stop with needs_clarification. Do not work around a refusal.
 5. Every mean has a named denominator. A descriptive mean is not evidence that a clone is best, superior or

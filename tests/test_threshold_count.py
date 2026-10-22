@@ -194,9 +194,9 @@ def test_every_entry_or_plot_is_saved_with_its_role(registry):
 # --- 4. the menus, the prompts and the answer --------------------------------------------------------
 
 def test_every_menu_and_prompt_names_the_tool():
-    assert "threshold_count" in at.ANALYST_TOOL_NAMES and len(at.ANALYST_TOOL_NAMES) == 11      # with correlate_entry_means (R2 tool 2)
+    assert "threshold_count" in at.ANALYST_TOOL_NAMES and len(at.ANALYST_TOOL_NAMES) == 12      # with correlate_entry_means and plot_design (R2)
     assert "threshold_count" in an.NUMERIC_TOOLS and "threshold_count" in an.DERIVING_TOOLS
-    assert "eleven fixed tools" in an.ANALYST_SYSTEM_PROMPT and "threshold_count" in an.ANALYST_SYSTEM_PROMPT
+    assert "twelve fixed tools" in an.ANALYST_SYSTEM_PROMPT and "threshold_count" in an.ANALYST_SYSTEM_PROMPT
     assert "threshold_count" in co.ANALYST_ACTIONS and "threshold_count(" in co.COORDINATOR_SYSTEM_PROMPT
     schema = next(s for s in at.analyst_tool_schemas() if s["name"] == "threshold_count")
     assert "threshold_entries" in schema["inputSchema"]["properties"] and "named entries" in schema["description"]

@@ -423,7 +423,7 @@ def test_full_precision_is_kept_and_only_display_is_rounded(registry):
 
 def test_schemas_and_dispatch_guardrails(registry):
     schemas = at.analyst_tool_schemas()
-    assert [s["name"] for s in schemas] == at.ANALYST_TOOL_NAMES and len(schemas) == 11      # rank_entries (R1), threshold_count and correlate_entry_means (R2)
+    assert [s["name"] for s in schemas] == at.ANALYST_TOOL_NAMES and len(schemas) == 12      # rank_entries (R1); threshold_count, correlate_entry_means, plot_design (R2)
     assert all(s["inputSchema"]["additionalProperties"] is False and s["description"] for s in schemas)
     assert call(registry, "drop_table", artifact_id="art_abcdef_0001").error.code == "invalid_argument"
     assert call(registry, "numeric_summary", artifact_id="art_abcdef_0001", path="x.csv").error.code == "invalid_argument"

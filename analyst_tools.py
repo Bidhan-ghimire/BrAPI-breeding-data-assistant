@@ -40,6 +40,7 @@ import statistics
 import sys
 from collections import Counter
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -462,8 +463,16 @@ class CorrelateEntryMeansArgs(ToolArgs):
     allow_incomplete: bool = Field(default=False)
 
 
+class PlotDesignArgs(ToolArgs):
+    roster_artifact_id: ArtifactId = Field(description="the plot list: a COMPLETE observation_units artifact of one study, from "
+                                                       "get_observation_units (a registered handle such as art_3f9a2c_0001)")
+    artifact_id: ArtifactId | None = Field(default=None, description="optional: a measurements (observations) artifact of the same "
+                                                                     "study; each of its rows gets its plot's design columns")
+    allow_incomplete: bool = Field(default=False)
+
+
 # --------------------------------------------------------------------------
-# The eleven tools
+# The twelve tools
 # --------------------------------------------------------------------------
 
 def tool_table_info(registry: ArtifactRegistry, a: TableInfoArgs) -> ToolResult:
@@ -1471,8 +1480,347 @@ def tool_correlate_entry_means(registry: ArtifactRegistry, a: CorrelateEntryMean
                       complete=complete, warnings=warnings)
 
 
+# The design fields a plot's position object states (R2 tool 2, coach 2026-10-22 03:48 UTC, step 6): the plot list carries them
+# only inside one JSON text column, so the analyst could not count replicates (A35.2, A37.1) or find the checks (B29.2, B29.3).
+POSITION_COL = "observationUnitPosition"
+DESIGN_COLUMNS = {
+    "rep": "replicate code the plot's position states (observationLevelRelationships, levelName rep; '' = not stated)",
+    "block": "block code the plot's position states (levelName block; '' = not stated)",
+    "plot": "plot code the plot's position states (levelName plot, or its own observationLevel; '' = not stated)",
+    "entryType": "the position's entryType in lower case (trimmed and case-folded), for example check or test (CHECK, Check and "
+                 "check are all check; '' = not stated); any value other than check, test or filler is kept as stored and the call names it",
+    "row": "grid row: the position coordinate whose type is GRID_ROW ('' = not stated)",
+    "col": "grid column: the position coordinate whose type is GRID_COL ('' = not stated)",
+}
+_DESIGN_LEVELS = ("rep", "block", "plot")
+_GRID_AXES = {"GRID_ROW": "row", "GRID_COL": "col"}
+
+
+class _Unreadable(Exception):
+    """A position object that cannot be read as design fields (round 4, review 3 of 2026-10-22): a value of the wrong JSON type
+    where text is read, a code longer than 1,000 characters, or one the table cannot save. Counted and warned, never guessed."""
+
+
+ENTRY_TYPES = ("check", "test", "filler")      # the BrAPI entry types, after trimming and case-folding
+DESIGN_VALUE_LIMIT = 1000
+
+
+def _design_text(value: Any) -> str:
+    """A code as the position states it, trimmed. Numbers are read as the JSON text they were written in (1e2 stays "1e2");
+    NaN and null state nothing; true / false, a list or an object where text is read make the position unreadable."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise _Unreadable(f"{type(value).__name__} where text is read")
+    return value.strip()
+
+
+def _saved_text(value: Any) -> str:
+    """_design_text for a value plot_design writes into its table. A lone surrogate escape ("\\ud800") parses, but the table
+    cannot save it as UTF-8 (review 2 of 2026-10-22); a value longer than 1,000 characters would not load back (review 3): both
+    make the position unreadable."""
+    text = _design_text(value)
+    text.encode("utf-8")
+    if len(text) > DESIGN_VALUE_LIMIT:
+        raise _Unreadable("a value longer than 1,000 characters")
+    return text
+
+
+def _no_repeated_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    keys = [key for key, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise ValueError("a key is written twice in one object")     # the last value would win silently
+    return dict(pairs)
+
+
+def _has_text(value: str) -> bool:
+    """True when an ID has at least one character that str.isprintable() accepts and that is not a space: an ID made only of
+    spaces, control or format characters (a zero-width space) is no ID (review 4 of 2026-10-22). A lone combining mark or a
+    blank-looking letter such as U+3164 still counts; it joins only to the identical string."""
+    return any(ch.isprintable() and not ch.isspace() for ch in value)
+
+
+def _shown_key(value: str, width: int = 60) -> str:
+    """A value as a key of the tool's data: cut at `width` characters with an ellipsis, and a lone surrogate written as \\udXXX so
+    the result always serializes (review 5 of 2026-10-22: a 130,000-character level name, and a lone surrogate that made
+    ToolResult.model_dump_json() raise)."""
+    cut = value[:width] + ("…" if len(value) > width else "")
+    return cut.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
+def _plot_fields(unit: str, text: str) -> tuple[dict[str, str], str, str | None, set[str], set[str]]:
+    """The design fields one plot's position states ('' where it states none); why there are none ("empty", "unreadable", else
+    ""); the stored entryType when it is not check, test or filler (else None); and the level names and coordinate types the
+    position states but the tool does not read, as written. Nothing is read from names or numbers outside the position; a level
+    stated with two codes, or two plot codes, is refused. Review of 2026-10-22: a position nested 1,000 levels deep, or with a
+    key written twice, is unreadable, not a failure; review 2: so is one with a code the table cannot save; review 3 (round 4):
+    so is a value of the wrong JSON type, or one longer than 1,000 characters."""
+    fields = dict.fromkeys(DESIGN_COLUMNS, "")
+    nothing: tuple[set[str], set[str]] = (set(), set())
+    if not text.strip():
+        return fields, "empty", None, *nothing
+    try:
+        position = json.loads(text, parse_int=str, parse_float=str, parse_constant=lambda _name: None, object_pairs_hook=_no_repeated_keys)
+    except (ValueError, RecursionError):
+        return fields, "unreadable", None, *nothing
+    if not isinstance(position, dict):
+        return fields, "unreadable", None, *nothing
+    try:
+        fields, levels_not_read, types_not_read = _stated_fields(unit, position)
+    except (UnicodeEncodeError, _Unreadable):
+        return dict.fromkeys(DESIGN_COLUMNS, ""), "unreadable", None, *nothing
+    odd = fields["entryType"] if fields["entryType"] and fields["entryType"] not in ENTRY_TYPES else None
+    return fields, "", odd, levels_not_read, types_not_read
+
+
+def _stated_fields(unit: str, position: dict[str, Any]) -> tuple[dict[str, str], set[str], set[str]]:
+    """The design fields a readable position object states, with the level names (of its relations and of its own level) and
+    the coordinate types it states but the tool does not read, as written, once per plot (review 5 of 2026-10-22). Codes are
+    trimmed and stored as written; the entryType is trimmed and case-folded, because the BrAPI standard writes CHECK and
+    SweetPotatoBase writes check, and a filter on "check" must find both (review 2). Raises _Unreadable for a value of the wrong
+    JSON type, a list of relations that is not a list, or a relation that is not an object."""
+    fields = dict.fromkeys(DESIGN_COLUMNS, "")
+    levels_not_read: set[str] = set()
+    types_not_read: set[str] = set()
+    relations = position.get("observationLevelRelationships")
+    if relations is not None and not isinstance(relations, list):
+        raise _Unreadable("observationLevelRelationships is not a list")
+    seen: set[str] = set()
+    for relation in relations or []:
+        if not isinstance(relation, dict):
+            raise _Unreadable("a level relation is not an object")
+        name_text = _design_text(relation.get("levelName"))
+        name = name_text.lower()
+        if name not in _DESIGN_LEVELS:
+            if name_text:
+                levels_not_read.add(name_text)                                    # round 5: "rep\u200b" or "plant" is named, not dropped quietly
+            continue
+        code = _saved_text(relation.get("levelCode"))
+        if name in seen and code != fields[name]:
+            raise AnalystError("unsupported", f"plot {unit}: its position states the level {name!r} with two codes "
+                                              f"({fields[name]!r} and {code!r}); a design field needs one value")
+        seen.add(name)
+        fields[name] = code
+    level = position.get("observationLevel")
+    if level is not None and not isinstance(level, dict):
+        raise _Unreadable("observationLevel is not an object")
+    level_name = _design_text(level.get("levelName")) if isinstance(level, dict) else ""
+    if level_name.lower() == "plot":
+        own = _saved_text(level.get("levelCode"))
+        if fields["plot"] and own and own != fields["plot"]:
+            raise AnalystError("unsupported", f"plot {unit}: its position states two plot codes ({fields['plot']!r} and {own!r})")
+        fields["plot"] = fields["plot"] or own
+    elif level_name:
+        levels_not_read.add(level_name)                                           # round 5b: the plot's own level, "plots" or "plot\u200b"
+    fields["entryType"] = _saved_text(position.get("entryType")).casefold()
+    if len(fields["entryType"]) > DESIGN_VALUE_LIMIT:                             # case-folding can lengthen a value (sharp s -> ss)
+        raise _Unreadable("an entryType longer than 1,000 characters once case-folded")
+    axes: dict[str, str] = {}
+    for coordinate in ("positionCoordinateX", "positionCoordinateY"):
+        kind_text = _design_text(position.get(coordinate + "Type"))
+        kind = kind_text.upper()                                                  # in any case, like the level names
+        axis = _GRID_AXES.get(kind)
+        if axis is None:
+            if kind_text:
+                types_not_read.add(kind_text)                                     # round 5: LATITUDE or "GRID_COL\u200b" is named
+            continue
+        if axis in axes:
+            raise AnalystError("unsupported", f"plot {unit}: both grid coordinates are of type {kind}; one row and one column are needed")
+        axes[axis] = _saved_text(position.get(coordinate))
+    fields.update(axes)
+    return fields, levels_not_read, types_not_read
+
+
+_NUMERAL = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")     # digits, one point, an exponent: no "_", hex, Infinity, NaN
+
+
+def _codes_equal_as_numbers(per_row: list[dict[str, str]]) -> dict[str, list[list[str]]]:
+    """Per design column, every group of distinct codes written differently but equal as numbers ("01", "1", "1.0"), sorted:
+    they stay as written and count apart, so the call names them (review 4 of 2026-10-22). Only numerals are compared (review
+    5: Python's Decimal reads "1_0" as 10, and "sNaN" or "Infinity" are not codes to compare). Data and the warning show at most
+    5 groups of at most 5 spellings (_same_number_data, _same_number_text)."""
+    out: dict[str, list[list[str]]] = {}
+    for column in DESIGN_COLUMNS:
+        if column == "entryType":
+            continue
+        groups: dict[Decimal, set[str]] = {}
+        for code in {row[column] for row in per_row if row[column]}:
+            if not _NUMERAL.fullmatch(code):
+                continue
+            try:
+                number = Decimal(code)
+            except InvalidOperation:
+                continue
+            if number.is_finite():
+                groups.setdefault(number, set()).add(code)
+        found = sorted(sorted(codes) for codes in groups.values() if len(codes) > 1)
+        if found:
+            out[column] = found
+    return out
+
+
+def _same_number_data(groups: list[list[str]]) -> list[list[str]]:
+    """At most 5 groups of at most 5 spellings, each cut at 60 characters (review 5: 1,000 spellings of one rep made a
+    504,594-character warning and data of 505 KB)."""
+    return [[_shown_key(code) for code in group[:5]] for group in groups[:5]]
+
+
+def _same_number_text(column: str, groups: list[list[str]]) -> str:
+    """The warning for one column's codes equal as numbers: the same groups and spellings as data, each group saying how many
+    spellings it has beyond the 5 shown, then how many groups beyond the 5 shown (review 5: the rest was not counted)."""
+    shown = "; ".join(", ".join(ascii(code[:60]) + ("…" if len(code) > 60 else "") for code in group[:5])
+                      + (f" and {len(group) - 5} more" if len(group) > 5 else "") for group in groups[:5])
+    return (f"{column} codes written differently but equal as numbers: {shown}"
+            + (f"; and {len(groups) - 5} more groups" if len(groups) > 5 else "") + "; they stay as written and are counted apart")
+
+
+def _listed(counter: Counter, show: int = 5, width: int = 60) -> str:
+    """Up to `show` values of a Counter, most frequent first, each cut at `width` characters and written with ascii() so an
+    invisible character shows, then how many more (round 5: one warning had reached 50 KB)."""
+    values = [value for value, _ in sorted(counter.items(), key=lambda item: (-item[1], item[0]))]
+    shown = ", ".join(ascii(value[:width]) + ("…" if len(value) > width else "") for value in values[:show])
+    return shown + (f" and {len(values) - show} more" if len(values) > show else "")
+
+
+def _capped(counter: Counter, limit: int = 20) -> dict[str, int]:
+    """The `limit` most frequent values of a Counter as a dict (round 5: a result once held 2 MB of entry types)."""
+    return dict(sorted(counter.items(), key=lambda item: (-item[1], item[0]))[:limit])
+
+
+def _plural(n: int, one: str, many: str) -> str:
+    return f"{n} {one if n == 1 else many}"
+
+
+def tool_plot_design(registry: ArtifactRegistry, a: PlotDesignArgs) -> ToolResult:
+    """Each plot's design from the plot list's position objects, in columns of their own: replicate (rep), block and plot
+    codes, entryType in lower case (check / test; CHECK and Check are written check) and the grid row and column; empty where
+    the position does not state them. Nothing is read from names or numbers. With only the plot list (roster_artifact_id,
+    one study) it saves the plot list with these columns; count_records then gives the replicates (distinct_by rep) and the
+    plots per replicate (group_by rep), and filter_rows on entryType eq check the check entries. With a measurements table of the
+    same study (artifact_id), each of its rows gets its plot's columns, so group_stats by rep can follow; rows whose plot is not
+    in the plot list keep empty fields, and the count is stated. Codes are stored as written (trimmed): numbers as their JSON
+    text (1 and 1.0 are different codes, and codes equal as numbers but written differently are named); null, NaN and Infinity
+    state nothing. A value of the wrong JSON type (true, a list, an object where text is read), a value longer than 1,000
+    characters, or one the table cannot save makes the position unreadable: counted and warned, its fields empty. An entryType
+    that is not check, test or filler is kept and named; level names (of the relations and of the plot's own level) and
+    coordinate types the tool does not read are counted once per plot; plot-list rows without a plot ID are counted. Makes no
+    claims of its own."""
+    roster = _load(registry, a.roster_artifact_id)
+    if roster.manifest.kind != "observation_units":
+        raise AnalystError("invalid_argument", f"roster {roster.manifest.artifact_id} is {roster.manifest.kind}, not observation_units "
+                                               "(the plot list from get_observation_units)")
+    if len(set(roster.manifest.study_ids)) != 1:
+        raise AnalystError("invalid_argument", f"the plot list {roster.manifest.artifact_id} is of {sorted(roster.manifest.study_ids)}; "
+                                               "pass the plot list of one study (counts would mix studies)")
+    tables = [roster]
+    if a.artifact_id is not None:
+        table = _load(registry, a.artifact_id)
+        if table.manifest.kind != "observations":
+            raise AnalystError("invalid_argument", f"{table.manifest.artifact_id} is {table.manifest.kind}, not observations (a measurements table)")
+        if set(table.manifest.study_ids) != set(roster.manifest.study_ids):
+            raise AnalystError("invalid_argument", f"the plot list is of {sorted(roster.manifest.study_ids)} and the measurements of "
+                                                   f"{sorted(table.manifest.study_ids)}; join one study's plot list to the same study's measurements")
+        tables.append(table)
+    for t in tables:
+        already = [c for c in DESIGN_COLUMNS if c in t.manifest.columns]
+        if already:
+            raise AnalystError("invalid_argument", f"{t.manifest.artifact_id} already has the design column(s) {already}")
+        _require_column(t, UNIT_COL, "plot ID column")
+        stray = sorted({row.get("studyDbId", "") for row in t.rows} - {""} - set(roster.manifest.study_ids))
+        if stray:                                   # review of 2026-10-22: only the manifests were compared, never the rows
+            raise AnalystError("invalid_argument", f"{t.manifest.artifact_id} has rows of {stray}, not of the plot list's study "
+                                                   f"{sorted(roster.manifest.study_ids)}")
+    _require_column(roster, POSITION_COL, "position column")
+    units = sorted({row.get("levelName", "").strip() for row in roster.rows} - {""}, key=str.lower)
+    if any(level.lower() != "plot" for level in units):   # review: plants counted as plots gave "plots per rep = 3"
+        raise AnalystError("unsupported", f"the plot list {roster.manifest.artifact_id} holds units of level {units}; plot_design reads "
+                                          "plots only, and counting other units as plots would be wrong")
+    caveats = [c for c in (_completeness_gate(t, a.allow_incomplete) for t in tables) if c]
+
+    per_row: list[dict[str, str]] = []
+    by_unit: dict[str, dict[str, str]] = {}
+    problems: Counter = Counter()
+    odd_types: Counter = Counter()                  # stored entryType values that are not check, test or filler (round 4 (A), round 5)
+    levels_not_read: Counter = Counter()            # plots per level name the tool does not read, as shown by _shown_key (round 5, 5b)
+    types_not_read: Counter = Counter()             # plots per coordinate type other than GRID_ROW / GRID_COL, as shown (round 5, 5b)
+    level_names_seen: set[str] = set()              # their full values, for the distinct counts (round 5b)
+    type_names_seen: set[str] = set()
+    no_unit = 0
+    for row in roster.rows:
+        unit = row.get(UNIT_COL, "")
+        key = unit if _has_text(unit) else ""          # round 5: an ID of spaces or invisible characters is no ID and never joins
+        if key and key in by_unit:
+            raise AnalystError("unsupported", f"plot {unit} is listed twice in the plot list {roster.manifest.artifact_id}")
+        fields, problem, odd, levels, kinds = _plot_fields(unit, row.get(POSITION_COL, ""))
+        problems[problem] += 1
+        if odd is not None:
+            odd_types[odd] += 1
+        levels_not_read.update({_shown_key(name) for name in levels})
+        types_not_read.update({_shown_key(kind) for kind in kinds})
+        level_names_seen |= levels
+        type_names_seen |= kinds
+        per_row.append(fields)
+        if key:
+            by_unit[key] = fields
+        else:
+            no_unit += 1
+    same_number = _codes_equal_as_numbers(per_row)
+    blank = dict.fromkeys(DESIGN_COLUMNS, "")
+    if len(tables) == 1:
+        rows = [{**row, **fields} for row, fields in zip(roster.rows, per_row)]
+        unmatched = 0
+    else:
+        rows = [{**row, **by_unit.get(row.get(UNIT_COL, ""), blank)} for row in tables[1].rows]
+        unmatched = sum(1 for row in tables[1].rows if row.get(UNIT_COL, "") not in by_unit)
+    out = tables[-1]
+    warnings = [*caveats]
+    if problems["unreadable"]:
+        warnings.append(f"{_plural(problems['unreadable'], 'plot position', 'plot positions')} could not be read; their design fields are empty")
+    if problems["empty"]:
+        warnings.append(f"{_plural(problems['empty'], 'plot has', 'plots have')} no position object; their design fields are empty")
+    if unmatched:
+        warnings.append(f"{_plural(unmatched, 'measurement row has', 'measurement rows have')} no plot in the plot list; "
+                        "their design fields are empty")
+    if odd_types:
+        warnings.append(f"{_plural(sum(odd_types.values()), 'plot has', 'plots have')} an entryType that is not check, test or filler: "
+                        f"{_listed(odd_types)}; the value is kept (trimmed, case-folded) and filter_rows sees it as shown")
+    if levels_not_read:
+        warnings.append(f"level names the tool does not read (it reads rep, block and plot): {_listed(levels_not_read)}")
+    if types_not_read:
+        warnings.append(f"coordinate types the tool does not read (it reads GRID_ROW and GRID_COL): {_listed(types_not_read)}")
+    for column, groups in same_number.items():
+        warnings.append(_same_number_text(column, groups))
+    if no_unit:
+        warnings.append(f"{_plural(no_unit, 'plot-list row has', 'plot-list rows have')} no plot ID; its design fields are read, "
+                        "but no measurement can be joined to it")
+    lineage = [f"lineage: plot_design of {roster.manifest.artifact_id} sha256={roster.manifest.sha256}"
+               + (f" onto {out.manifest.artifact_id} sha256={out.manifest.sha256}" if out is not roster else ""),
+               "design fields read from observationUnitPosition only: rep, block and plot (observationLevelRelationships), "
+               "entryType, and the GRID_ROW / GRID_COL coordinates; nothing inferred", *warnings]
+    complete = all(t.manifest.complete for t in tables)
+    manifest = registry.save_table(rows, kind=out.manifest.kind, columns={**out.manifest.columns, **DESIGN_COLUMNS}, complete=complete,
+                                   source_request_ids=list(dict.fromkeys(r for t in tables for r in t.manifest.source_request_ids)),
+                                   study_ids=list(out.manifest.study_ids), variable_ids=list(out.manifest.variable_ids),
+                                   measurement=out.manifest.measurement, quality_notes=lineage)
+    preview = registry.preview(manifest.artifact_id, 5)
+    data = {"roster_artifact_id": roster.manifest.artifact_id, "source_artifact_id": out.manifest.artifact_id,
+            "artifact_id": manifest.artifact_id, "rows": len(rows),
+            "stated": {column: sum(1 for row in rows if row[column]) for column in DESIGN_COLUMNS},
+            "unreadable_positions": problems["unreadable"], "empty_positions": problems["empty"],
+            "rows_without_a_plot_in_the_roster": unmatched, "rows_without_a_plot_id": no_unit,
+            "entry_types_not_standard": _capped(odd_types), "entry_types_not_standard_distinct": len(odd_types),
+            "level_names_not_read": _capped(levels_not_read), "level_names_not_read_distinct": len(level_names_seen),
+            "coordinate_types_not_read": _capped(types_not_read), "coordinate_types_not_read_distinct": len(type_names_seen),
+            "codes_equal_as_numbers": {column: _same_number_data(groups) for column, groups in same_number.items()},
+            "codes_equal_as_numbers_groups": {column: len(groups) for column, groups in same_number.items()}, "complete": complete,
+            "preview": {"displayed_rows": preview.displayed_rows, "rows": preview.rows},
+            "note": "design fields as the positions state them; count_records, filter_rows and group_stats state the numbers"}
+    ids = [t.manifest.artifact_id for t in tables] + [manifest.artifact_id]
+    return ToolResult(ok=True, data=data, artifact_ids=ids, complete=complete, warnings=warnings)
+
+
 # --------------------------------------------------------------------------
-# ONE registry of the eleven tools, schemas and dispatch
+# ONE registry of the twelve tools, schemas and dispatch
 # --------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -1501,9 +1849,10 @@ ANALYST_TOOLS: dict[str, AnalystToolSpec] = {spec.name: spec for spec in [
     AnalystToolSpec("rank_entries", RankEntriesArgs, tool_rank_entries),
     AnalystToolSpec("threshold_count", ThresholdCountArgs, tool_threshold_count),
     AnalystToolSpec("correlate_entry_means", CorrelateEntryMeansArgs, tool_correlate_entry_means),
+    AnalystToolSpec("plot_design", PlotDesignArgs, tool_plot_design),
 ]}
 ANALYST_TOOL_NAMES = list(ANALYST_TOOLS)
-assert len(ANALYST_TOOL_NAMES) == 11
+assert len(ANALYST_TOOL_NAMES) == 12
 
 
 def analyst_tool_schemas() -> list[dict[str, Any]]:
