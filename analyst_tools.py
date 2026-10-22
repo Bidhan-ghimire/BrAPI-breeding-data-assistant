@@ -1,8 +1,8 @@
 """
-analyst_tools.py — nine FIXED calculation tools for the Analyst.
+analyst_tools.py — the FIXED calculation tools for the Analyst.
 
 Plain-words summary:
-* The Analyst never writes Python. It picks one of these nine functions and passes a
+* The Analyst never writes Python. It picks one of these functions and passes a
   registered artifact handle (art_xxxxxx_0001). The function reads the table through
   artifacts.py (hash-checked, path-safe), computes with plain arithmetic, and hands back
   typed claims plus the counts behind them. No HTTP, no eval/exec, no subprocess, no model.
@@ -25,7 +25,7 @@ Plain-words summary:
 * Full results (every group, including excluded ones) are saved as analysis_result artifacts
   with their lineage in the manifest notes; a message only ever shows a preview.
 
-Everyday example: a pocket calculator with nine labelled buttons, glued to a filing cabinet.
+Everyday example: a pocket calculator with a few labelled buttons, glued to a filing cabinet.
 You may press a button and name a drawer; you may not rewire the calculator, open other
 cabinets, or dictate the answer.
 """
@@ -42,7 +42,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable, Literal, Mapping
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from artifacts import ArtifactError, ArtifactRegistry
 from contracts import ArtifactId, ArtifactManifest, Claim, Denominator, Exclusion, ToolError, ToolResult
@@ -406,8 +406,46 @@ class RankEntriesArgs(ToolArgs):
     allow_incomplete: bool = Field(default=False)
 
 
+class ThresholdCountArgs(ToolArgs):
+    artifact_id: ArtifactId = _handle()
+    count: Literal["entries", "plots"] = Field(default="entries", description="entries: each entry by its mean over its plots; plots: each plot by its own value")
+    op: Literal["above", "below", "at_least", "at_most"] = Field(default="above", description="above / below are strict (equal does not count); "
+                                                                                              "at_least / at_most include equal")
+    threshold: float | None = Field(default=None, description="a number from the question (in a plan step, written as text: \"12.5\"); "
+                                                              "exactly one of threshold / threshold_entries")
+    threshold_entries: list[str] = Field(default_factory=list, max_length=50,
+                                         description="entries (exact ID or exact name) whose entry means, averaged unweighted within each study, are "
+                                                     "the threshold, for example a check; they are left out of the count")
+    exclude: list[str] = Field(default_factory=list, max_length=50,
+                               description="entries (exact ID or exact name) left out of the count, for example the other checks")
+    name_prefix: str | None = Field(default=None, min_length=1, description="count only the entries whose name starts with this exact text, for example PH17.")
+    by: str = Field(default="germplasmDbId", description="the entry ID column (names are carried as labels)")
+    value: str = Field(default=VALUE_COL)
+    duplicate_policy: DuplicatePolicy = Field(default="reject")
+    allow_incomplete: bool = Field(default=False)
+
+    @field_validator("threshold", mode="before")
+    @classmethod
+    def _number_text(cls, value: Any) -> Any:
+        """A plan step carries no floats (PlanInputValue), so a threshold may arrive as text: "12.5" is the number 12.5."""
+        if isinstance(value, str):
+            try:
+                return float(value.strip())
+            except ValueError as error:
+                raise ValueError(f"threshold {value!r} is not a number") from error
+        return value
+
+    @model_validator(mode="after")
+    def _one_threshold(self) -> ThresholdCountArgs:
+        if (self.threshold is None) == (not self.threshold_entries):
+            raise ValueError("give exactly one of threshold (a number from the question) and threshold_entries (named entries whose mean is the threshold)")
+        if self.threshold is not None and not math.isfinite(self.threshold):
+            raise ValueError("threshold must be a finite number")
+        return self
+
+
 # --------------------------------------------------------------------------
-# The nine tools
+# The ten tools
 # --------------------------------------------------------------------------
 
 def tool_table_info(registry: ArtifactRegistry, a: TableInfoArgs) -> ToolResult:
@@ -969,8 +1007,206 @@ def tool_rank_entries(registry: ArtifactRegistry, a: RankEntriesArgs) -> ToolRes
                       warnings=warnings)
 
 
+# R2 (Bidhan 2026-10-21; coach 2026-10-22 10:52 UTC): how many entries or plots are above or below a threshold, in each study.
+# Measured first (r2_need_20261022): five benchmark sub-questions need it (A36.5, A42.5, C31.3, C32.3, C32.4), and in all five the
+# threshold is the mean of named entries (Beauregard; a site's Dagga; two checks averaged), so the tool computes that mean itself:
+# a rounded number copied by the model could put an entry on the wrong side of the line.
+THRESHOLD_NOTE = "descriptive count of recorded values against a threshold, not a recommendation"
+THRESHOLD_NAMESPACE = "thr"
+_THRESHOLD_OPS: dict[str, tuple[str, Callable[[float, float], bool]]] = {
+    "above": ("above", lambda x, t: x > t), "below": ("below", lambda x, t: x < t),
+    "at_least": ("at least", lambda x, t: x >= t), "at_most": ("at most", lambda x, t: x <= t)}
+THRESHOLD_RESULT_COLUMNS = {
+    "studyDbId": "the study", "entry": "exact entry ID", "label": "name carried from the label column, if any",
+    "unit": "the plot (observation unit) of a counted plot row, when plots are counted; '' on an entry row",
+    "role": "threshold entry / excluded / outside the name prefix / no valid value / counted",
+    "side": "for a counted row: the op word when it meets the threshold, else 'not ' + the op word ('' otherwise)",
+    "value": "the entry mean, full precision ('' when none); on a counted plot row, that plot's own value",
+    "n_valid_values": "valid values behind the entry mean (1 on a plot row)", "threshold": "the study's threshold, full precision",
+}
+
+
+def _shown(number: float) -> float:
+    """Numbers equal at the precision the answer shows are equal (rank_entries' tie rule): 0.1 and 0.2 average to
+    0.15000000000000002, which must not count as above 0.15."""
+    return float(format(number, ".12g"))
+
+
+def tool_threshold_count(registry: ArtifactRegistry, a: ThresholdCountArgs) -> ToolResult:
+    """How many entries (each by its mean over its plots) or plots (each by its own value) of ONE trait are above, below, at
+    least or at most a threshold, in each study of the table, and the share they are of those with a valid value. The threshold
+    is a number from the question, or the mean of named entries (exact ID or exact name: a check, or two checks averaged
+    unweighted), computed here for each study; the named entries and the excluded ones are left out of the count, and
+    name_prefix keeps one family only (PH17.). A value equal to the threshold is not above it. Each study gets a count claim,
+    a share claim (%) and, for named entries, their mean as the threshold claim; every entry (and every counted plot, when
+    plots are counted) is saved with its role as an analysis_result artifact. Plots mode counts each plot once: a plot with
+    values at several times is refused, and a row without a plot ID is left out and counted. A descriptive count of recorded
+    values, not a recommendation."""
+    table = _load(registry, a.artifact_id)
+    _require_column(table, a.by, "entry column")
+    _require_column(table, a.value, "value column")
+    _require_column(table, "studyDbId", "study column")
+    if a.by.endswith("Name"):
+        raise AnalystError("invalid_argument", f"count by the ID column, not {a.by!r}; names are carried as labels")
+    if a.count == "plots":
+        _require_column(table, UNIT_COL, "plot column")
+    caveat = _completeness_gate(table, a.allow_incomplete)
+    variable = _single_variable(table)
+    label_col = LABEL_FOR.get(a.by)
+    label_col = label_col if label_col in table.manifest.columns else None
+    if a.name_prefix is not None and label_col is None:
+        raise AnalystError("invalid_argument", f"name_prefix needs a name column beside {a.by!r}; {table.manifest.artifact_id} has none")
+    threshold_ids = _entries(table, a.by, label_col, a.threshold_entries, "threshold entry")
+    excluded = set(_entries(table, a.by, label_col, a.exclude, "exclude"))
+    both = sorted(excluded & set(threshold_ids))
+    if both:
+        raise AnalystError("invalid_argument", f"{both} are both threshold entries and left out; give each entry one role")
+    classified = _classify(table, a.value)
+    used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy)
+    if caveat:
+        transformation = f"{caveat}; {transformation}"
+    unit = table.manifest.measurement.unit
+    op_words, meets = _THRESHOLD_OPS[a.op]
+    names: dict[str, set[str]] = {}                              # entry -> its names anywhere in the table
+    for row in table.rows:
+        if row.get(a.by, ""):
+            names.setdefault(row[a.by], set())
+            if label_col and row.get(label_col, ""):
+                names[row[a.by]].add(row[label_col])
+    label = {entry: "; ".join(sorted(found)) for entry, found in names.items()}
+    rows_by_study: dict[str, list[dict[str, str]]] = {}
+    for row in table.rows:
+        rows_by_study.setdefault(row.get("studyDbId", ""), []).append(row)
+    used_by_study: dict[str, list[tuple[dict[str, str], float]]] = {}
+    for row, number in used:
+        used_by_study.setdefault(row.get("studyDbId", ""), []).append((row, number))
+    no_study_rows = len(rows_by_study.pop("", []))
+    used_by_study.pop("", None)
+    if not rows_by_study:
+        raise AnalystError("invalid_argument", f"{table.manifest.artifact_id} has no row with a studyDbId")
+    no_entry_rows = sum(1 for row in table.rows if not row.get(a.by, ""))           # review: such rows vanished unreported
+    base_exclusions = [Exclusion(reason="rows with an empty studyDbId", count=no_study_rows)] if no_study_rows else []
+    # one namespace per setting: another threshold, population or op counts differently, so its claims must not share IDs
+    variant = hashlib.sha256(json.dumps([a.count, a.op, a.threshold, threshold_ids, sorted(excluded), a.name_prefix, a.by, a.value,
+                                         a.duplicate_policy, a.allow_incomplete]).encode("utf-8")).hexdigest()[:10]
+    namespace = f"{THRESHOLD_NAMESPACE}-{variant}"
+    hashes = [table.manifest.sha256]
+    studies: list[dict[str, Any]] = []
+    result_rows: list[dict[str, str]] = []
+    claims: list[Claim] = []
+    for study in sorted(rows_by_study):
+        present = list(dict.fromkeys(row[a.by] for row in rows_by_study[study] if row.get(a.by, "")))
+        values: dict[str, list[tuple[dict[str, str], float]]] = {}
+        for row, number in used_by_study.get(study, []):
+            if row.get(a.by, ""):
+                values.setdefault(row[a.by], []).append((row, number))
+        means = {entry: statistics.fmean(number for _, number in pairs) for entry, pairs in values.items()}
+        if a.threshold is not None:
+            threshold, source, threshold_entries = a.threshold, "stated in the question", []
+        else:
+            missing = [t for t in threshold_ids if t not in means]
+            if missing:
+                raise AnalystError("invalid_argument", f"threshold entry {missing[0]} ({label.get(missing[0]) or 'no name'}) has no valid value "
+                                                       f"in study {study}; the threshold needs its mean in every study of the table")
+            threshold = statistics.fmean(means[t] for t in threshold_ids)
+            threshold_entries = [{"entry": t, "label": label[t], "mean": means[t], "n_valid_values": len(values[t])} for t in threshold_ids]
+            described = " and ".join(f"{t} ({label[t] or 'no name'})" for t in threshold_ids)
+            source = f"the entry mean of {described}" if len(threshold_ids) == 1 else f"the unweighted mean of the entry means of {described}"
+        outside = {e for e in present if a.name_prefix is not None and e not in threshold_ids and e not in excluded
+                   and not any(n.startswith(a.name_prefix) for n in names[e])}
+        population = [e for e in present if e not in threshold_ids and e not in excluded and e not in outside]
+        if a.name_prefix is not None and not population:
+            raise AnalystError("invalid_argument", f"no entry in study {study} has a name starting with {a.name_prefix!r}")
+        counted_set = set(population)
+        n_no_unit = 0
+        if a.count == "entries":
+            with_value = [(e, "", means[e], len(values[e])) for e in population if e in means]
+            n_no_value = sum(1 for e in population if e not in means)
+        else:
+            plots = {e: [(row, number) for row, number in values.get(e, []) if row.get(UNIT_COL, "")] for e in population}
+            n_no_unit = sum(len(values.get(e, [])) - len(plots[e]) for e in population)     # review 2: a row without a plot ID is not a plot
+            repeated = sum(1 for e in population for _, n in Counter(row.get(UNIT_COL, "") for row, _ in plots[e]).items() if n > 1)
+            if repeated:                                    # review: a plot measured at two times counted as two plots
+                raise AnalystError("unsupported", f"{repeated} plot{'' if repeated == 1 else 's'} of the counted population in study {study} "
+                                                  f"{'has' if repeated == 1 else 'have'} more than one valid value (several times); plots mode counts "
+                                                  f"each plot once: use count=\"entries\", or narrow the table to one time with filter_rows on {TIMEPOINT_COL}")
+            with_value = [(e, row.get(UNIT_COL, ""), number, 1) for e in population for row, number in plots[e]]
+            n_no_value = sum(1 for row in rows_by_study[study]
+                             if row.get(a.by, "") in counted_set and classify_value(row.get(a.value))[0] != "valid")
+        cut = _shown(threshold)
+        counted = [item for item in with_value if meets(_shown(item[2]), cut)]
+        n_with_value, n_counted = len(with_value), len(counted)
+        share = 100.0 * n_counted / n_with_value if n_with_value else None
+        for e in present:
+            role = ("threshold entry" if e in threshold_ids else "excluded" if e in excluded else "outside the name prefix" if e in outside
+                    else "no valid value" if e not in means else "counted")
+            if role == "counted" and a.count == "plots":
+                items = [(row.get(UNIT_COL, ""), number, 1) for row, number in values[e]]
+            else:
+                items = [("", means.get(e), len(values.get(e, [])))]
+            for plot, number, n_values in items:
+                side = "" if role != "counted" else (op_words if meets(_shown(number), cut) else f"not {op_words}")
+                result_rows.append({"studyDbId": study, "entry": e, "label": label[e], "unit": plot, "role": role, "side": side,
+                                    "value": "" if number is None else repr(number), "n_valid_values": str(n_values), "threshold": repr(threshold)})
+        left_out = {"threshold entries": sum(t in present for t in threshold_ids), "excluded": sum(e in present for e in excluded),
+                    "outside the name prefix": len(outside), "no valid value": n_no_value, "no plot ID": n_no_unit}
+        tokens = Counter(classify_value(row.get(a.value))[0] for row in rows_by_study[study])      # this study's rows only (review)
+        exclusions = list(base_exclusions)
+        if tokens["missing"]:
+            exclusions.append(Exclusion(reason="raw-missing value token", count=tokens["missing"]))
+        if tokens["invalid"]:
+            exclusions.append(Exclusion(reason="invalid or non-finite value token", count=tokens["invalid"]))
+        study_no_entry = sum(1 for row in rows_by_study[study] if not row.get(a.by, ""))
+        if study_no_entry:
+            exclusions.append(Exclusion(reason=f"rows with an empty {a.by}", count=study_no_entry))
+        for reason, n in left_out.items():
+            if n:
+                exclusions.append(Exclusion(reason=f"{a.count if reason in ('no valid value', 'no plot ID') else 'entries'} left out: {reason}", count=n))
+        units = len({row.get(UNIT_COL, "") for e in population for row, _ in values.get(e, [])}) if classified.units_known else None
+        filters = {"studyDbId": study}
+        text = (f"count of {a.count} {op_words} the threshold {_display(threshold)} {unit or '(unit not stated)'}; threshold = {source}; "
+                f"{THRESHOLD_NOTE}; each {'entry mean' if a.count == 'entries' else 'value'} is compared with the threshold at 12 significant "
+                f"digits (equal is not above); {transformation}")
+        denominator = Denominator(name=f"{a.count} with a valid value in study {study}", n=n_with_value)
+        claims.append(Claim(claim_id=_claim_id(table.manifest.artifact_id, "count", "studyDbId", study, namespace=namespace), kind="count",
+                            value=n_counted, denominator=denominator, n_independent_units=units, source_artifact_hashes=hashes, filters=filters,
+                            grouping=["studyDbId"], transformation=text, exclusions=exclusions))
+        claims.append(Claim(claim_id=_claim_id(table.manifest.artifact_id, "ratio", "studyDbId", study, namespace=namespace), kind="ratio",
+                            value=share, unit="%", missing_reason=None if share is not None else f"no {a.count} with a valid value",
+                            denominator=denominator, n_independent_units=units, source_artifact_hashes=hashes, filters=filters,
+                            grouping=["studyDbId"], transformation=f"share of the {a.count} with a valid value, in percent; {text}", exclusions=exclusions))
+        if threshold_entries:
+            claims.append(Claim(claim_id=_claim_id(table.manifest.artifact_id, "mean", "studyDbId", study, namespace=namespace), kind="mean",
+                                value=threshold, unit=unit, source_artifact_hashes=hashes, filters=filters, grouping=["studyDbId"],
+                                denominator=Denominator(name="threshold entries whose entry means were averaged (unweighted)", n=len(threshold_ids)),
+                                transformation=f"threshold = {source}; entry mean of valid values; {transformation}", exclusions=base_exclusions))
+        studies.append({"studyDbId": study, "threshold": threshold, "display_threshold": _display(threshold), "threshold_source": source,
+                        "threshold_entries": threshold_entries, "n_counted": n_counted, "n_with_value": n_with_value, "share_percent": share,
+                        "left_out": left_out, "rows_with_an_empty_entry_id": study_no_entry,
+                        "counted_preview": [item[0] if a.count == "entries" else item[1] for item in counted[:20]]})
+    lineage = [f"lineage: threshold_count ({a.count} {a.op}) on {table.manifest.artifact_id} sha256={table.manifest.sha256}",
+               f"transformation: {transformation}",
+               "threshold: " + (f"the number {a.threshold!r}" if a.threshold is not None else f"the mean of the entries {threshold_ids}, per study"),
+               f"left out: threshold entries {threshold_ids}, excluded {sorted(excluded)}, name_prefix {a.name_prefix!r}",
+               f"rows with an empty studyDbId: {no_study_rows}; rows with an empty {a.by}: {no_entry_rows} (excluded, not dropped silently)",
+               f"analysis target: {ANALYSIS_TARGET}"]
+    manifest = registry.save_table(result_rows, kind="analysis_result", columns=THRESHOLD_RESULT_COLUMNS, complete=table.manifest.complete,
+                                   source_request_ids=list(table.manifest.source_request_ids), study_ids=list(table.manifest.study_ids),
+                                   variable_ids=list(table.manifest.variable_ids), measurement=table.manifest.measurement, quality_notes=lineage)
+    data = {"artifact_id": table.manifest.artifact_id, "result_artifact_id": manifest.artifact_id, "variable_id": variable, "unit": unit,
+            "count": a.count, "op": a.op, "by": a.by, "label_column": label_col, "studies": studies, "claims": _claims_json(claims),
+            "rows_with_an_empty_entry_id": no_entry_rows, "rows_with_an_empty_study_id": no_study_rows,
+            "transformation": transformation, "analysis_target": ANALYSIS_TARGET, "note": THRESHOLD_NOTE, "value_policy": VALUE_POLICY}
+    warnings = [w for w in (caveat, classified.duplicate_note if a.duplicate_policy != "reject" else None) if w]
+    if not classified.units_known:
+        warnings.append("independence unknown: some valid rows name no observation unit")
+    warnings.extend(_timing_warnings(table, a.value))
+    return ToolResult(ok=True, data=data, artifact_ids=[table.manifest.artifact_id, manifest.artifact_id], complete=table.manifest.complete,
+                      warnings=warnings)
+
+
 # --------------------------------------------------------------------------
-# ONE registry of the nine tools, schemas and dispatch
+# ONE registry of the ten tools, schemas and dispatch
 # --------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -997,9 +1233,10 @@ ANALYST_TOOLS: dict[str, AnalystToolSpec] = {spec.name: spec for spec in [
     AnalystToolSpec("plot_bar", PlotBarArgs, tool_plot_bar),
     AnalystToolSpec("count_records", CountRecordsArgs, tool_count_records),
     AnalystToolSpec("rank_entries", RankEntriesArgs, tool_rank_entries),
+    AnalystToolSpec("threshold_count", ThresholdCountArgs, tool_threshold_count),
 ]}
 ANALYST_TOOL_NAMES = list(ANALYST_TOOLS)
-assert len(ANALYST_TOOL_NAMES) == 9
+assert len(ANALYST_TOOL_NAMES) == 10
 
 
 def analyst_tool_schemas() -> list[dict[str, Any]]:
@@ -1040,7 +1277,7 @@ def dispatch_analyst(registry: ArtifactRegistry, name: str, arguments: Mapping[s
 
 
 class AnalystTools:
-    """The nine tools behind the agent loop's ToolInterface (async schemas()/call()), in-process, no network."""
+    """The fixed tools behind the agent loop's ToolInterface (async schemas()/call()), in-process, no network."""
 
     def __init__(self, registry: ArtifactRegistry) -> None:
         self.registry = registry
@@ -1057,7 +1294,7 @@ class AnalystTools:
 
 
 def main(argv: list[str] | None = None) -> int:   # pragma: no cover - tiny helper for humans
-    """Print the nine tool schemas; there is no other command-line behaviour."""
+    """Print the tool schemas; there is no other command-line behaviour."""
     import json
 
     names = argv if argv else ANALYST_TOOL_NAMES

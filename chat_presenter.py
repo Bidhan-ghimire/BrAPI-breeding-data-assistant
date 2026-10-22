@@ -92,7 +92,7 @@ class _Sources:
 
 
 def _sort_id(value: str) -> tuple[float | int, str]:
-    return (int(value) if value.isdigit() else float("inf"), value)
+    return (int(value) if value.isdecimal() else float("inf"), value)     # "²" is a digit but not decimal: int() refuses it (review)
 
 
 def _names(rows: list[dict[str, str]], column: str, key: str, name_column: str) -> str:
@@ -156,7 +156,7 @@ def _mean_focus(controller: Any, claims: list[Claim]) -> bool:
     plan = getattr(controller, "plan", None)
     if getattr(getattr(plan, "statistic", None), "kind", None) != "mean" or sum(claim.kind == "mean" for claim in claims) != 1:
         return False
-    if any(claim.kind == "rank" for claim in claims):
+    if any(claim.kind == "rank" or _THRESHOLD_ID.match(claim.claim_id) for claim in claims):
         return False
     words = person_words(getattr(plan, "question", ""))
     if not re.search(r"\b(?:mean|average)\b", words, re.I):
@@ -272,6 +272,59 @@ def _ranking_block(claims: list[Claim], sources: _Sources, source_labels: dict[t
     return lines, shown
 
 
+THRESHOLD_SENTENCE = "Descriptive numbers only: a count of recorded values against a threshold, not a recommendation."
+_THRESHOLD_ID = re.compile(r"^(clm_v2_.+?_thr-[0-9a-f]+)_(count|ratio|mean)_(.+)$")     # clm_v2_<artifact>_thr-<variant>_<kind>_studyDbId_<study>
+_THRESHOLD_TEXT = re.compile(r"^count of (entries|plots) (above|below|at least|at most) the threshold (.+?); threshold = (.+?); "
+                             r"descriptive count of recorded values against a threshold")     # the fixed note ends the source text (review)
+
+
+def _share(value: float | int | None) -> str:
+    """A share in percent with the fewest decimals that do not read a partial count as 0 or 100 (review: 2500 of 2501 read "100 %")."""
+    if value is None:
+        return "Not available"
+    for decimals in (1, 2, 3, 4):
+        text = f"{value:.{decimals}f}".rstrip("0").rstrip(".")
+        if text not in ("0", "100") or value in (0, 100):
+            return text + " %"
+    return ("under 0.0001" if value < 50 else "over 99.9999") + " %"
+
+
+def _threshold_block(claims: list[Claim], sources: _Sources, source_labels: dict[tuple[str, ...], str]) -> tuple[list[str], set[str]]:
+    """R2 (2026-10-22): the claims of one threshold_count call as one table (Study, Counted, <op> the threshold, With a value,
+    Share) in study order, then each study's threshold and what was left out, then the descriptive sentence. Returns the lines
+    and the IDs of the claims they show."""
+    calls: dict[str, dict[str, dict[str, Claim]]] = defaultdict(lambda: defaultdict(dict))     # call -> study -> kind -> claim
+    for claim in claims:
+        match = _THRESHOLD_ID.match(claim.claim_id)
+        if match:
+            calls[match.group(1)][match.group(3)][match.group(2)] = claim
+    lines: list[str] = []
+    shown: set[str] = set()
+    for studies in calls.values():
+        table, notes, header, label = [], [], "Meets the threshold", ""
+        for kinds in sorted(studies.values(), key=lambda kinds: _sort_id(next(iter(kinds.values())).filters.get("studyDbId", ""))):
+            count = kinds.get("count")
+            if count is None:
+                continue
+            text = _THRESHOLD_TEXT.match(count.transformation)
+            what, op, threshold, source = text.groups() if text else ("", "", "not stated", "not stated")
+            header = f"{op[:1].upper()}{op[1:]} the threshold" if op else header
+            hashes = tuple(sorted(count.source_artifact_hashes))
+            label = source_labels.get(hashes, "")
+            study = count.filters.get("studyDbId", "")
+            name = _names(sources.rows(hashes) or [], "studyDbId", study, "studyName")
+            ratio = kinds.get("ratio")
+            table.append([f"{study} · {name}" if name else study, what, _number(count.value), count.denominator.n,
+                          _share(ratio.value) if ratio else "Not stated"])
+            left = "; ".join(f"{item.reason.split(' left out: ', 1)[1]} {item.count}" for item in count.exclusions if " left out: " in item.reason)
+            notes.append(_text(f"Threshold in {study}: {threshold} ({source}).") + (f" Left out: {_text(left)}." if left else ""))
+            shown |= {claim.claim_id for claim in kinds.values()}
+        if table:
+            lines += [f"**Counts against a threshold{label}**", "", *_table(["Study", "Counted", header, "With a value", "Share"], table), "",
+                      *notes, "", THRESHOLD_SENTENCE, ""]
+    return lines, shown
+
+
 def _numeric_blocks(claims: list[Claim], sources: _Sources, source_labels: dict[tuple[str, ...], str], *, focus_mean: bool = False) -> list[str]:
     groups: dict[tuple[Any, ...], list[Claim]] = defaultdict(list)
     for claim in claims:
@@ -332,7 +385,7 @@ def _human_note(note: str) -> str:
     if text.startswith(_CODE_STOP):     # a stop written by code (catalog_answers, metadata_answers): its plain line;
         asked = text[len(_CODE_STOP):].strip()                                 # the exact check stays in the Full report
         return catalog_plain(asked) or metadata_plain(asked) or _CODE_STOP_OTHER
-    text = re.sub(r"^(?:(?:numeric_summary|group_stats|count_records|rank_entries|analysis target|model(?: note)?)\s*:\s*)+", "", text, flags=re.I)
+    text = re.sub(r"^(?:(?:numeric_summary|group_stats|count_records|rank_entries|threshold_count|analysis target|model(?: note)?)\s*:\s*)+", "", text, flags=re.I)
     if "no complete artifact is eligible for analysis" in text.lower():
         return re.sub("no complete artifact is eligible for analysis", "No complete data table was available for analysis, so an answer could not be calculated.", text, flags=re.I)
     # Normalize only the two known unit-only messages; other caveat wording is preserved.
@@ -575,9 +628,11 @@ def answer_summary(controller: Any) -> str:
     hashes = list(dict.fromkeys(tuple(sorted(claim.source_artifact_hashes)) for claim in claims))
     source_labels = {key: f" · source {index + 1}" for index, key in enumerate(hashes)} if len(hashes) > 1 else {}
     ranking, in_ranking = _ranking_block(claims, sources, source_labels)
+    thresholds, in_threshold = _threshold_block(claims, sources, source_labels)
+    in_ranking |= in_threshold
     # a mean the ranking table shows is not shown again (group_stats on the same table states the same entry mean; review)
     ranked_means = {(tuple(sorted(c.source_artifact_hashes)), tuple(sorted(c.filters.items())), c.value)
-                    for c in claims if c.claim_id in in_ranking and c.kind == "mean"}
+                    for c in claims if c.claim_id in in_ranking and c.kind == "mean" and c.claim_id not in in_threshold}
     displayed_claims = [claim for claim in displayed_claims if claim.claim_id not in in_ranking and not (
         claim.kind == "mean" and (tuple(sorted(claim.source_artifact_hashes)), tuple(sorted(claim.filters.items())), claim.value) in ranked_means)]
     buckets: dict[tuple[Any, ...], list[Claim]] = defaultdict(list)
@@ -590,7 +645,7 @@ def answer_summary(controller: Any) -> str:
             buckets[(tuple(sorted(claim.source_artifact_hashes)), claim.grouping[0], claim.denominator.name, claim.denominator.n)].append(claim)
         else:
             other.append(claim)
-    lines: list[str] = list(ranking)
+    lines: list[str] = [*ranking, *thresholds]
     in_catalog_titles: set[str] = set()              # distinct counts a catalog block's title already leads with
     for key, group in buckets.items():
         block = _catalog_block(group, sources, source_labels.get(key[0], ""), focus_count=focus_count)

@@ -125,9 +125,9 @@ def test_the_full_ranking_is_saved_with_every_entry(registry):
 # --- 2. the menus and prompts that must name it ----------------------------------------------------
 
 def test_every_menu_and_prompt_names_the_tool():
-    assert "rank_entries" in at.ANALYST_TOOL_NAMES and len(at.ANALYST_TOOL_NAMES) == 9
+    assert "rank_entries" in at.ANALYST_TOOL_NAMES and len(at.ANALYST_TOOL_NAMES) == 10     # threshold_count (R2, 2026-10-22)
     assert "rank_entries" in co.ANALYST_ACTIONS and "rank_entries(" in co.COORDINATOR_SYSTEM_PROMPT
-    assert "nine fixed tools" in an.ANALYST_SYSTEM_PROMPT and "rank_entries" in an.ANALYST_SYSTEM_PROMPT
+    assert "ten fixed tools" in an.ANALYST_SYSTEM_PROMPT and "rank_entries" in an.ANALYST_SYSTEM_PROMPT
     assert "rank_entries" in an.NO_CLAIM_NUDGE
 
 

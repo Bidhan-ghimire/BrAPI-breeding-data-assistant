@@ -67,7 +67,7 @@ __all__ = [
 RETRIEVER_ACTIONS = frozenset({"server_info", "search_studies", "study_types", "get_study", "list_variables", "get_observations",
                                "list_locations", "list_programs", "list_seasons", "get_observation_units", "export_metadata"})
 ANALYST_ACTIONS = frozenset({"table_info", "numeric_summary", "group_stats", "filter_rows", "concat_tables", "missing_report", "count_records",
-                             "rank_entries"})
+                             "rank_entries", "threshold_count"})
 DISCOVERY_FAMILIES: frozenset[str] = frozenset({"serverinfo", "commoncropnames", "studies", "observationvariables", "locations", "programs", "seasons"})
 # Wording that makes a question about SEVERAL studies (so "all known studies" may be its scope). A question that names one study
 # by an unknown name has none of these, and then no study may be chosen for the user. Seen 2026-09-28: a strong model answered
@@ -383,7 +383,7 @@ Rules:
    A uniquely named study already tells us its location and season; do not ask for them.
 4. Steps: retriever actions are search_studies, list_variables, get_observations, get_observation_units, export_metadata,
    list_locations, list_seasons, get_study; analyst actions are table_info, numeric_summary, group_stats, count_records,
-   rank_entries, missing_report, filter_rows, concat_tables. Each step depends only on earlier steps; every analyst step traces back to a
+   rank_entries, missing_report, filter_rows, concat_tables, threshold_count. Each step depends only on earlier steps; every analyst step traces back to a
    retriever step, directly or through the earlier analyst steps it depends on (export -> filter -> count is fine; a step that
    depends on nothing is not). The list_* and search_* actions return
    previews only, never a table the analyst can use: a count over catalog rows (variables, studies, seasons, locations) needs an
@@ -411,6 +411,11 @@ Rules:
      get_observations needs a trait in scope.variable_ids.
    - the highest / lowest / top k entries, or where a named entry ranks, for ONE measured trait: get_observations, then
      rank_entries(order="highest", top_k=1, named=["..."], exclude=["..."]) — an ordering of recorded values, never "best".
+   - how many or what share of entries (by entry mean) or plots (by value) are above / below a threshold, for ONE measured trait in
+     named studies: get_observations, then threshold_count(count="entries", op="above", threshold_entries=["Beauregard"],
+     exclude=["..."], name_prefix="PH17.") — exclude names the study's other checks; the threshold is the mean of the named
+     entries, computed per study, or a number from the question written as text (threshold="12.5"); a count of recorded values,
+     never "best". A percentage uses statistic kind "ratio".
    - narrowing a table: filter_rows(column="studyType", op="eq", value="Advanced Yield Trial"); op is one of eq, ne, contains,
      gt, ge, lt, le, is_missing, is_valid_number. A catalog table comes from export_metadata(entity="variables"); entity is one
      of studies, variables, locations, programs, seasons.
