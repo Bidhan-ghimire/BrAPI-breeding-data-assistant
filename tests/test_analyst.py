@@ -20,7 +20,7 @@ import pytest
 import agents.analyst as an
 import analyst_tools as at
 import brapi_mcp_server as srv
-from contracts import AnalysisReport, MeasurementMeta
+from contracts import AnalysisReport, MeasurementMeta, ToolResult
 from llm import Budget, FakeModelClient, reply_text, reply_tools
 from part2_support import synthetic_context
 
@@ -131,6 +131,108 @@ def test_artifact_not_supplied_is_refused_even_though_registered(tmp_path):
     refused = [m for name, m in tool_messages(agent) if not m["ok"]]
     assert len(refused) == 1 and refused[0]["error"]["code"] == "not_authorized" and extra in refused[0]["error"]["message"]
     assert report.status == "completed" and all(extra not in h for c in report.claims for h in c.source_artifact_hashes)
+
+
+class _RecordingTools:
+    """An inner tool interface that records every call it gets: a refused call must never reach it."""
+
+    def __init__(self, produced=()):
+        self.calls, self.produced = [], list(produced)
+
+    async def schemas(self):
+        return []
+
+    async def call(self, name, args):
+        self.calls.append((name, dict(args)))
+        return ToolResult(ok=True, data={}, artifact_ids=self.produced)
+
+
+HANDLE_PATTERN = "^art_[A-Za-z0-9_-]+$"                                          # contracts.ArtifactId
+
+
+def _is_handle(schema):
+    return bool(schema) and (schema.get("pattern") == HANDLE_PATTERN or _is_handle(schema.get("items") or {})
+                             or any(_is_handle(option) for option in schema.get("anyOf", [])))
+
+
+def _takes_list(schema):
+    return schema.get("type") == "array" or any(_takes_list(option) for option in schema.get("anyOf", []))
+
+
+def _handle_arguments():
+    """Every (tool, argument) that carries a table handle, read from the tools' own argument models, and whether it takes a list."""
+    return [(name, argument, _takes_list(schema)) for name, spec in at.ANALYST_TOOLS.items()
+            for argument, schema in spec.args_model.model_json_schema()["properties"].items() if _is_handle(schema)]
+
+
+def test_every_table_argument_of_every_tool_is_checked_before_the_tool_runs():
+    """Coach 2026-10-22 03:48 UTC (answer 1): the guard checks every argument that carries a table handle and refuses a table
+    never supplied before the tool runs. On dev these are artifact_id (8 tools), artifact_ids (concat_tables) and
+    roster_artifact_id (missing_report)."""
+    arguments = _handle_arguments()
+    assert {argument for _, argument, _ in arguments} == {"artifact_id", "artifact_ids", "roster_artifact_id"} and len(arguments) == 10
+    for tool, argument, listed in arguments:
+        inner = _RecordingTools()
+        guard = an.GuardedAnalystTools(inner=inner, supplied=["art_ok_0001"], inspected={"art_ok_0001"})
+        result = anyio.run(guard.call, tool, {argument: ["art_ok_0001", "art_never_0009"] if listed else "art_never_0009"})
+        assert not result.ok and result.error.code == "not_authorized" and "art_never_0009" in result.error.message, (tool, argument)
+        assert inner.calls == [] and guard.records[-1].refused_here, (tool, argument)
+
+
+def test_a_call_with_supplied_tables_still_reaches_the_tool():
+    """The same change refuses nothing it accepted before: supplied tables under every argument name, and no roster (None)."""
+    supplied = ["art_ok_0001", "art_ok_0002"]
+    calls = [(tool, {argument: list(supplied) if listed else supplied[0],
+                     **({"artifact_id": supplied[1]} if argument == "roster_artifact_id" else {})})
+             for tool, argument, listed in _handle_arguments()]
+    calls.append(("missing_report", {"artifact_id": supplied[0], "roster_artifact_id": None}))
+    for tool, args in calls:
+        inner = _RecordingTools()
+        guard = an.GuardedAnalystTools(inner=inner, supplied=supplied, inspected=set(supplied))
+        assert anyio.run(guard.call, tool, args).ok and inner.calls == [(tool, args)], (tool, args)
+
+
+@pytest.mark.parametrize("argument, value", [("base_artifact_id", "art_never_0009"), ("other_artifact_id", "art_never_0009"),
+                                             ("extra_artifact_ids", ["art_ok_0001", "art_never_0009"])])
+def test_a_table_under_any_other_argument_name_is_checked_too(argument, value):
+    """Review of compare_means, 2026-10-22 (round 0, R1): the guard listed three argument names, so a tool that takes its table
+    as base_artifact_id or other_artifact_id could read a table never supplied. Every argument named *artifact_id or
+    *artifact_ids is checked, whichever tool it reaches."""
+    inner = _RecordingTools()
+    guard = an.GuardedAnalystTools(inner=inner, supplied=["art_ok_0001"], inspected={"art_ok_0001"})
+    result = anyio.run(guard.call, "numeric_summary", {"artifact_id": "art_ok_0001", argument: value})
+    assert not result.ok and result.error.code == "not_authorized" and "art_never_0009" in result.error.message
+    assert inner.calls == [] and guard.records[-1].refused_here
+
+
+def test_a_table_in_any_argument_place_or_list_place_is_checked():
+    """Review of this change, 2026-10-22: no test put the stray table after the second argument or late in a list."""
+    for args in ({"artifact_id": "art_ok_0001", "column": "value", "other_artifact_id": "art_never_0009"},
+                 {"artifact_ids": ["art_ok_0001"] * 5 + ["art_never_0009"]}):
+        inner = _RecordingTools()
+        guard = an.GuardedAnalystTools(inner=inner, supplied=["art_ok_0001"], inspected={"art_ok_0001"})
+        result = anyio.run(guard.call, "concat_tables", args)
+        assert not result.ok and result.error.code == "not_authorized" and "art_never_0009" in result.error.message and inner.calls == []
+
+
+@pytest.mark.parametrize("argument, value", [("artifact_ids", "art_ok_0001"), ("artifact_ids", {"art_never_0009": 1}),
+                                             ("artifact_ids", {"x": "art_never_0009"}), ("artifact_ids", 5),
+                                             ("artifact_id", {"x": "art_ok_0001"})])
+def test_a_table_argument_of_the_wrong_shape_is_refused_by_the_guard_itself(argument, value):
+    """Review of this change, 2026-10-22: the three names spread artifact_ids with *, so a bare string or a dict was refused
+    by the guard (its letters or keys are no supplied table); reading values as they are passed such shapes on to the tool,
+    whose own argument check refused them with another code. The guard refuses them itself, as before."""
+    inner = _RecordingTools()
+    guard = an.GuardedAnalystTools(inner=inner, supplied=["art_ok_0001"], inspected={"art_ok_0001"})
+    result = anyio.run(guard.call, "concat_tables", {argument: value})
+    assert not result.ok and result.error.code == "not_authorized" and argument in result.error.message and inner.calls == []
+
+
+def test_a_table_the_analysis_produced_may_be_used_next():
+    inner = _RecordingTools(produced=["art_ok_0002"])
+    guard = an.GuardedAnalystTools(inner=inner, supplied=["art_ok_0001"], inspected={"art_ok_0001"})
+    assert anyio.run(guard.call, "filter_rows", {"artifact_id": "art_ok_0001"}).ok
+    assert anyio.run(guard.call, "numeric_summary", {"artifact_id": "art_ok_0002"}).ok and len(inner.calls) == 2
 
 
 def test_unauthorized_file_read_is_refused_and_nothing_is_opened(tmp_path, monkeypatch):

@@ -130,7 +130,14 @@ class GuardedAnalystTools:
 
     async def call(self, name: str, args: Mapping[str, Any] | None) -> ToolResult:
         args = dict(args or {})
-        handles = [h for h in [args.get("artifact_id"), args.get("roster_artifact_id"), *(args.get("artifact_ids") or [])] if isinstance(h, str)]
+        # Every table argument, whatever the tool calls it (artifact_id, roster_artifact_id, artifact_ids, ...). Review of
+        # compare_means, 2026-10-22: a list of three names would let base_artifact_id / other_artifact_id read a table never supplied.
+        tables = {key: value for key, value in args.items() if key.endswith(("artifact_id", "artifact_ids"))}
+        malformed = [key for key, value in tables.items()
+                     if isinstance(value, dict) or (key.endswith("artifact_ids") and value is not None and not isinstance(value, list))]
+        if malformed:      # refused here as before, not only by the tool's own argument check (review of this change, 2026-10-22)
+            return self._refuse(name, args, "not_authorized", f"{malformed[0]} must be an artifact handle, or a list of them for *_ids")
+        handles = [h for value in tables.values() for h in (value if isinstance(value, list) else [value]) if isinstance(h, str)]
         outside = [h for h in handles if h not in self.allowed]
         if outside:
             return self._refuse(name, args, "not_authorized", f"artifact {outside[0]!r} was not supplied to this analysis and was not produced by it")
