@@ -5,6 +5,7 @@ blocked (a gate, a limit, an error) / invented (a number in the code-written par
 question backs: the red flag)."""
 import importlib.util
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -411,3 +412,17 @@ def test_the_lines_the_app_writes_back_nothing(tmp_path):
     assert any("99992" in line for line in caveats)
     run = _with_report_lines(_run_dir(tmp_path / "graded", []), warnings=lines, caveats=caveats)
     assert not {99991.0, 99992.0, 99993.0, 99994.0, 99995.0} & set(bench.run_numbers([run]))
+
+
+def test_an_endless_number_backs_nothing(tmp_path):
+    """Review 2026-10-22 (round 2, R4): an all-digit ID of 309 digits or more reads as inf, and inf backed every number shown
+    (abs(inf - x) <= inf). A model may put such an ID in a refused fetch, and the ledger then holds it; a table cell could too."""
+    run = _run_dir(tmp_path, [_refused("9" * 400)])
+    with (run / "artifacts" / "t.csv").open("w", encoding="utf-8", newline="") as handle:
+        handle.write("value\n" + "8" * 400 + "\n-" + "7" * 400 + "\n")                         # +inf and -inf
+    backed = bench.run_numbers([run])
+    assert backed and not any(math.isfinite(value) for value in backed)                  # read, and endless
+    shown = "**Question blocked.**\n\nThe mean is 12.5 t/ha; the other study gives 3.7."
+    g = bench.grade(sub(), shown=shown, status="run ended", claims=[], backed_extra=backed)
+    assert g["bucket"] == "invented" and sorted(i["value"] for i in g["invented"]) == [3.7, 12.5]
+    assert not bench._backed(12.5, 1, [math.inf]) and bench._backed(12.5, 1, [math.inf, 12.5])
