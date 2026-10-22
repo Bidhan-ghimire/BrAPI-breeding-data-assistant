@@ -277,6 +277,25 @@ def run_numbers(run_dirs: Iterable[Path]) -> list[float]:
     return found
 
 
+_TRAIT_QUESTION = "More than one trait matches the question:"
+_TRAIT_OPTION = re.compile(r"(\d+) \(([^()|]+)\|(CO_\d+:\d+)\)")       # "76619 (Content of beta-carotene ...|CO_331:0000289)"
+
+
+def trait_answer(question: str, shown: str) -> str | None:
+    """The benchmark's answer to the planner's "More than one trait matches the question: ..." (coach, 2026-10-22 15:53 UTC;
+    harness-only, the app is unchanged): the listed variable(s) the sub-question names, by their ontology term (|CO_331:...),
+    else by their whole name in any case, in the listed order and joined by "and". None when the chat shows another question
+    or the sub-question names none of the listed variables: then the run stops there, as before."""
+    if _TRAIT_QUESTION not in shown:
+        return None
+    options = _TRAIT_OPTION.findall(shown.split(_TRAIT_QUESTION, 1)[1].split("Which one?", 1)[0])
+    chosen = [vid for vid, _name, term in options if term in question]
+    if not chosen:
+        lowered = question.lower()
+        chosen = [vid for vid, name, _term in options if name.strip().lower() in lowered]
+    return " and ".join(dict.fromkeys(chosen)) or None
+
+
 def run_subquestions(subs: list[dict[str, Any]], *, cache_copy: Path, out_dir: Path,
                      base_config: Callable[[str], Any], make_models: Callable[[], Any], triage_model: Callable[[], Any] | None,
                      preflight: Callable[[str], list[str]] | None, allow_live: bool, wait: float = 120.0) -> dict[str, Any]:
@@ -293,7 +312,8 @@ def run_subquestions(subs: list[dict[str, Any]], *, cache_copy: Path, out_dir: P
             started = time.monotonic()
             try:
                 outcome = harness.ask(s["question"], dict(make_config=make_config, make_models=make_models, preflight=preflight,
-                                                          triage_model=counter), wait=wait)
+                                                          triage_model=counter), wait=wait,
+                                      answer_clarification=lambda shown, question=s["question"]: trait_answer(question, shown))
             except Exception as exc:  # noqa: BLE001 - one broken question must not stop the others
                 outcome = harness.Outcome(status=f"error: {type(exc).__name__}: {exc}")
             seconds = time.monotonic() - started
@@ -309,7 +329,7 @@ def run_subquestions(subs: list[dict[str, Any]], *, cache_copy: Path, out_dir: P
             rows.append({"sub_id": s["sub_id"], "parent": s["parent"], "tier": s["tier"], "question": s["question"],
                          "expected": s["expected"], "expected_text": s.get("expected_text") or [], **graded,
                          "status": outcome.status, "answer": outcome.shown[:harness.GOT_CHARS], "answer_full": outcome.shown,
-                         "typed": outcome.typed,
+                         "typed": outcome.typed, "answered_clarifications": list(outcome.answered),
                          "claims": [{k: c.get(k) for k in ("kind", "value", "unit", "filters", "transformation")} for c in claims],
                          "model_calls": (counter.calls if counter else 0) + run_calls,
                          "live_attempts": sum(r.counts.live_attempts for r in outcome.results),
@@ -339,12 +359,15 @@ def results_markdown(report: dict[str, Any]) -> str:
         if total:
             lines.append(f"| {tier} | {total} | " + " | ".join(str(counts[b]) for b in BUCKETS) + " |")
     lines += ["", "A pass is any number within tolerance anywhere in the code-written answer: read Got before trusting it.", "",
-              "| Sub | Tier | Bucket | Why | Got | Model calls | Cost ($) | Seconds | Status |", "|---|---|---|---|---|---|---|---|---|"]
+              "| Sub | Tier | Bucket | Why | Got | Answered clarifications | Model calls | Cost ($) | Seconds | Status |",
+              "|---|---|---|---|---|---|---|---|---|---|"]
     for r in report["subquestions"]:
         cost = r["tokens"]["cost_usd"]
         got = "; ".join(r.get("matched") or []) or "; ".join(f"{i['value']} in \"{i['context']}\"" for i in r.get("invented") or [])
+        answered = "; ".join(a.removeprefix("clarification answered by harness: ") for a in r.get("answered_clarifications") or [])
         lines.append(f"| {r['sub_id']} | {r['tier']} | {r['bucket']} | {harness._cell(r['why'], 90)} | {harness._cell(got, 120)} | "
-                     f"{r['model_calls']} | {'' if cost is None else f'{cost:.6f}'} | {r['seconds']} | {harness._cell(r['status'], 60)} |")
+                     f"{harness._cell(answered, 40)} | {r['model_calls']} | {'' if cost is None else f'{cost:.6f}'} | {r['seconds']} | "
+                     f"{harness._cell(r['status'], 60)} |")
     skipped = report.get("not_checkable") or []
     if skipped:
         lines += ["", "Not checkable (not run): " + ", ".join(skipped)]

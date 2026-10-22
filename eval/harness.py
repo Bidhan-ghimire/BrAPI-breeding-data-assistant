@@ -507,6 +507,7 @@ class Outcome:
     results: list[RunResult] = field(default_factory=list)
     threads: list[Any] = field(default_factory=list)   # the runs' threads (one still alive keeps requests refused)
     run_dirs: list[Path] = field(default_factory=list)  # the runs' folders, where their model logs are
+    answered: list[str] = field(default_factory=list)   # the planner's question the benchmark answered, with what (2026-10-22)
 
 
 def _turn(message: str, history: list, state: dict, chat: dict[str, Any]) -> tuple[list, dict]:
@@ -550,9 +551,13 @@ def _result_of(job: Any, wait: float) -> RunResult | None:
         return None
 
 
-def ask(question: str, chat: dict[str, Any], *, wait: float = 120.0) -> Outcome:
+def ask(question: str, chat: dict[str, Any], *, wait: float = 120.0,
+        answer_clarification: Callable[[str], str | None] | None = None) -> Outcome:
     """One question as a new chat. The scripted approver types "approve" at the data request's approval screen and
-    "continue" at the data review; anything else ends the question (a waiting run is ended, never accepted)."""
+    "continue" at the data review; anything else ends the question (a waiting run is ended, never accepted). With
+    answer_clarification (the benchmark's, coach 2026-10-22 15:53 UTC), the planner's question (CLARIFY_PROMPT) is answered
+    ONCE per question with what it returns for the chat's last message, and recorded in Outcome.answered; it returns None for
+    any question it does not answer. The analyst's, retriever's and supervisor's questions are never answered."""
     outcome = Outcome()
     first = len(TrackedJob.started)
     history, state = _turn(question, [], {}, chat)
@@ -565,10 +570,15 @@ def ask(question: str, chat: dict[str, Any], *, wait: float = 120.0) -> Outcome:
             outcome.status = ""                                          # decided below, once every run is known
             break
         waiting = job.waiting_on or ""
+        reply = (answer_clarification(_last(history)) if waiting == CLARIFY_PROMPT and answer_clarification is not None
+                 and not outcome.answered else None)
         if waiting.startswith("approve / edit / cancel"):
             word = "approve"
         elif waiting == DATA_REVIEW_PROMPT:
             word = "continue"
+        elif reply:
+            word = reply
+            outcome.answered.append(f"clarification answered by harness: {reply}")
         else:
             outcome.status = ("final review reached; the answer was left pending" if waiting.startswith("accept / reject")
                               else _stopped_at(waiting))
