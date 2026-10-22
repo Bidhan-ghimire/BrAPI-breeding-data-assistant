@@ -1,0 +1,1582 @@
+{
+ "source": "A12 (coach 2026-10-22 20:48 UTC): the wordings of the two reviews of the negation rule A9 (option_b REVIEW.md and REVIEW_round2.md, their probes p3b_probe.py and cases1..7.py) that hold a gate word, each with dev ba2d297's candidates (count, sha256 of the sorted IDs joined by spaces, the IDs when 10 or fewer), exact IDs and unmatched terms on the 486 SweetPotatoBase variables of tests/fixtures/spb_variables_20261021.json",
+ "cases": [
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, do not use the adjusted yield variable CO_331:0000999",
+   "dev": {
+    "count": 379,
+    "sha256": "e3c41477d9010e594639096473df5d031217cd0023025a07b172835a9bed5dac",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, avoid CO_331:0000999",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297 aside from CO_331:0000999",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, minus CO_331:0000999",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, remove CO_331:0000999",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, w/o CO_331:0000999",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, CO_331:0000999 not needed",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, CO_331:0000999 excluded",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, but leave CO_331:0000999 out",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, forget CO_331:0000999",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, but not CO_331:0000999",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, but NOT CO_331:0000999",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297 - not CO_331:0000999",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297 (CO_331:0000999 is not wanted)",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297 [not CO_331:0000999]",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297 and not CO_331:0000999",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, I do not want the adjusted CO_331:0000999",
+   "dev": {
+    "count": 379,
+    "sha256": "e3c41477d9010e594639096473df5d031217cd0023025a07b172835a9bed5dac",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, I do not want the version adjusted for stand CO_331:0000999",
+   "dev": {
+    "count": 379,
+    "sha256": "e3c41477d9010e594639096473df5d031217cd0023025a07b172835a9bed5dac",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, please don't include CO_331:0000999",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not including CO_331:0000999",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not either CO_331:0000999",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not CO_331:0000999 nor CO_331:0000289",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297; not CO_331:0000999.",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297\nnot CO_331:0000999",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296, CO_331:0000297, but not (CO_331:0000999)",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not 78012",
+   "dev": {
+    "count": 1,
+    "sha256": "3b506968104f57876177ea6d290cbeb6f85d7111a51b4239d3ba160f13051180",
+    "candidates": [
+     "78012"
+    ],
+    "exact": [],
+    "unmatched": [
+     "co_331:0000296",
+     "co_331:0000297"
+    ]
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not variable 78012",
+   "dev": {
+    "count": 1,
+    "sha256": "3b506968104f57876177ea6d290cbeb6f85d7111a51b4239d3ba160f13051180",
+    "candidates": [
+     "78012"
+    ],
+    "exact": [],
+    "unmatched": [
+     "co_331:0000296",
+     "co_331:0000297"
+    ]
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not variable ID 78012",
+   "dev": {
+    "count": 1,
+    "sha256": "3b506968104f57876177ea6d290cbeb6f85d7111a51b4239d3ba160f13051180",
+    "candidates": [
+     "78012"
+    ],
+    "exact": [],
+    "unmatched": [
+     "co_331:0000296",
+     "co_331:0000297"
+    ]
+   }
+  },
+  {
+   "wording": "Mean of 76581 and 76605, not 78012",
+   "dev": {
+    "count": 3,
+    "sha256": "1c8fbe0777fdf954a28b74a2683e308ff9b17f8f2ed604629e0feca853ff0cd0",
+    "candidates": [
+     "76581",
+     "76605",
+     "78012"
+    ],
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, NOT: CO_331:0000999",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not: CO_331:0000999",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not the CO_331:0000999",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297 not just CO_331:0000999",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297 but not just CO_331:0000999",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not, repeat not, CO_331:0000999",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean per clone not per plot of CO_331:0000296 and CO_331:0000297",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Give the entry mean, not the plot mean, of CO_331:0000296 and CO_331:0000297",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Give the entry mean not the plot mean of CO_331:0000296 and CO_331:0000297",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean per entry in S1, not per rep, for CO_331:0000296 and CO_331:0000297",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Compare entries not in S1 for CO_331:0000296 and CO_331:0000297",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Which clones are not above Beauregard for CO_331:0000296 and CO_331:0000297?",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "How many entries do not exceed 20 for CO_331:0000296 and CO_331:0000297?",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "How many entries are not above the mean of Beauregard in CO_331:0000296 and CO_331:0000297?",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297 for plots not flagged, not excluded",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Average CO_331:0000296 and CO_331:0000297, not weighted, per study",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296, not per rep but per plot, and CO_331:0000297",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "What is not recorded for CO_331:0000296 and CO_331:0000297 in S1?",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Which plots have no value for CO_331:0000296 and CO_331:0000297?",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Which plots have no value for both CO_331:0000296 and CO_331:0000297?",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Do not forget CO_331:0000297 when you take the mean of CO_331:0000296",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296, don't forget CO_331:0000297",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297 not including germplasm Beauregard",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297 for all entries except Beauregard",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297 for all entries except Beauregard and CO_331:0000289 is fine too",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "I don't know the ID; give the mean of CO_331:0000296 and CO_331:0000297",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "I can't remember the name but give CO_331:0000296 and CO_331:0000297",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Isn't CO_331:0000296 the same as CO_331:0000297? give both means",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Neither CO_331:0000296 nor CO_331:0000297 should be above 50; count entries",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Count entries with no CO_331:0000296 and no CO_331:0000297 values",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not CO_331:0000999 nor CO_331:0000289\nClarification 1 from the person: 76581 and 76605",
+   "dev": {
+    "count": 2,
+    "sha256": "7f25506c50206fa314ec23a4afec8f1d642a8bae947df4f30a2ec06d6e8c8bea",
+    "candidates": [
+     "76581",
+     "76605"
+    ],
+    "exact": [
+     "76581",
+     "76605"
+    ],
+    "unmatched": [
+     "co_331:0000289",
+     "co_331:0000999"
+    ]
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not CO_331:0000999 nor CO_331:0000289\nClarification 1 from the person: 76581, 76605 and 76619",
+   "dev": {
+    "count": 3,
+    "sha256": "7edb380a500ae8aa334e0042ded5c9ca723b2baa3671d9fd1902bbff95d1a024",
+    "candidates": [
+     "76581",
+     "76605",
+     "76619"
+    ],
+    "exact": [
+     "76581",
+     "76605",
+     "76619"
+    ],
+    "unmatched": [
+     "co_331:0000999"
+    ]
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not CO_331:0000999 nor CO_331:0000289\nClarification 1 from the person: 76581 and 76605, not 76619",
+   "dev": {
+    "count": 3,
+    "sha256": "7edb380a500ae8aa334e0042ded5c9ca723b2baa3671d9fd1902bbff95d1a024",
+    "candidates": [
+     "76581",
+     "76605",
+     "76619"
+    ],
+    "exact": [
+     "76581",
+     "76605",
+     "76619"
+    ],
+    "unmatched": [
+     "co_331:0000999"
+    ]
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not CO_331:0000999 nor CO_331:0000289\nClarification 1 from the person: no, just 76581",
+   "dev": {
+    "count": 1,
+    "sha256": "c6e58acae089e8cf63ad6c16e2aed84d52e5dea493d04d5ac951bfb8b981e344",
+    "candidates": [
+     "76581"
+    ],
+    "exact": [
+     "76581"
+    ],
+    "unmatched": [
+     "co_331:0000289",
+     "co_331:0000297",
+     "co_331:0000999"
+    ]
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not CO_331:0000999 nor CO_331:0000289\nClarification 1 from the person: No - 76581 and 76605",
+   "dev": {
+    "count": 2,
+    "sha256": "7f25506c50206fa314ec23a4afec8f1d642a8bae947df4f30a2ec06d6e8c8bea",
+    "candidates": [
+     "76581",
+     "76605"
+    ],
+    "exact": [
+     "76581",
+     "76605"
+    ],
+    "unmatched": [
+     "co_331:0000289",
+     "co_331:0000999"
+    ]
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not CO_331:0000999 nor CO_331:0000289\nClarification 1 from the person: all of them",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not CO_331:0000999 nor CO_331:0000289\nClarification 1 from the person: the first two",
+   "dev": {
+    "count": 380,
+    "sha256": "494ab6d19ea2298879fb1da82772bd4863dd4aa5d2ce12b5b8452c364c3f50e2",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not CO_331:0000999 nor CO_331:0000289\nClarification 1 from the person: 76581 and 76605 but not the adjusted yield 78012",
+   "dev": {
+    "count": 3,
+    "sha256": "1c8fbe0777fdf954a28b74a2683e308ff9b17f8f2ed604629e0feca853ff0cd0",
+    "candidates": [
+     "76581",
+     "76605",
+     "78012"
+    ],
+    "exact": [
+     "76581",
+     "76605",
+     "78012"
+    ],
+    "unmatched": [
+     "co_331:0000289"
+    ]
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not CO_331:0000999 nor CO_331:0000289\nClarification 1 from the person: 76581, 76605 and 78012",
+   "dev": {
+    "count": 3,
+    "sha256": "1c8fbe0777fdf954a28b74a2683e308ff9b17f8f2ed604629e0feca853ff0cd0",
+    "candidates": [
+     "76581",
+     "76605",
+     "78012"
+    ],
+    "exact": [
+     "76581",
+     "76605",
+     "78012"
+    ],
+    "unmatched": [
+     "co_331:0000289"
+    ]
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not CO_331:0000999 nor CO_331:0000289\nClarification 1 from the person: CO_331:0000296 and CO_331:0000297",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not CO_331:0000999 nor CO_331:0000289\nClarification 1 from the person: 76619",
+   "dev": {
+    "count": 1,
+    "sha256": "ad11af43454565154733e77b03442bd757314c7a5697c604c323e509953f0de8",
+    "candidates": [
+     "76619"
+    ],
+    "exact": [
+     "76619"
+    ],
+    "unmatched": [
+     "co_331:0000296",
+     "co_331:0000297",
+     "co_331:0000999"
+    ]
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296, don't forget CO_331:0000297\nClarification 1 from the person: 76581 and 76605",
+   "dev": {
+    "count": 2,
+    "sha256": "7f25506c50206fa314ec23a4afec8f1d642a8bae947df4f30a2ec06d6e8c8bea",
+    "candidates": [
+     "76581",
+     "76605"
+    ],
+    "exact": [
+     "76581",
+     "76605"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296, don't forget CO_331:0000297\nClarification 1 from the person: just 76581",
+   "dev": {
+    "count": 1,
+    "sha256": "c6e58acae089e8cf63ad6c16e2aed84d52e5dea493d04d5ac951bfb8b981e344",
+    "candidates": [
+     "76581"
+    ],
+    "exact": [
+     "76581"
+    ],
+    "unmatched": [
+     "co_331:0000297"
+    ]
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296, don't forget CO_331:0000297\nClarification 1 from the person: 76605",
+   "dev": {
+    "count": 1,
+    "sha256": "df49f519e7138f2dc3380f393ccad4d413f04839fdd1c879558f909b6d9793f3",
+    "candidates": [
+     "76605"
+    ],
+    "exact": [
+     "76605"
+    ],
+    "unmatched": [
+     "co_331:0000296"
+    ]
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and the one without CO_331:0000999\nClarification 1 from the person: 76581",
+   "dev": {
+    "count": 1,
+    "sha256": "c6e58acae089e8cf63ad6c16e2aed84d52e5dea493d04d5ac951bfb8b981e344",
+    "candidates": [
+     "76581"
+    ],
+    "exact": [
+     "76581"
+    ],
+    "unmatched": [
+     "co_331:0000999"
+    ]
+   }
+  },
+  {
+   "wording": "Don't average, list 'Total storage roots yield computation tons per ha|CO_331:0000296' and 'Storage root dry matter content computing percent|CO_331:0000297'",
+   "dev": {
+    "count": 2,
+    "sha256": "7f25506c50206fa314ec23a4afec8f1d642a8bae947df4f30a2ec06d6e8c8bea",
+    "candidates": [
+     "76581",
+     "76605"
+    ],
+    "exact": [
+     "76581",
+     "76605"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Don't forget 'Storage root dry matter content computing percent|CO_331:0000297' when you take the mean of 'Total storage roots yield computation tons per ha|CO_331:0000296'",
+   "dev": {
+    "count": 2,
+    "sha256": "7f25506c50206fa314ec23a4afec8f1d642a8bae947df4f30a2ec06d6e8c8bea",
+    "candidates": [
+     "76581",
+     "76605"
+    ],
+    "exact": [
+     "76581",
+     "76605"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "I don't care which, mean of 'Total storage roots yield computation tons per ha|CO_331:0000296' and 'Storage root dry matter content computing percent|CO_331:0000297'",
+   "dev": {
+    "count": 2,
+    "sha256": "7f25506c50206fa314ec23a4afec8f1d642a8bae947df4f30a2ec06d6e8c8bea",
+    "candidates": [
+     "76581",
+     "76605"
+    ],
+    "exact": [
+     "76581",
+     "76605"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Never mind the rest, give 'Total storage roots yield computation tons per ha|CO_331:0000296' and 'Storage root dry matter content computing percent|CO_331:0000297' per entry",
+   "dev": {
+    "count": 2,
+    "sha256": "7f25506c50206fa314ec23a4afec8f1d642a8bae947df4f30a2ec06d6e8c8bea",
+    "candidates": [
+     "76581",
+     "76605"
+    ],
+    "exact": [
+     "76581",
+     "76605"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Please don't round the mean of 'Total storage roots yield computation tons per ha|CO_331:0000296' and 'Storage root dry matter content computing percent|CO_331:0000297'",
+   "dev": {
+    "count": 2,
+    "sha256": "7f25506c50206fa314ec23a4afec8f1d642a8bae947df4f30a2ec06d6e8c8bea",
+    "candidates": [
+     "76581",
+     "76605"
+    ],
+    "exact": [
+     "76581",
+     "76605"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Without rounding, the mean of 'Total storage roots yield computation tons per ha|CO_331:0000296' and 'Storage root dry matter content computing percent|CO_331:0000297'",
+   "dev": {
+    "count": 2,
+    "sha256": "7f25506c50206fa314ec23a4afec8f1d642a8bae947df4f30a2ec06d6e8c8bea",
+    "candidates": [
+     "76581",
+     "76605"
+    ],
+    "exact": [
+     "76581",
+     "76605"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of 'Total storage roots yield computation tons per ha|CO_331:0000296' and 'Storage root dry matter content computing percent|CO_331:0000297', no rounding",
+   "dev": {
+    "count": 2,
+    "sha256": "7f25506c50206fa314ec23a4afec8f1d642a8bae947df4f30a2ec06d6e8c8bea",
+    "candidates": [
+     "76581",
+     "76605"
+    ],
+    "exact": [
+     "76581",
+     "76605"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of 'Total storage roots yield computation tons per ha|CO_331:0000296', no 'Storage root dry matter content computing percent|CO_331:0000297'",
+   "dev": {
+    "count": 2,
+    "sha256": "7f25506c50206fa314ec23a4afec8f1d642a8bae947df4f30a2ec06d6e8c8bea",
+    "candidates": [
+     "76581",
+     "76605"
+    ],
+    "exact": [
+     "76581",
+     "76605"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of 'Total storage roots yield computation tons per ha|CO_331:0000296' and 'Storage root dry matter content computing percent|CO_331:0000297' for entries that haven't been scored",
+   "dev": {
+    "count": 2,
+    "sha256": "7f25506c50206fa314ec23a4afec8f1d642a8bae947df4f30a2ec06d6e8c8bea",
+    "candidates": [
+     "76581",
+     "76605"
+    ],
+    "exact": [
+     "76581",
+     "76605"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Which plots have no 'Total storage roots yield computation tons per ha|CO_331:0000296' and no 'Storage root dry matter content computing percent|CO_331:0000297' recorded?",
+   "dev": {
+    "count": 2,
+    "sha256": "7f25506c50206fa314ec23a4afec8f1d642a8bae947df4f30a2ec06d6e8c8bea",
+    "candidates": [
+     "76581",
+     "76605"
+    ],
+    "exact": [
+     "76581",
+     "76605"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Show 'Total storage roots yield computation tons per ha|CO_331:0000296' and, if not available, 'Storage root dry matter content computing percent|CO_331:0000297'",
+   "dev": {
+    "count": 2,
+    "sha256": "7f25506c50206fa314ec23a4afec8f1d642a8bae947df4f30a2ec06d6e8c8bea",
+    "candidates": [
+     "76581",
+     "76605"
+    ],
+    "exact": [
+     "76581",
+     "76605"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of 'Total storage roots yield computation tons per ha|CO_331:0000296' and 'Storage root dry matter content computing percent|CO_331:0000297', not 'Total storage roots yield adjusted tons per ha|CO_331:0000999'",
+   "dev": {
+    "count": 3,
+    "sha256": "1c8fbe0777fdf954a28b74a2683e308ff9b17f8f2ed604629e0feca853ff0cd0",
+    "candidates": [
+     "76581",
+     "76605",
+     "78012"
+    ],
+    "exact": [
+     "76581",
+     "76605",
+     "78012"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of 'Total storage roots yield computation tons per ha|CO_331:0000296' and 'Storage root dry matter content computing percent|CO_331:0000297', not the 'Total storage roots yield adjusted tons per ha|CO_331:0000999'",
+   "dev": {
+    "count": 3,
+    "sha256": "1c8fbe0777fdf954a28b74a2683e308ff9b17f8f2ed604629e0feca853ff0cd0",
+    "candidates": [
+     "76581",
+     "76605",
+     "78012"
+    ],
+    "exact": [
+     "76581",
+     "76605",
+     "78012"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of 'Total storage roots yield computation tons per ha|CO_331:0000296' and 'Storage root dry matter content computing percent|CO_331:0000297', not the adjusted one ('Total storage roots yield adjusted tons per ha|CO_331:0000999')",
+   "dev": {
+    "count": 3,
+    "sha256": "1c8fbe0777fdf954a28b74a2683e308ff9b17f8f2ed604629e0feca853ff0cd0",
+    "candidates": [
+     "76581",
+     "76605",
+     "78012"
+    ],
+    "exact": [
+     "76581",
+     "76605",
+     "78012"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of 'Total storage roots yield computation tons per ha|CO_331:0000296' and 'Storage root dry matter content computing percent|CO_331:0000297', not 'Total storage roots yield adjusted tons per ha'",
+   "dev": {
+    "count": 3,
+    "sha256": "1c8fbe0777fdf954a28b74a2683e308ff9b17f8f2ed604629e0feca853ff0cd0",
+    "candidates": [
+     "76581",
+     "76605",
+     "78012"
+    ],
+    "exact": [
+     "76581",
+     "76605"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of 'Total storage roots yield computation tons per ha|CO_331:0000296' and 'Storage root dry matter content computing percent|CO_331:0000297' (not 'Total storage roots yield adjusted tons per ha|CO_331:0000999')",
+   "dev": {
+    "count": 3,
+    "sha256": "1c8fbe0777fdf954a28b74a2683e308ff9b17f8f2ed604629e0feca853ff0cd0",
+    "candidates": [
+     "76581",
+     "76605",
+     "78012"
+    ],
+    "exact": [
+     "76581",
+     "76605",
+     "78012"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of 'Total storage roots yield computation tons per ha|CO_331:0000296' and 'Storage root dry matter content computing percent|CO_331:0000297', but not 'Total storage roots yield adjusted tons per ha|CO_331:0000999'",
+   "dev": {
+    "count": 3,
+    "sha256": "1c8fbe0777fdf954a28b74a2683e308ff9b17f8f2ed604629e0feca853ff0cd0",
+    "candidates": [
+     "76581",
+     "76605",
+     "78012"
+    ],
+    "exact": [
+     "76581",
+     "76605",
+     "78012"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean per clone not per plot of 'Total storage roots yield computation tons per ha|CO_331:0000296' and 'Storage root dry matter content computing percent|CO_331:0000297'",
+   "dev": {
+    "count": 2,
+    "sha256": "7f25506c50206fa314ec23a4afec8f1d642a8bae947df4f30a2ec06d6e8c8bea",
+    "candidates": [
+     "76581",
+     "76605"
+    ],
+    "exact": [
+     "76581",
+     "76605"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Which clones are not above Beauregard for 'Total storage roots yield computation tons per ha|CO_331:0000296' and 'Storage root dry matter content computing percent|CO_331:0000297'?",
+   "dev": {
+    "count": 2,
+    "sha256": "7f25506c50206fa314ec23a4afec8f1d642a8bae947df4f30a2ec06d6e8c8bea",
+    "candidates": [
+     "76581",
+     "76605"
+    ],
+    "exact": [
+     "76581",
+     "76605"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Compare entries not in S1 for variables 76581 and 76605",
+   "dev": {
+    "count": 2,
+    "sha256": "7f25506c50206fa314ec23a4afec8f1d642a8bae947df4f30a2ec06d6e8c8bea",
+    "candidates": [
+     "76581",
+     "76605"
+    ],
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Which clones are not above Beauregard for variables 76581 and 76605?",
+   "dev": {
+    "count": 2,
+    "sha256": "7f25506c50206fa314ec23a4afec8f1d642a8bae947df4f30a2ec06d6e8c8bea",
+    "candidates": [
+     "76581",
+     "76605"
+    ],
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Which clones are not above Beauregard for 'Total storage roots yield computation tons per ha|CO_331:0000296'?",
+   "dev": {
+    "count": 1,
+    "sha256": "c6e58acae089e8cf63ad6c16e2aed84d52e5dea493d04d5ac951bfb8b981e344",
+    "candidates": [
+     "76581"
+    ],
+    "exact": [
+     "76581"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "How many clones are not above Beauregard for Total storage roots yield computation tons per ha?",
+   "dev": {
+    "count": 1,
+    "sha256": "c6e58acae089e8cf63ad6c16e2aed84d52e5dea493d04d5ac951bfb8b981e344",
+    "candidates": [
+     "76581"
+    ],
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Which entries are not better than the check for CO_331:0000296?",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Which entries are not better than the check for 'Total storage roots yield computation tons per ha|CO_331:0000296'?",
+   "dev": {
+    "count": 1,
+    "sha256": "c6e58acae089e8cf63ad6c16e2aed84d52e5dea493d04d5ac951bfb8b981e344",
+    "candidates": [
+     "76581"
+    ],
+    "exact": [
+     "76581"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Which entries are not below 20 for 'Total storage roots yield computation tons per ha|CO_331:0000296'?",
+   "dev": {
+    "count": 1,
+    "sha256": "c6e58acae089e8cf63ad6c16e2aed84d52e5dea493d04d5ac951bfb8b981e344",
+    "candidates": [
+     "76581"
+    ],
+    "exact": [
+     "76581"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "What share of plots is not missing for 'Total storage roots yield computation tons per ha|CO_331:0000296'?",
+   "dev": {
+    "count": 1,
+    "sha256": "c6e58acae089e8cf63ad6c16e2aed84d52e5dea493d04d5ac951bfb8b981e344",
+    "candidates": [
+     "76581"
+    ],
+    "exact": [
+     "76581"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "What share of plots is not missing 'Total storage roots yield computation tons per ha|CO_331:0000296'?",
+   "dev": {
+    "count": 1,
+    "sha256": "c6e58acae089e8cf63ad6c16e2aed84d52e5dea493d04d5ac951bfb8b981e344",
+    "candidates": [
+     "76581"
+    ],
+    "exact": [
+     "76581"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "How many plots are not zero for 'Total storage roots yield computation tons per ha|CO_331:0000296'?",
+   "dev": {
+    "count": 1,
+    "sha256": "c6e58acae089e8cf63ad6c16e2aed84d52e5dea493d04d5ac951bfb8b981e344",
+    "candidates": [
+     "76581"
+    ],
+    "exact": [
+     "76581"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of 'Total storage roots yield computation tons per ha|CO_331:0000296' and 'Storage root dry matter content computing percent|CO_331:0000297', not 'Total storage roots yield adjusted tons per ha|CO_331:0000999' and not 'Content of beta-carotene in dry weight basis in raw storage roots measuring mg per 100g|CO_331:0000289'",
+   "dev": {
+    "count": 4,
+    "sha256": "9b10f770b0aa168228df8ca986ccb8193be67a152f3e1aa132b7d5231e4968ac",
+    "candidates": [
+     "76581",
+     "76605",
+     "76619",
+     "78012"
+    ],
+    "exact": [
+     "76581",
+     "76605",
+     "76619",
+     "78012"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of 'Total storage roots yield computation tons per ha|CO_331:0000296' and 'Storage root dry matter content computing percent|CO_331:0000297' except 'Total storage roots yield adjusted tons per ha|CO_331:0000999' and 'Content of beta-carotene in dry weight basis in raw storage roots measuring mg per 100g|CO_331:0000289'",
+   "dev": {
+    "count": 4,
+    "sha256": "9b10f770b0aa168228df8ca986ccb8193be67a152f3e1aa132b7d5231e4968ac",
+    "candidates": [
+     "76581",
+     "76605",
+     "76619",
+     "78012"
+    ],
+    "exact": [
+     "76581",
+     "76605",
+     "76619",
+     "78012"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of 'Total storage roots yield computation tons per ha|CO_331:0000296' and 'Storage root dry matter content computing percent|CO_331:0000297' without 'Total storage roots yield adjusted tons per ha|CO_331:0000999' and 'Content of beta-carotene in dry weight basis in raw storage roots measuring mg per 100g|CO_331:0000289'",
+   "dev": {
+    "count": 4,
+    "sha256": "9b10f770b0aa168228df8ca986ccb8193be67a152f3e1aa132b7d5231e4968ac",
+    "candidates": [
+     "76581",
+     "76605",
+     "76619",
+     "78012"
+    ],
+    "exact": [
+     "76581",
+     "76605",
+     "76619",
+     "78012"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of 'Total storage roots yield computation tons per ha|CO_331:0000296' and 'Storage root dry matter content computing percent|CO_331:0000297', don't use 'Total storage roots yield adjusted tons per ha|CO_331:0000999' or 'Content of beta-carotene in dry weight basis in raw storage roots measuring mg per 100g|CO_331:0000289'",
+   "dev": {
+    "count": 4,
+    "sha256": "9b10f770b0aa168228df8ca986ccb8193be67a152f3e1aa132b7d5231e4968ac",
+    "candidates": [
+     "76581",
+     "76605",
+     "76619",
+     "78012"
+    ],
+    "exact": [
+     "76581",
+     "76605",
+     "76619",
+     "78012"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not the adjusted yield CO_331:0000999 or the raw one CO_331:0000289",
+   "dev": {
+    "count": 423,
+    "sha256": "75240d86076a176859da0be65a2275a6a0adc7cb07d3491c57a701314ff53d8b",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not CO_331:0000999, CO_331:0000289",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not CO_331:0000999 / CO_331:0000289",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not CO_331:0000999 or the raw CO_331:0000289",
+   "dev": {
+    "count": 422,
+    "sha256": "0b87645abb33dcc9967b25e7b1050306da47565764d4e0f1725a3bf810c8b4c9",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not CO_331:0000999 or any of the other adjusted ones, CO_331:0000289",
+   "dev": {
+    "count": 379,
+    "sha256": "e3c41477d9010e594639096473df5d031217cd0023025a07b172835a9bed5dac",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not 78012, 76619",
+   "dev": {
+    "count": 2,
+    "sha256": "22396d3a1d5fddab292e85aad2f649a49d087ec9d160ac9347da12deb75f3f91",
+    "candidates": [
+     "76619",
+     "78012"
+    ],
+    "exact": [],
+    "unmatched": [
+     "co_331:0000296",
+     "co_331:0000297"
+    ]
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not 78012 or 76619",
+   "dev": {
+    "count": 2,
+    "sha256": "22396d3a1d5fddab292e85aad2f649a49d087ec9d160ac9347da12deb75f3f91",
+    "candidates": [
+     "76619",
+     "78012"
+    ],
+    "exact": [],
+    "unmatched": [
+     "co_331:0000296",
+     "co_331:0000297"
+    ]
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, dont use CO_331:0000999",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, leave out the adjusted yield CO_331:0000999",
+   "dev": {
+    "count": 379,
+    "sha256": "e3c41477d9010e594639096473df5d031217cd0023025a07b172835a9bed5dac",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297 but skip the adjusted yield CO_331:0000999",
+   "dev": {
+    "count": 379,
+    "sha256": "e3c41477d9010e594639096473df5d031217cd0023025a07b172835a9bed5dac",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not wanted: CO_331:0000999",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Use CO_331:0000296 (not CO_331:0000999) and CO_331:0000297",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296, not CO_331:0000999, and CO_331:0000297 as well",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296, not the adjusted CO_331:0000999; also CO_331:0000297",
+   "dev": {
+    "count": 379,
+    "sha256": "e3c41477d9010e594639096473df5d031217cd0023025a07b172835a9bed5dac",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Report iron as not only CO_331:0001016 but also CO_331:0000685",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000297 for all entries except Beauregard, give CO_331:0000296 too",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Use CO_331:0000685 if the study records it, if not CO_331:0001016",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297; don't use CO_331:0000999",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297 without CO_331:0000999",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Which plots of PEP2017CAN-OT01 do not have 'Total storage roots yield computation tons per ha|CO_331:0000296' recorded?",
+   "dev": {
+    "count": 1,
+    "sha256": "c6e58acae089e8cf63ad6c16e2aed84d52e5dea493d04d5ac951bfb8b981e344",
+    "candidates": [
+     "76581"
+    ],
+    "exact": [
+     "76581"
+    ],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Which plots of PEP2017CAN-OT01 are not scored for variable 76581?",
+   "dev": {
+    "count": 1,
+    "sha256": "c6e58acae089e8cf63ad6c16e2aed84d52e5dea493d04d5ac951bfb8b981e344",
+    "candidates": [
+     "76581"
+    ],
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296, not the Total storage roots yield adjusted tons per ha",
+   "dev": {
+    "count": 1,
+    "sha256": "3b506968104f57876177ea6d290cbeb6f85d7111a51b4239d3ba160f13051180",
+    "candidates": [
+     "78012"
+    ],
+    "exact": [],
+    "unmatched": [
+     "co_331:0000296"
+    ]
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296, not the adjusted yield, CO_331:0000999.",
+   "dev": {
+    "count": 379,
+    "sha256": "e3c41477d9010e594639096473df5d031217cd0023025a07b172835a9bed5dac",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean for all traits except CO_331:0000999, CO_331:0000297 and CO_331:0000289.",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  },
+  {
+   "wording": "Mean of CO_331:0000296 and CO_331:0000297, not CO_331:0000999 or CO_331:0000289.",
+   "dev": {
+    "count": 378,
+    "sha256": "290ca59fb6f7655c6a7ed7582c22f2055ba7e3bdea6d14b618aa082b4a170580",
+    "exact": [],
+    "unmatched": []
+   }
+  }
+ ]
+}

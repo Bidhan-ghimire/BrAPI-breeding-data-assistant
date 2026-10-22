@@ -289,16 +289,29 @@ def _tokens(text: str) -> set[str]:
     return {t.lower() for t in _WORD.findall(text) if len(t) >= 3 and t.lower() not in _STOPWORDS}
 
 
-def _variable_named_in(v: KnownVariable, lowered: str, raw_words: set[str]) -> bool:
-    """The question names this variable outright: its ID as a token, or its full name, its name before the ontology suffix
-    ('fresh root yield|CO_334:0000013' -> 'fresh root yield') or its trait name written out in the question."""
+def _variable_named_in(v: KnownVariable, lowered: str, raw_words: set[str], terms: set[str]) -> bool:
+    """The question names this variable outright: its ID as a token, its full name, its name before the ontology suffix
+    ('fresh root yield|CO_334:0000013' -> 'fresh root yield'), one of its ontology terms among `terms` (P3: the question's whole
+    terms, none at all when the person's words hold a negation; _TERMS_NAME_NOTHING) or its trait name written out in the question."""
     if v.variable_id.lower() in raw_words:
+        return True
+    if any(term in terms for term in _TERM.findall(v.name.lower())):
         return True
     names = {v.name, v.name.split("|", 1)[0], v.trait or ""}
     return any(len(n.strip()) >= 4 and n.strip().lower() in lowered for n in names)
 
 
 _TERM = re.compile(r"(?<![\w])[a-z][a-z0-9_]*:\d{4,}(?![\w])")       # an ontology term in lowered text, such as co_331:0000297
+# P3 (coach 2026-10-22 17:47 UTC, A7), with its gate (G1): a term names its variable only when the person's words hold no word of
+# negation or exclusion. Such wording is open-ended ("not the adjusted CO_331:0000999", "avoid ...", "... not needed", "except X
+# and Y"), and no reading of it was safe: two reviews of the negation rule (A9) found silent wrong plans on made-up wordings.
+# With any of these words the terms name nothing, exactly as before P3, and the planner asks or plans as it did then.
+_TERMS_NAME_NOTHING = re.compile(
+    r"(?<![\w])(?:not|no|nor|none|neither|never|cannot|\w+n['\N{RIGHT SINGLE QUOTATION MARK}]t|dont|doesnt|didnt|isnt|arent|wasnt|"
+    r"werent|cant|wont|shouldnt|wouldnt|couldnt|without|w/o|except|excluding|exclu(?:de|des|ded|sion|sions)|instead|rather|"
+    r"other[^\S\n]+than|aside|apart[^\S\n]+from|avoid(?:s|ed|ing)?|minus|remov(?:e|es|ed|ing)|omit(?:s|ted|ting)?|"
+    r"skip(?:s|ped|ping)?|drop(?:s|ped|ping)?|ignor(?:e|es|ed|ing)|forget|leav(?:e|es|ing)|left|unwanted|but|besides|barring|"
+    r"unless|outside|beyond|sans|excl|discard\w*|disregard\w*|delet\w*|deduct\w*|subtract\w*|exempt\w*)(?![\w])")
 
 
 def _whole_in(name: str, text: str) -> bool:
@@ -306,18 +319,24 @@ def _whole_in(name: str, text: str) -> bool:
     return re.search(r"(?<![\w])" + re.escape(name) + r"(?![\w])", text) is not None
 
 
-def _exact_ids(metadata: KnownMetadata, named: list[KnownVariable], lowered: str, answer_words: set[str]) -> set[str]:
+def _exact_ids(metadata: KnownMetadata, named: list[KnownVariable], lowered: str, answer_words: set[str], terms: set[str]) -> set[str]:
     """The named variables the person names EXACTLY (P1 / P2, 2026-10-22, with the guards of their review): its ID as a word in
     an ANSWER to our question (a number in the question itself — "76605 plots", "3 reps" — is not enough), or its whole name WITH
     an ontology suffix (a "|" in the name) standing whole in the question, when no other variable has that same name and it is not
-    part of a longer whole name the question also holds. A name without a suffix is never more exact than the words it shares."""
+    part of a longer whole name the question also holds, or (P3) one of its ontology terms among `terms` when no other variable
+    carries that term. A name without a suffix is never more exact than the words it shares."""
     shared: dict[str, int] = {}
     for v in metadata.variables:
         shared[v.name.strip().lower()] = shared.get(v.name.strip().lower(), 0) + 1
     by_name = {v.variable_id: v.name.strip().lower() for v in named
                if "|" in v.name and shared[v.name.strip().lower()] == 1 and _whole_in(v.name.strip().lower(), lowered)}
     exact = {vid for vid, name in by_name.items() if not any(other != name and name in other for other in by_name.values())}
-    return exact | {v.variable_id for v in named if v.variable_id.lower() in answer_words}
+    owners: dict[str, int] = {}
+    for v in metadata.variables:
+        for term in set(_TERM.findall(v.name.lower())):
+            owners[term] = owners.get(term, 0) + 1
+    by_term = {v.variable_id for v in named if any(owners.get(term) == 1 and term in terms for term in _TERM.findall(v.name.lower()))}
+    return exact | by_term | {v.variable_id for v in named if v.variable_id.lower() in answer_words}
 
 
 def _base_name(v: KnownVariable) -> str:
@@ -327,7 +346,7 @@ def _base_name(v: KnownVariable) -> str:
 
 def find_candidates(question: str, metadata: KnownMetadata | None) -> Candidates:
     """Naming wins over word overlap: the variables the question names outright (ID, full name, the name before its first "|",
-    or trait) are the candidates; only when it names none does word overlap decide. On a real catalog a common word such as
+    an ontology term unless the person's words hold a negation (P3 with its gate), or trait) are the candidates; only when it names none does word overlap decide. On a real catalog a common word such as
     'estimating' occurs in hundreds of variable names, so overlap alone turned a question that quoted one variable into 'more than
     one trait matches'. Among variables of one name before the "|", those named EXACTLY (_exact_ids) drop their siblings (P1);
     the exact ones and the ontology terms no candidate carries are returned for the planner's P2 rule.
@@ -348,10 +367,11 @@ def find_candidates(question: str, metadata: KnownMetadata | None) -> Candidates
         for s in metadata.studies:
             if s.study_id.lower() in raw_words or (s.name and s.name.lower() in lowered):
                 studies.append(s)
-        named = [v for v in metadata.variables if _variable_named_in(v, lowered, raw_words)]
+        terms = set() if _TERMS_NAME_NOTHING.search(lowered) else set(_TERM.findall(lowered))   # P3 with its gate (G1)
+        named = [v for v in metadata.variables if _variable_named_in(v, lowered, raw_words, terms)]
         # P1 (2026-10-22): a variable named exactly wins over its siblings that share the name before the "|"
         # ("...|CO_331:0000297" vs "...|day 1|after harvest|COMP:0000102").
-        exact = _exact_ids(metadata, named, lowered, answer_words)
+        exact = _exact_ids(metadata, named, lowered, answer_words, terms)
         exact_bases = {_base_name(v) for v in named if v.variable_id in exact}
         named = [v for v in named if _base_name(v) not in exact_bases or v.variable_id in exact]
         if named:

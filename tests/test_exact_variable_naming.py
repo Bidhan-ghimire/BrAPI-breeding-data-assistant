@@ -175,3 +175,138 @@ def test_a_whole_name_glued_to_more_characters_is_not_exact():
     glued = co.KnownMetadata(base_url=META.base_url, complete=True, variables=[
         co.KnownVariable(variable_id="V11", name="dry matter|CO_1:0000001"), co.KnownVariable(variable_id="V12", name="dry matter|day 1|COMP:0000002")])
     assert ids_in(glued, "In S1, the mean dry matter|CO_1:00000012?") == ["V11", "V12"]
+
+
+
+# --- P3 (granted by the coach on 2026-10-22 at 17:47 UTC, A7): an ontology term names its variable exactly, like an ID ---------
+
+IRON_NIRS = co.KnownVariable(variable_id="77976", name="Iron content in dry weight basis in raw storage roots by NIRS measuring mg per 100g|CO_331:0001016")
+IRON_ICP = co.KnownVariable(variable_id="77012", name="Iron content in dry weight basis in raw storage roots by ICP measuring mg per 100g|CO_331:0000685")
+YIELD_T = co.KnownVariable(variable_id="76581", name="Total storage roots yield computation tons per ha|CO_331:0000296")
+META_IRON = co.KnownMetadata(base_url=META.base_url, complete=True, studies=[STUDY],
+                             variables=[DRY, DRY_DAY1, DRY_MONTH4, BETA, YIELD, IRON_NIRS, IRON_ICP, YIELD_T])
+
+
+def test_a_term_alone_names_its_variable_exactly():
+    c = co.find_candidates("In study S1, what is the mean iron (SPB term CO_331:0001016)?", META_IRON)
+    assert [v.variable_id for v in c.variables] == ["77976"] and c.exact_variable_ids == ["77976"] and c.unmatched_terms == []
+
+
+def test_e14_4_plans_with_all_five_named_variables(tmp_path):
+    """The real E14.4 wording: three traits by their whole names and iron by two terms ("whichever the study records")."""
+    question = (f"In study S1, compute the percentages for total storage root yield '{YIELD_T.name}', beta-carotene '{BETA.name}', "
+                "iron in dry weight basis in mg per 100 g (SPB term CO_331:0001016 'by NIRS', or CO_331:0000685 'by ICP', whichever "
+                f"the study records) and storage root dry matter '{DRY.name}'. What are the four percentages?")
+    named = ["76605", "76619", "77976", "77012", "76581"]
+    c = co.find_candidates(question, META_IRON)
+    assert sorted(v.variable_id for v in c.variables) == sorted(named) and sorted(c.exact_variable_ids) == sorted(named)
+    result = plan_with(tmp_path, question, fake(completed(two_trait_draft(named))), META_IRON)
+    assert result.status == "completed" and result.plan.status == "ready" and sorted(result.plan.scope.variable_ids) == sorted(named)
+
+
+def test_a_term_two_variables_share_names_neither_exactly(tmp_path):
+    twin = co.KnownVariable(variable_id="99901", name="Iron content (duplicate entry)|CO_331:0001016")
+    meta = co.KnownMetadata(base_url=META.base_url, complete=True, studies=[STUDY], variables=[*META_IRON.variables, twin])
+    question = f"In study S1, the mean '{DRY.name}' and the mean iron (CO_331:0001016)?"
+    result = plan_with(tmp_path, question, fake(completed(two_trait_draft(["76605", "77976"]))), meta)
+    assert result.status == "needs_clarification" and "More than one trait matches" in result.questions[0]
+
+
+def test_a_term_glued_to_more_digits_names_nothing():
+    c = co.find_candidates("In study S1, what is the mean of CO_331:00010160?", META_IRON)               # no other word names a trait
+    assert c.exact_variable_ids == [] and c.unmatched_terms == ["co_331:00010160"]          # word overlap may still list candidates
+
+
+def test_without_a_term_an_id_or_a_whole_name_the_question_is_still_asked(tmp_path):
+    """Decision (6): iron named only in words ("iron content") is no exact naming; both iron variables match and it asks."""
+    result = plan_with(tmp_path, "In study S1, what is the mean iron content in dry weight basis in raw storage roots?",
+                       fake(completed(two_trait_draft(["77976"]))), META_IRON)
+    assert result.status == "needs_clarification" and "More than one trait matches" in result.questions[0]
+
+
+# --- P3's gate (G1, proposed after two reviews of the negation rule A9, 2026-10-22): a term names its variable only when the
+# person's words hold no word of negation or exclusion; otherwise the terms name nothing, exactly as before P3. The real-question
+# tests use REAL metadata: the 486 SweetPotatoBase variables of the benchmark cache of 2026-10-21
+# (tests/fixtures/spb_variables_20261021.json) and the benchmark's own question texts (eval/benchmark/spb_subquestions.json).
+
+import json  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import pytest  # noqa: E402
+
+_ROOT = Path(__file__).resolve().parents[1]
+SPB = co.KnownMetadata(base_url="https://sweetpotatobase.org/brapi/v2", complete=True, variables=[
+    co.KnownVariable(variable_id=i, name=n, trait=t or None)
+    for i, n, t in json.loads((_ROOT / "tests" / "fixtures" / "spb_variables_20261021.json").read_text(encoding="utf-8"))["variables"]])
+REAL = {s["sub_id"]: s["question"]
+        for s in json.loads((_ROOT / "eval" / "benchmark" / "spb_subquestions.json").read_text(encoding="utf-8"))["subquestions"]}
+ADJUSTED_EXCLUDED = ("A39.4 B30.5 C33.1 C33.3 C33.5 C34.1 C34.2 C34.3 C34.5 D14.1 D14.2 D14.3 D14.4 D14.5 D15.1 D15.2 D15.3 D15.4 "
+                     "D16.2 D16.4").split()
+IRON_BY_TERM = {"A38.8": ["77012", "77976"], "C32.1": ["77012", "77976"], "C32.3": ["77012", "77976"], "C32.5": ["77012", "77976"],
+                "C31.4": ["76619", "77012", "77976"], "C31.5": ["76619", "77012", "77976"],
+                "E14.4": ["76581", "76605", "76619", "77012", "77976"]}
+GATE_WORDS = ("not no nor none neither never cannot don't don\N{RIGHT SINGLE QUOTATION MARK}t dont doesnt didnt isnt arent wasnt werent "
+              "cant wont shouldnt wouldnt couldnt without w/o except excluding exclude excludes excluded exclusion instead rather aside "
+              "avoid avoids avoided avoiding minus remove removes removed removing omit omits omitted omitting skip skips skipped "
+              "skipping drop drops dropped dropping ignore ignores ignored ignoring forget leave leaves leaving left unwanted but "
+              "besides barring unless outside beyond sans excl discard disregarded delete deduct subtract exempt").split() + [
+    "other than", "apart from"]
+
+
+def found(question: str, metadata: co.KnownMetadata) -> tuple[list[str], list[str], list[str]]:
+    c = co.find_candidates(question, metadata)
+    return sorted(v.variable_id for v in c.variables), sorted(c.exact_variable_ids), c.unmatched_terms
+
+
+@pytest.mark.parametrize("sub_id", ADJUSTED_EXCLUDED)
+def test_the_20_real_questions_that_exclude_the_adjusted_yield_stay_exactly_as_on_dev(sub_id):
+    """'..., not the adjusted CO_331:0000999': with "not" in the question, no term names anything; 76581 (named by its whole
+    name) is the one exact candidate and the adjusted yield's term stays unmatched, as on dev, typed answer or not."""
+    assert found(REAL[sub_id], SPB) == (["76581"], ["76581"], ["co_331:0000999"])
+    assert found(co.add_clarification(REAL[sub_id], "76581"), SPB) == (["76581"], ["76581"], ["co_331:0000999"])
+
+
+@pytest.mark.parametrize("sub_id", sorted(IRON_BY_TERM))
+def test_the_7_real_questions_that_name_iron_by_its_terms_name_each_variable_exactly(sub_id):
+    """No negation in them: both iron terms name their variables exactly, beside the traits named by their whole names (P2)."""
+    expected = IRON_BY_TERM[sub_id]
+    assert found(REAL[sub_id], SPB) == (expected, expected, [])
+
+
+@pytest.mark.parametrize("word", GATE_WORDS)
+def test_any_word_of_negation_or_exclusion_turns_term_naming_off(word):
+    """Whatever the wording around it, no term is exact, so P2 cannot plan an excluded variable (as on dev)."""
+    _, exact, _ = found(f"Mean of CO_331:0000296 and CO_331:0000297, {word} CO_331:0000999", SPB)
+    assert exact == []
+
+
+@pytest.mark.parametrize("question", [
+    "Mean per clone not per plot of CO_331:0000296 and CO_331:0000297",                         # review 2, F1
+    "Which clones are not above Beauregard for CO_331:0000296 and CO_331:0000297?",
+    "Mean of CO_331:0000296 and CO_331:0000297, CO_331:0000999 not needed",                     # review 2, F2
+    "Mean of CO_331:0000296 and CO_331:0000297, do not use the adjusted yield variable CO_331:0000999",
+    "Mean of CO_331:0000296 and CO_331:0000297, not CO_331:0000999 or the raw CO_331:0000289",  # review 2, F3
+    "Use CO_331:0000296 (not CO_331:0000999) and CO_331:0000297",                               # review 1, F1
+])
+def test_the_reviews_wordings_name_no_term(question):
+    _, exact, _ = found(question, SPB)
+    assert exact == []
+
+
+def test_words_that_only_contain_a_gate_word_turn_nothing_off():
+    question = ("Note the normal mean, notably for CO_331:0001016 and CO_331:0000685; another dropout-free leftover butter-knot check, "
+                "nonetheless.")
+    assert found(question, SPB) == (["77012", "77976"], ["77012", "77976"], [])
+
+
+def test_a_gate_word_in_an_answer_turns_term_naming_off_and_the_answer_decides():
+    question = co.add_clarification("In study S1, the mean iron CO_331:0001016 and CO_331:0000685?", "no, only 77976")
+    assert found(question, SPB) == (["77976"], ["77976"], ["co_331:0000685"])
+
+
+def test_with_a_negation_the_planner_asks_as_before_p3(tmp_path):
+    question = (f"In study S1, compute the percentages for total storage root yield '{YIELD_T.name}', beta-carotene '{BETA.name}', "
+                "iron (SPB term CO_331:0001016, not CO_331:0000685) and storage root dry matter "
+                f"'{DRY.name}'. What are the four percentages?")
+    result = plan_with(tmp_path, question, fake(completed(two_trait_draft(["76605", "76619", "76581"]))), META_IRON)
+    assert result.status == "needs_clarification" and "More than one trait matches" in result.questions[0]
