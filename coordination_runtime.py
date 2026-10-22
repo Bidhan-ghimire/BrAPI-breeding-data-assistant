@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+import re
 from typing import Any
 
 from agents.coordinator import add_clarification
@@ -27,10 +28,78 @@ def _overall_first(claims: list[Any]) -> list[Any]:
     return sorted(claims, key=lambda claim: len(claim.filters))
 
 
+# Names for the Coordinator's view of the claims. Benchmark 2026-10-21: it saw entry IDs only and stopped A41.3 ("does not
+# identify Chingova by name") and C33.5. Coach 2026-10-22 00:50 UTC (answer 2): names only from fetched tables, never from the
+# model or the question; claims about entries the question names first.
+NAME_BESIDE = {"germplasmDbId": "germplasmName", "observationUnitDbId": "observationUnitName", "studyDbId": "studyName",
+               "locationDbId": "locationName", "observationVariableDbId": "observationVariableName"}
+NAME_LIMIT = 200                           # characters of names shown per ID: database text, bounded like the caveats
+VIEW_CLAIMS = 20                           # claims in the usual order; claims about entries the question names come on top
+
+
+def _fetched_names(c: Any) -> dict[tuple[str, str], set[str]]:
+    """(ID column, ID) -> the names beside that ID in this run's fetched tables: every table the Retriever's tools returned
+    (plot records, plot lists, catalog exports), never one an analysis derived. IDs are exact text; names are trimmed."""
+    retrieval, registry = getattr(c, "retrieval", None), getattr(getattr(c, "ctx", None), "registry", None)
+    found: dict[tuple[str, str], set[str]] = {}
+    for artifact in (retrieval.artifacts if retrieval is not None and registry is not None else []):
+        try:
+            rows = registry.load(artifact.artifact_id)[1]
+        except Exception:  # noqa: BLE001 - a table that cannot be read only means no names
+            continue
+        for row in rows:
+            for column, name_column in NAME_BESIDE.items():
+                key, name = row.get(column) or "", (row.get(name_column) or "").strip()
+                if key.strip() and name:
+                    found.setdefault((column, key), set()).add(name)
+    return found
+
+
+def _shown_names(names: set[str]) -> str:
+    """The names, each whole, up to NAME_LIMIT characters (a first name longer than that is cut), then how many are left out."""
+    ordered, shown = sorted(names), []
+    for name in ordered:
+        if shown and len("; ".join([*shown, name])) > NAME_LIMIT:
+            break
+        shown.append(name[:NAME_LIMIT])
+    left = len(ordered) - len(shown)
+    return "; ".join(shown) + (f" (+{left} more)" if left else "")
+
+
+def _named_in(question: str, names: dict[tuple[str, str], set[str]]) -> set[tuple[str, str]]:
+    """The IDs one of whose fetched names (three letters or more, any case) stands in the question as a whole word, each name
+    whole. It only orders the claims; the names shown come from the fetched tables. A plain substring test finds the
+    candidates first, so the word test runs on a few names, not on every one."""
+    folded = question.casefold()
+    return {key for key, found in names.items() for name in found
+            if len(name) >= 3 and name.casefold() in folded and re.search(rf"(?<!\w){re.escape(name)}(?!\w)", question, re.IGNORECASE)}
+
+
+def _view_claims(claims: list[Any], named: set[tuple[str, str]]) -> list[Any]:
+    """Claims about an entry the question names first (at most VIEW_CLAIMS), then the first VIEW_CLAIMS of the usual order,
+    overall totals first, without repeats. Review of 2026-10-22: one list of 20 with the named claims first let a question
+    naming seven entries push the overall totals out, as on 2026-10-16."""
+    ordered = _overall_first(claims)
+    about = [claim for claim in ordered if any(item in named for item in claim.filters.items())][:VIEW_CLAIMS]
+    taken = {id(claim) for claim in about}
+    return about + [claim for claim in ordered if id(claim) not in taken][:VIEW_CLAIMS]
+
+
+def _with_names(claim: Any, names: dict[tuple[str, str], set[str]]) -> dict[str, Any]:
+    view = claim.model_dump(mode="json")
+    beside = {f"{column} {key}": _shown_names(names[(column, key)]) for column, key in claim.filters.items() if (column, key) in names}
+    if beside:
+        view["names_from_fetched_tables"] = beside
+    return view
+
+
 def _state(c: Any, stage: str) -> dict[str, Any]:
     """Only bounded evidence summaries; never authority supplied by model text."""
     retrieval = c.retrieval
     analysis = c.analysis
+    names = _fetched_names(c) if analysis is not None else {}
+    shown = [] if analysis is None else _view_claims(analysis.claims,
+                                                     _named_in(getattr(getattr(c, "config", None), "question", "") or "", names))
     return {
         "stage": stage,
         "plan": c.plan.model_dump(mode="json") if c.plan else None,
@@ -43,8 +112,8 @@ def _state(c: Any, stage: str) -> dict[str, Any]:
         "data_review": c.data_review["status"],
         "analysis": None if analysis is None else {
             "status": analysis.status,
-            "claims": [claim.model_dump(mode="json") for claim in _overall_first(analysis.claims)[:20]],
-            "claims_omitted": max(0, len(analysis.claims) - 20),
+            "claims": [_with_names(claim, names) for claim in shown],
+            "claims_omitted": len(analysis.claims) - len(shown),
             "caveats": [v[:400] for v in analysis.caveats[:10]],
         },
         "history": c.supervision["decisions"],
