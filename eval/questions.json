@@ -1,5 +1,5 @@
 {
-  "about": "Breeder questions for eval/harness.py. Each names the KIND of answer it expects; the harness computes the answer by code from the cache copy it runs on, so this file holds no answers. The study and trait catalogs answer q01-q12; q13-q14 need the cached measurements of study 05DISE178HFLNO7 (SweetPotatoBase study 4501, variable 76736), which are in CassavaBase\\part2\\cache\\live.",
+  "about": "Breeder questions for eval/harness.py. Each names the KIND of answer it expects; the harness computes the answer by code from the cache copy it runs on, so this file holds no answers. The study and trait catalogs answer q01-q12; q13-q14 need the cached plot records of study 05DISE178HFLNO7 (SweetPotatoBase study 4501, variable 76736): on sweetpotatobase.org the app reads measurements from the plot records, which keep the values recorded as 0. CassavaBase\\part2\\cache\\live holds that study's /observations page but, on 2026-10-22, not its plot records; until they are added, q13-q14 are skipped.",
   "questions": [
     {"id": "q01", "question": "How many studies have a 2026 season?", "expect": {"kind": "studies_with_season", "season": "2026"}},
     {"id": "q02", "question": "How many studies have a 2025 season?", "expect": {"kind": "studies_with_season", "season": "2025"}},

@@ -6,7 +6,8 @@ What it does, in plain words:
   example "how many studies name the season 2026"). The file never stores an answer.
 * Copies the given cache folder into a new results folder (eval/results/<UTC time>/cache) and computes every expected
   answer BY CODE from that copy: from the raw study and trait catalog records, and from the cached measurements of a
-  study. Nothing is requested for this. A question whose expected answer cannot be computed from the copy (for example,
+  study (on a server whose measurements the app reads from the plot records, sweetpotatobase.org, from its cached plot
+  records, which keep the values recorded as 0). Nothing is requested for this. A question whose expected answer cannot be computed from the copy (for example,
   its measurements are not in it) is skipped, not run.
 * Feeds each question, as a new chat, through the app's own pipeline (app.respond: the front door, the planner, the
   approvals, the retrieval, the analysis) on that copy, with a scripted approver that types only two words: "approve" at
@@ -190,7 +191,10 @@ def _valid_values(rows: list[dict[str, Any]]) -> list[float]:
 
 
 def _measurements(catalog: Catalog, study_name: str, variable_name: str) -> list[float] | str:
-    """The valid values of one variable in one study, from the cached measurements; or why they cannot be read."""
+    """The valid values of one variable in one study, from the cached measurements; or why they cannot be read. On a server
+    whose measurements the app reads from the plot records (brapi_client.PLOT_RECORD_HOSTS, whose /observations leaves out the
+    values recorded as 0) they come from the cached plot records, as the app's get_observations reads them (A6, coach
+    2026-10-22 17:47 UTC); a copy without them gives no expected value, never one from the /observations without the zeros."""
     studies = [s for s in catalog.studies if _text(s.get("studyName")).casefold() == _text(study_name).casefold()]
     variables = [v for v in catalog.variables if _variable_name(v).casefold() == _text(variable_name).casefold()]
     if len({_text(s.get("studyDbId")) for s in studies}) != 1:
@@ -198,10 +202,12 @@ def _measurements(catalog: Catalog, study_name: str, variable_name: str) -> list
     if len({_text(v.get("observationVariableDbId")) for v in variables}) != 1:
         return f"variable {variable_name!r} names {len(variables)} catalog rows, not exactly one"
     client = BrapiClient(_settings(catalog.cache_dir), cache=CacheStore(catalog.cache_dir), run_id="eval_expected")
-    result = client.observations(_text(studies[0].get("studyDbId")), _text(variables[0].get("observationVariableDbId")),
-                                 approval=None, paging=True, max_pages=MAX_PAGES)
+    plot_records = brapi_client.reads_plot_records(catalog.base_url)
+    fetch = client.plot_records if plot_records else client.observations
+    result = fetch(_text(studies[0].get("studyDbId")), _text(variables[0].get("observationVariableDbId")),
+                   approval=None, paging=True, max_pages=MAX_PAGES)
     if result.status == "failed" or not result.complete:
-        return "its measurements are not completely in the cache copy"
+        return f"its {'plot records are' if plot_records else 'measurements are'} not completely in the cache copy"
     return _valid_values(list(result.records))
 
 

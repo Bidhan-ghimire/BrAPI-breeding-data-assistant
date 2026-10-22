@@ -623,3 +623,58 @@ def test_a_front_door_replys_counts_reach_its_row_and_the_total(place):
                              "unpriced_models": []}
     assert report["tokens"]["input"] == 1000 and report["tokens"]["cost_usd"] == row["tokens"]["cost_usd"]
     assert "| 1,000 / 40 | 0.000120 |" in (folder / "results.md").read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------
+# A6 (coach 2026-10-22 17:47 UTC): on a server whose measurements the app reads from the plot records (brapi_client.
+# PLOT_RECORD_HOSTS, whose /observations leaves out values recorded as 0), the expected values come from the plot records too
+# --------------------------------------------------------------------------
+
+SPB_BASE = "https://sweetpotatobase.org/brapi/v2"
+S1_YIELD = {"study": "SYNTHETIC yield trial S1", "variable": "fresh root yield"}
+
+
+def measured_copy(tmp_path, monkeypatch, base_url: str, *, plot_records: bool = True) -> "harness.Catalog":
+    """A cache copy of server base_url holding study S1's V1 values from /observations (10, 14, 20 and 28 are valid) and, unless
+    plot_records is False, S1's plot records with one more plot whose V1 value was recorded as 0: the value such a server's
+    /observations leaves out."""
+    monkeypatch.setenv("BRAPI_BASE_URL", base_url)
+    cache_dir = tmp_path / "copy"
+    seed_fixture(CacheStore(cache_dir), base_url, "synthetic_observations_S1_V1.json")
+    if plot_records:
+        parsed, _ = load_fixture("synthetic_plotrecords_S1.json")
+        plot = json.loads(json.dumps(parsed["result"]["data"][0]))
+        plot.update(observationUnitDbId="P7", observationUnitName="plot P7")
+        plot["observationUnitPosition"]["observationLevel"]["levelCode"] = "P7"
+        plot["observations"] = [dict(plot["observations"][0], observationDbId="O7", value="0")]
+        parsed["result"]["data"].append(plot)
+        parsed["metadata"]["pagination"]["totalCount"] = len(parsed["result"]["data"])
+        folder = tmp_path / "fixtures"
+        folder.mkdir()
+        (folder / "synthetic_plotrecords_S1_with_a_zero.json").write_text(json.dumps(parsed), encoding="utf-8")
+        seed_fixture(CacheStore(cache_dir), base_url, "synthetic_plotrecords_S1_with_a_zero.json", fixture_dir=folder)
+    return harness.Catalog(studies=[{"studyDbId": "S1", "studyName": "SYNTHETIC yield trial S1"}],
+                           variables=[{"observationVariableDbId": "V1", "observationVariableName": "fresh root yield"}],
+                           cache_dir=cache_dir, base_url=base_url, fetched_at=[])
+
+
+def test_on_a_plot_record_server_the_expected_values_come_from_the_plot_records(tmp_path, monkeypatch):
+    copy = measured_copy(tmp_path, monkeypatch, SPB_BASE)
+    assert harness.expected_answer({"kind": "valid_count", **S1_YIELD}, copy) == (5, "5")
+    mean, text = harness.expected_answer({"kind": "pooled_mean", **S1_YIELD}, copy)
+    assert mean == pytest.approx(14.4) and text == "14.4000 (from 5 valid values)"
+
+
+def test_on_any_other_server_the_expected_values_still_come_from_observations(tmp_path, monkeypatch):
+    copy = measured_copy(tmp_path, monkeypatch, LIVE_BASE)            # the plot records are in the copy and are not read
+    assert harness.expected_answer({"kind": "valid_count", **S1_YIELD}, copy) == (4, "4")
+    mean, text = harness.expected_answer({"kind": "pooled_mean", **S1_YIELD}, copy)
+    assert mean == pytest.approx(18.0) and text == "18.0000 (from 4 valid values)"
+
+
+def test_a_plot_record_server_whose_copy_lacks_the_plot_records_gives_no_expected_value(tmp_path, monkeypatch):
+    """The question is skipped with this reason; its expected value is never computed from the /observations without zeros."""
+    copy = measured_copy(tmp_path, monkeypatch, SPB_BASE, plot_records=False)
+    for kind in ("pooled_mean", "valid_count"):
+        with pytest.raises(ValueError, match="its plot records are not completely in the cache copy"):
+            harness.expected_answer({"kind": kind, **S1_YIELD}, copy)

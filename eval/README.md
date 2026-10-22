@@ -8,7 +8,8 @@ code computes from the same saved data. It is how we measure whether the app ans
 1. Copies the cache folder you name into a new results folder, `eval/results/<UTC time>/cache`. The original is never
    changed. (`eval/results/` is in `.gitignore`.)
 2. Computes each expected answer by code from that copy: from the raw study and trait catalog records, and, for the
-   measurement questions, from the cached measurements. Nothing is requested. A question whose answer cannot be computed
+   measurement questions, from the cached measurements (on sweetpotatobase.org from the cached plot records, as the app
+   reads them there: its /observations leaves out the values recorded as 0). Nothing is requested. A question whose answer cannot be computed
    from the copy is skipped, never run.
 3. Sends each question, as a new chat, through the app's own pipeline (front door, planner, approvals, retrieval, analysis)
    on the copy. A scripted approver types only "approve" at the data request's approval screen and "continue" at the data
@@ -35,8 +36,9 @@ From the repository folder, with the project interpreter:
 The first line only prints what would run. The second runs it: 14 questions, about 1 front-door model call each and a few
 more for each question that starts a run. A question the front door's model labels unsure, out of scope, a greeting or an
 app question while the saved catalog is in view costs 2 front-door calls (the label call, then the talk call that writes
-the reply). `--only q01,q13` runs some of them. Use the `part2\cache\live` folder: it holds the measurements of study 05DISE178HFLNO7 that q13 and q14 need (the
-app's `cache\space_mcp` holds only the catalogs).
+the reply). `--only q01,q13` runs some of them. Use the `part2\cache\live` folder: it holds the catalogs and the /observations page of study 05DISE178HFLNO7 (the
+app's `cache\space_mcp` holds only the catalogs). q13 and q14 also need that study's plot records, which the folder did not
+hold on 2026-10-22: until they are added, q13 and q14 are skipped.
 
 ## Reading the results
 
