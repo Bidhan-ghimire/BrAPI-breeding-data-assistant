@@ -432,3 +432,25 @@ def test_the_dropped_reason_names_the_table_that_lacks_the_entry(registry):
     r = correlate(registry, x, y)
     rows = {row["entry"]: row["left_out"] for row in registry.load(r.data["result_artifact_id"])[1]}
     assert rows["H"] == "not in every study of x and y" and rows["K"] == "not in every study of x and y" and rows["M"] == "not in every study of y"
+
+
+# --- T4's residue rule (coach 2026-10-23 03:48 UTC, NEXT 2 part c) ------------------------------------------------------------
+
+def test_entry_means_that_are_float_residue_give_no_correlation(registry):
+    """Plot values that cancel inside an entry (0.1 + 0.2 - 0.3) leave a mean of float residue. Judged against the means themselves
+    that residue looked like spread: r -1.0 and rho -1.0 from noise. It is now judged against the largest plot value."""
+    x = save(registry, [("E0", "a", ["0.1", "0.2", "-0.3"]), ("E1", "b", ["0.0", "0.0", "0.0"]), ("E2", "c", ["0.0", "0.0", "0.0"])])
+    y = save(registry, [("E0", "a", ["0.3", "-0.1", "-0.2"]), ("E1", "b", ["0.0", "0.0", "0.0"]), ("E2", "c", ["0.0", "0.0", "0.0"])],
+             study="S2")
+    r = correlate(registry, x, y)
+    assert not r.ok and r.error.code == "unsupported" and "all equal" in r.error.message
+
+
+def test_the_residue_scale_comes_from_the_raw_values_under_mean_per_unit(registry):
+    """T4 review 2: averaging a plot's repeated values first must not hide the scale of those values."""
+    x = save_rows(registry, [row("P0", "E0", "a", v, obs=f"O0{i}") for i, v in enumerate(["0.1", "0.2", "-0.3"])]
+                  + [row(f"P{k}", f"E{k}", n, "0.0") for k, n in ((1, "b"), (2, "c"))], ["S1"])
+    y = save_rows(registry, [row("Q0", "E0", "a", v, study="S2", obs=f"Q0{i}") for i, v in enumerate(["0.3", "-0.1", "-0.2"])]
+                  + [row(f"Q{k}", f"E{k}", n, "0.0", study="S2") for k, n in ((1, "b"), (2, "c"))], ["S2"])
+    r = correlate(registry, x, y, duplicate_policy="mean_per_unit")
+    assert not r.ok and r.error.code == "unsupported" and "all equal" in r.error.message

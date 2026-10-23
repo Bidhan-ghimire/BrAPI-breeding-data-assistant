@@ -521,3 +521,61 @@ def test_a_p_below_what_a_double_holds_is_shown_as_a_bound_the_claim_carries(tmp
 
 def test_the_heritability_text_says_when_the_long_form_holds():
     assert "no variance component is set to 0" in at.GXE_H2_TEXT
+
+
+# --- T4's residue rule (coach 2026-10-23 03:48 UTC, NEXT 2 part c) ------------------------------------------------------------
+
+CANCELLING = {"S1": {"E0": [0.1, 0.2, -0.3], "E1": [0.0, 0.0, 0.0], "E2": [0.0, 0.0, 0.0]},
+              "S2": {"E0": [0.3, -0.1, -0.2], "E1": [0.0, 0.0, 0.0], "E2": [0.0, 0.0, 0.0]}}
+
+
+def test_a_means_table_of_float_residue_gives_no_shares_f_or_h2(registry):
+    """Entry means that are float residue of cancelling plots gave shares of 33 / 0 / 67 % and F 0.0 from noise; the table now
+    counts as constant at the plots' precision."""
+    r = gxe(registry, per_study(registry, rows_of(CANCELLING, reps=False)))
+    assert r.ok, r.error
+    assert all(share is None for share in r.data["shares"].values()) and table(r)["entry"]["f"] is None and r.data["h2"] is None
+    assert table(r)["total"]["ss"] == 0                     # the total row too: residue is 0 (deliberate bug W3 survived)
+
+
+def test_the_gxe_residue_scale_comes_from_the_raw_values_under_mean_per_unit(registry):
+    """T4 review 2: an entry's three values as repeated measurements of ONE plot, averaged first, must keep their scale."""
+    rows = rows_of(CANCELLING, reps=False)
+    for x in rows:
+        x["observationUnitDbId"] = x["observationUnitDbId"].rsplit("-", 1)[0]       # an entry's values in a study: one plot
+    r = gxe(registry, per_study(registry, rows), duplicate_policy="mean_per_unit")
+    assert r.ok, r.error
+    assert all(share is None for share in r.data["shares"].values()) and r.data["h2"] is None
+
+
+def test_an_entry_effect_of_float_residue_gives_no_h2(registry):
+    """The one review of NEXT 2, F1: entries equal on paper in each environment (0.15 from different plots) left an entry SS of
+    3e-31, and H2 = 1 - 0 / MS entry came out 1.0 from residue."""
+    values = {"S1": {"E0": [0.1, 0.2], "E1": [0.15], "E2": [0.3, 0.0]}, "S2": {"E0": [5.0], "E1": [5.0], "E2": [5.0]}}
+    r = gxe(registry, per_study(registry, rows_of(values, reps=False)))
+    assert r.ok, r.error
+    t = table(r)
+    assert t["entry"]["ss"] == 0 and t["entry x environment"]["ss"] == 0 and r.data["h2"] is None and t["entry"]["f"] is None
+    assert r.data["shares"]["environment"] == pytest.approx(100.0) and t["total"]["ss"] == pytest.approx(t["environment"]["ss"], rel=1e-12)
+
+
+def test_a_g_x_e_of_float_residue_gives_no_f(registry):
+    """F2: the same three entries in both studies (1e4 and 1e-7 apart) left residue SS for environment and G x E, and F 1.8e10."""
+    values = {s: {"E0": [10000.0], "E1": [10000.0000001], "E2": [10000.0000002]} for s in ("S1", "S2")}
+    r = gxe(registry, per_study(registry, rows_of(values, reps=False)))
+    assert r.ok, r.error
+    t = table(r)
+    assert t["environment"]["ss"] == 0 and t["entry x environment"]["ss"] == 0 and t["entry"]["f"] is None and t["entry"]["p"] is None
+    assert t["total"]["ss"] == t["entry"]["ss"]          # the total is the sum of its parts, residue left out (deliberate bug W3 survived)
+
+
+def test_a_real_small_g_x_e_beside_a_large_environment_effect_is_kept(registry):
+    """F3: G x E deviations of 1e-7 are real at values of 1e3 (residue there is near 1e-13), but the old rule judged them against the
+    environment-dominated total and set them to 0 (F None, H2 1.0; numpy F 163.86, H2 0.9939)."""
+    values = {"S1": {"E0": [1000.0], "E1": [1000.000001], "E2": [1000.000002]},
+              "S2": {"E0": [2000.0], "E1": [2000.0000012], "E2": [2000.0000019]}}
+    r = gxe(registry, per_study(registry, rows_of(values, reps=False)))
+    assert r.ok, r.error
+    x, t = expected(values, with_error=False), table(r)
+    f = (x["ss_entry"] / 2) / (x["ss_ge"] / 2)
+    assert t["entry"]["f"] == pytest.approx(f, rel=1e-4) and r.data["h2"] == pytest.approx(1 - 1 / f, rel=1e-4)

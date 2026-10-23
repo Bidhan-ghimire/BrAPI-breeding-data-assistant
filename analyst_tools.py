@@ -1476,8 +1476,11 @@ def tool_correlate_entry_means(registry: ArtifactRegistry, a: CorrelateEntryMean
     xs, ys = [x.means[e][0] for e in paired], [y.means[e][0] for e in paired]
     # Each side is divided by its largest absolute value first: a correlation does not change under that scaling, and the sums
     # inside it can then neither overflow (values near 1e155 gave r = 0) nor underflow (values near 1e-200 crashed) (review).
+    # The scale is the largest RAW plot value behind the paired means, not the means: an entry whose plot values cancel (0.1 + 0.2
+    # - 0.3) has a mean of float residue, and against the means' own scale that residue looked like spread (r -1.0 from noise; T4,
+    # coach 2026-10-23 03:48 UTC).
     scaled = {side: [v / scale if scale else 0.0 for v in values]
-              for side, values, scale in (("x", xs, max(abs(v) for v in xs)), ("y", ys, max(abs(v) for v in ys)))}
+              for side, values, scale in (("x", xs, max(x.peaks[e] for e in paired)), ("y", ys, max(y.peaks[e] for e in paired)))}
     for side, values in (("x", xs), ("y", ys)):
         keys = {_tie_key(v) for v in scaled[side]}
         if len(keys) == 1:
@@ -2428,6 +2431,7 @@ def tool_gxe_partition(registry: ArtifactRegistry, a: GxePartitionArgs) -> ToolR
     labels: dict[str, set[str]] = {}
     plots: list[tuple[str, str, str, float, str, str]] = []      # (study, entry, plot, value, rep, block)
     plot_table: dict[str, str] = {}
+    entry_peak: dict[str, float] = {}                         # entry -> the largest absolute raw value behind its means
     repeated_plots = repeated_values = no_study = no_entry = 0
     units_known = True
     for table in tables:
@@ -2436,6 +2440,9 @@ def tool_gxe_partition(registry: ArtifactRegistry, a: GxePartitionArgs) -> ToolR
             gates.append(f"{table.manifest.artifact_id}: {gate}")
         classified = _classify(table, a.value)
         units_known = units_known and classified.units_known
+        for row, number in classified.valid:                  # the raw values, before any averaging (T4's residue rule)
+            if row.get(a.by, "").strip():
+                entry_peak[row[a.by].strip()] = max(entry_peak.get(row[a.by].strip(), 0.0), abs(number))
         used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy)
         notes.append(transformation)
         exclusions += _exclusions(classified)
@@ -2509,8 +2516,15 @@ def tool_gxe_partition(registry: ArtifactRegistry, a: GxePartitionArgs) -> ToolR
     ss_total = math.fsum(v * v for row in centred for v in row)
     ss = {"environment": g * math.fsum(m * m for m in col_mean), "entry": e * math.fsum(m * m for m in row_mean),
           "entry x environment": math.fsum((centred[i][j] - row_mean[i] - col_mean[j]) ** 2 for i in range(g) for j in range(e))}
-    if ss["entry x environment"] <= 1e-14 * ss_total:
-        ss["entry x environment"] = 0.0                       # an exactly additive table: floating residue, not interaction
+    # Each source is judged against the largest raw plot value behind the means (T4's residue rule): a source whose effects are float
+    # residue is 0, as on paper. The old rule judged G x E against the total SS, which stated H2 1.0 and F 1.8e10 from residue and set a
+    # real G x E to 0 beside a large environment effect (the one review of NEXT 2, F1-F3).
+    peak = max(entry_peak.get(entry, 0.0) for entry in kept)
+    zeroed = [source for source in GXE_SOURCES if math.sqrt(ss[source] / (g * e)) <= PAIR_ZERO * peak]
+    for source in zeroed:
+        ss[source] = 0.0
+    if zeroed:
+        ss_total = math.fsum(ss.values())                     # the parts of a two-way table without replication add up to its total
     df = {"environment": e - 1, "entry": g - 1, "entry x environment": (g - 1) * (e - 1)}
     ms = {source: ss[source] / df[source] for source in GXE_SOURCES}
     f_entry = ms["entry"] / ms["entry x environment"] if ms["entry x environment"] > 0 else None
