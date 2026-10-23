@@ -172,7 +172,7 @@ def test_every_table_argument_of_every_tool_is_checked_before_the_tool_runs():
     base_artifact_id and other_artifact_id (compare_trials_paired, T4), and nonstress_artifact_id and stress_artifact_id (stress_indices, T5); heterosis_population's artifact_ids (T6)."""
     arguments = _handle_arguments()
     assert {argument for _, argument, _ in arguments} == {"artifact_id", "artifact_ids", "roster_artifact_id", "base_artifact_id",
-                                                          "other_artifact_id", "nonstress_artifact_id", "stress_artifact_id"} and len(arguments) == 21
+                                                          "other_artifact_id", "nonstress_artifact_id", "stress_artifact_id"} and len(arguments) == 22
     for tool, argument, listed in arguments:
         inner = _RecordingTools()
         guard = an.GuardedAnalystTools(inner=inner, supplied=["art_ok_0001"], inspected={"art_ok_0001"})

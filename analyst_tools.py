@@ -563,6 +563,24 @@ class HeterosisPopulationArgs(ToolArgs):
     allow_incomplete: bool = Field(default=False)
 
 
+class PlotBasisH2Args(ToolArgs):
+    artifact_ids: list[ArtifactId] = Field(min_length=1, max_length=20,
+                                           description="the measurements of ONE trait: one table per site, or one table of several sites "
+                                                       "(concat_tables); each study is one site")
+    offspring_prefixes: list[str] = Field(default_factory=list, max_length=20, description="the unreplicated offspring: exact name prefixes "
+                                          "the person wrote, for example PH17. (a trailing * is the wildcard)")
+    offspring_names: list[str] = Field(default_factory=list, max_length=200, description="the offspring: exact entry names or IDs the "
+                                       "person wrote")
+    error_from: Literal["replicated", "checks"] = Field(default="replicated", description="the error variance s2e: replicated = every "
+                                                        "entry with at least 2 plots outside the offspring (parents, founders, checks); "
+                                                        "checks = only the entries whose entryType is check (plot_design's column)")
+    by: str = Field(default="germplasmDbId", description="the entry ID column (names are carried as labels)")
+    value: str = Field(default=VALUE_COL)
+    entry_type: str = Field(default="entryType", description="the entry type column plot_design adds (check / test)")
+    duplicate_policy: DuplicatePolicy = Field(default="reject", description="what to do with repeated measurements of one plot")
+    allow_incomplete: bool = Field(default=False)
+
+
 # --------------------------------------------------------------------------
 # The thirteen tools
 # --------------------------------------------------------------------------
@@ -3512,8 +3530,226 @@ def tool_heterosis_population(registry: ArtifactRegistry, a: HeterosisPopulation
                       warnings=list(dict.fromkeys(warnings)))                 # each warning once (review finding 6)
 
 
+# T7a (research build order tool 8, notes Q8): the plot-basis heritability of an unreplicated offspring population. A convention
+# (V_P = V_G + V_E, Iowa State Quantitative Genetics ch. 6); Westcott (1981) could not be verified; no published fixture.
+PLOT_H2_NOTE = "plot-basis heritability, a convention (V_P = V_G + V_E); no published fixture; not a choice of entries"
+PLOT_H2_FORMULA = ("h2 = 1 - s2e / s2P; s2e = sum (n_i - 1) s2_i / sum (n_i - 1) over the error entries; s2P = the sample variance "
+                   "(n - 1) of the offspring plots; s2g = s2P - s2e")
+PLOT_H2_RESULT_COLUMNS = {
+    "study": "the site (studyDbId)", "role": "offspring, error or '' (neither)", "entry": "exact entry ID",
+    "label": "name carried from the label column", "entry_type": "the entry type column's value ('' when none)",
+    "plots": "plots with a valid value in the study", "mean": "the entry's mean in the study", "variance": "the entry's sample variance ('' under 2 plots)",
+}
+
+
+def tool_plot_basis_h2(registry: ArtifactRegistry, a: PlotBasisH2Args) -> ToolResult:
+    """The plot-basis heritability of an unreplicated offspring population (research build order tool 8): per site (study)
+    h2 = 1 - s2e / s2P, with s2e the pooled within-entry variance sum (n_i - 1) s2_i / sum (n_i - 1) of the error entries (every
+    entry with at least 2 plots outside the offspring, or with error_from="checks" only the entries whose entryType is check) and
+    s2P the sample variance of the offspring's plots; s2g = s2P - s2e; h2 set to 0 (and said) when s2e is above s2P; with several
+    sites also the mean of the site h2 (each site weighted equally). A convention (V_P = V_G + V_E) with no published fixture.
+    The offspring are the name prefixes and names the person wrote. Refused, never guessed: fewer than 2 offspring plots or no
+    error entry with 2 plots in a site, error_from="checks" without an entryType column, a prefix or name matching nothing, two
+    variables or units, overlapping plots. Descriptive numbers, never a choice of entries."""
+    tables: list[Table] = []
+    seen: dict[str, str] = {}
+    for aid in a.artifact_ids:
+        table = _load(registry, aid)
+        for key in (table.manifest.artifact_id, table.manifest.sha256):
+            if key in seen:
+                raise AnalystError("invalid_argument", f"{seen[key]} and {table.manifest.artifact_id} hold the same rows; pass each table once")
+            seen[key] = table.manifest.artifact_id
+        tables.append(table)
+    if a.by.endswith("Name"):
+        raise AnalystError("invalid_argument", f"use the entry ID column, not {a.by!r}; names are carried as labels")
+    label_col = LABEL_FOR.get(a.by)
+    variables: set[str] = set()
+    for table in tables:
+        _require_column(table, a.by, "entry column")
+        _require_column(table, a.value, "value column")
+        _require_column(table, "studyDbId", "study column")
+        if label_col is None or label_col not in table.manifest.columns:
+            raise AnalystError("invalid_argument", f"{table.manifest.artifact_id} has no name column beside {a.by!r}; the offspring are given by name")
+        if a.error_from == "checks" and a.entry_type not in table.manifest.columns:
+            raise AnalystError("invalid_argument", f"error_from='checks' needs the {a.entry_type} column in {table.manifest.artifact_id}: run "
+                                                   "plot_design on the plot list with these measurements, then pass its table")
+        variables.add(_single_variable(table))
+    if len(variables) > 1:
+        raise AnalystError("unsupported", f"the tables hold {len(variables)} variables {sorted(variables)}; a plot-basis heritability needs one "
+                                          "variable (one trait)")
+    stated = [((t.manifest.measurement.unit if t.manifest.measurement else None) or "").strip() for t in tables]
+    units = list(dict.fromkeys(u for u in stated if u))
+    if len({"".join(u.lower().split()) for u in units}) > 1 or (units and not all(stated)):
+        raise AnalystError("unsupported", f"the tables are in {' and '.join(units) or 'no unit'} with some stating none; one unit in every site is needed"
+                           if units and not all(stated) else f"the tables are in {' and '.join(units)}; one unit in every site is needed")
+    prefixes = [p[:-1] if p.endswith("*") else p for p in a.offspring_prefixes]
+    starred = {p[:-1] for p in a.offspring_prefixes if p.endswith("*")}
+    names = list(a.offspring_names)
+    if any(not p.strip() for p in prefixes) or any(not n.strip() for n in names):
+        raise AnalystError("invalid_argument", "the offspring group holds an empty prefix or name")
+    if not prefixes and not names:
+        raise AnalystError("invalid_argument", "a plot-basis heritability needs the offspring group: the name prefixes or names the person wrote")
+
+    gates: list[str] = []
+    notes: list[str] = []
+    exclusions: list[Exclusion] = []
+    values: dict[tuple[str, str], list[float]] = {}
+    names_of: dict[str, set[str]] = {}
+    types_of: dict[tuple[str, str], set[str]] = {}             # (study, entry) -> its entry types there (review finding 1)
+    plot_table: dict[str, str] = {}
+    studies_seen: set[str] = set()
+    no_study = no_entry = 0
+    for table in tables:
+        studies_seen |= set(table.manifest.study_ids) | {row.get("studyDbId", "").strip() for row in table.rows} - {""}
+        gate = _completeness_gate(table, a.allow_incomplete)
+        if gate:
+            gates.append(f"{table.manifest.artifact_id}: {gate}")
+        classified = _classify(table, a.value)
+        big = max((abs(number) for _, number in classified.valid), default=0.0)
+        if big >= 1e200:
+            raise AnalystError("unsupported", f"{table.manifest.artifact_id} holds a value of 1e200 or more in absolute value ({big!r}); its "
+                                              "variances are not computed")
+        used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy)
+        notes.append(transformation)
+        exclusions += _exclusions(classified)
+        for row in table.rows:
+            entry = row.get(a.by, "").strip()
+            if entry:
+                names_of.setdefault(entry, set())
+                if row.get(label_col, ""):
+                    names_of[entry].add(row[label_col])
+                if row.get(a.entry_type, "").strip():
+                    types_of.setdefault((row.get("studyDbId", "").strip(), entry), set()).add(row[a.entry_type].strip().casefold())
+            plot = row.get(UNIT_COL, "").strip()
+            if plot and plot_table.setdefault(plot, table.manifest.artifact_id) != table.manifest.artifact_id:
+                raise AnalystError("unsupported", f"plot {plot} is in both {plot_table[plot]} and {table.manifest.artifact_id}; pass tables that "
+                                                  "do not overlap")
+        for row, number in used:
+            study, entry = row.get("studyDbId", "").strip(), row.get(a.by, "").strip()
+            if not study:
+                no_study += 1
+            elif not entry:
+                no_entry += 1
+            else:
+                values.setdefault((study, entry), []).append(number)
+    for reason, n in (("rows with an empty studyDbId", no_study), (f"rows with an empty {a.by}", no_entry)):   # review finding 2
+        if n:
+            exclusions.append(Exclusion(reason=reason, count=n))
+
+    offspring = {e for e, own in names_of.items() if any(n.startswith(p) for p in prefixes for n in own) or any(x == e or x in own for x in names)}
+    for prefix in prefixes:
+        if not any(n.startswith(prefix) for own in names_of.values() for n in own):
+            raise AnalystError("invalid_argument", f"prefix {prefix!r} of the offspring group matches no entry name in the tables")
+        longer = sorted(n for own in names_of.values() for n in own if n.startswith(prefix) and n != prefix)
+        if prefix not in starred and any(prefix in own for own in names_of.values()) and longer:
+            raise AnalystError("invalid_argument", f"prefix {prefix!r} of the offspring group is an entry's whole name and also starts "
+                                                   f"{', '.join(longer[:3])}; pass it as a name, or the prefix the person wrote")
+    for name in names:
+        if not any(name == e or name in own for e, own in names_of.items()):
+            raise AnalystError("invalid_argument", f"{name!r} of the offspring group is not an entry ID or name in the tables")
+
+    sites = sorted(studies_seen | {study for study, _ in values})
+    per_site: dict[str, dict[str, Any]] = {}
+    in_error: set[str] = set()
+    for site in sites:
+        if a.error_from == "checks":                          # one entry type per entry and site (review finding 1)
+            mixed = sorted(e for (s, e), kinds in types_of.items() if s == site and len(kinds) > 1)
+            if mixed:
+                raise AnalystError("unsupported", f"entry {mixed[0]} is {' and '.join(sorted(types_of[(site, mixed[0])]))} in study {site}; a "
+                                                  "check-only error needs one entry type per entry")
+        off_values = [v for e in sorted(offspring) for v in values.get((site, e), [])]
+        if len(off_values) < 2:
+            raise AnalystError("unsupported", f"the offspring group has {len(off_values)} plot(s) with a valid value in study {site}; s2P needs at "
+                                              "least 2 plots")
+        error_entries = sorted(e for (s, e), vals in values.items() if s == site and e not in offspring and len(vals) >= 2
+                               and (a.error_from == "replicated" or types_of.get((site, e), set()) == {"check"}))
+        in_error.update(error_entries)
+        if not error_entries:
+            raise AnalystError("unsupported", f"study {site} has no entry with 2 plots or more for the error ({a.error_from}); s2e needs replicated "
+                                              "entries")
+        df = sum(len(values[(site, e)]) - 1 for e in error_entries)
+        s2e = math.fsum((len(values[(site, e)]) - 1) * statistics.variance(values[(site, e)]) for e in error_entries) / df
+        s2p = statistics.variance(off_values)
+        zero = math.sqrt(s2p) <= PAIR_ZERO * max(abs(v) for v in off_values)
+        h2 = None if zero else 1 - s2e / s2p
+        flag = h2 is not None and h2 < 0
+        s2g = s2p - s2e
+        per_site[site] = {"h2": 0.0 if flag else h2, "h2_raw": h2, "set_to_0": flag, "s2e": s2e, "df": df, "s2P": s2p, "plots": len(off_values),
+                          "s2g": max(0.0, s2g), "s2g_negative": s2g < 0, "error_entries": len(error_entries),
+                          "reason": "s2P is 0: the offspring plots are all equal" if zero else None}
+    undefined = [s for s in sites if per_site[s]["h2"] is None]
+    mean_h2 = None if undefined or len(sites) < 2 else math.fsum(per_site[s]["h2"] for s in sites) / len(sites)
+
+    unit = units[0].replace(" | ", " / ") if units else None                  # " | " splits a claim's parts (review finding 6)
+    trait = tables[0].manifest.measurement.trait if tables[0].manifest.measurement and tables[0].manifest.measurement.trait else next(iter(variables))
+    trait = trait.replace(" | ", " / ")
+    groups_text = f"offspring: {', '.join([*(p + '*' for p in prefixes), *names])}; error: " + (
+        "every entry with at least 2 plots outside the offspring" if a.error_from == "replicated" else "the entries whose entryType is check")
+    tail = " | ".join([f"{trait}{f' ({unit})' if unit else ''} in studies {', '.join(sites)}", groups_text, PLOT_H2_FORMULA,
+                       "; ".join(dict.fromkeys(notes)), PLOT_H2_NOTE])
+    variant = hashlib.sha256(json.dumps([sorted(t.manifest.sha256 for t in tables), a.by, a.value, prefixes, names, a.error_from, a.entry_type,
+                                         a.duplicate_policy, a.allow_incomplete]).encode("utf-8")).hexdigest()[:8]
+    namespace = f"h2plot-{variant}"
+    aid = tables[0].manifest.artifact_id
+    in_no_role = len({e for (_, e) in values if e not in offspring and e not in in_error})     # review finding 4
+    common = {"n_independent_units": None, "source_artifact_hashes": sorted(t.manifest.sha256 for t in tables), "grouping": ["studyDbId"],
+              "exclusions": exclusions}
+    claims: list[Claim] = []
+    if len(sites) > 1:
+        claims.append(Claim(claim_id=_claim_id(aid, "heritability", "h2", "mean", namespace=namespace), kind="heritability", value=mean_h2,
+                            missing_reason=None if mean_h2 is not None else f"h2 is undefined in study {', '.join(undefined)}",
+                            denominator=Denominator(name="sites, each weighted equally", n=len(sites)),
+                            transformation=f"plot-basis heritability h2, the mean of the sites | {tail}"
+                            + (" | includes a site h2 set to 0: s2e is above s2P" if any(per_site[s]["set_to_0"] for s in sites) else ""),
+                            **common))
+    for site in sites:
+        x = per_site[site]
+        f = {"studyDbId": site}
+        said = " | set to 0: s2e is above s2P" if x["set_to_0"] else ""
+        claims += [
+            Claim(claim_id=_claim_id(aid, "heritability", "h2", site, namespace=namespace), kind="heritability", value=x["h2"],
+                  missing_reason=x["reason"], denominator=Denominator(name=f"offspring plots in study {site}", n=x["plots"]), filters=f,
+                  transformation=f"plot-basis heritability h2 | {tail}{said} | error pool in study {site}: {x['error_entries']} "
+                                 + ("entries with at least 2 plots outside the offspring" if a.error_from == "replicated" else
+                                    "check entries with at least 2 plots") + f" (df {x['df']}); s2P from {x['plots']} offspring plots",
+                  **common),
+            Claim(claim_id=_claim_id(aid, "variance", "s2e", site, namespace=namespace), kind="variance", value=x["s2e"],
+                  denominator=Denominator(name=f"degrees of freedom of the pooled error, sum of (n_i - 1) over {x['error_entries']} entries",
+                                          n=x["df"]), filters=f, transformation=f"error variance s2e | {tail}", **common),
+            Claim(claim_id=_claim_id(aid, "variance", "s2p", site, namespace=namespace), kind="variance", value=x["s2P"],
+                  denominator=Denominator(name=f"offspring plots in study {site}", n=x["plots"]), filters=f,
+                  transformation=f"phenotypic variance s2P | {tail}", **common),
+            Claim(claim_id=_claim_id(aid, "variance", "s2g", site, namespace=namespace), kind="variance", value=x["s2g"],
+                  denominator=Denominator(name=f"offspring plots in study {site}", n=x["plots"]), filters=f,
+                  transformation=f"genetic variance s2g | {tail}" + (" | set to 0: s2e is above s2P" if x["s2g_negative"] else ""), **common),
+        ]
+    result_rows = []
+    for (site, e), vals in sorted(values.items()):
+        role = "offspring" if e in offspring else ("error" if len(vals) >= 2 and (a.error_from == "replicated" or types_of.get((site, e), set()) == {"check"}) else "")
+        result_rows.append({"study": site, "role": role, "entry": e, "label": "; ".join(sorted(names_of.get(e, set()))),
+                            "entry_type": "; ".join(sorted(types_of.get((site, e), set()))), "plots": str(len(vals)), "mean": repr(math.fsum(vals) / len(vals)),
+                            "variance": repr(statistics.variance(vals)) if len(vals) >= 2 else ""})
+    lineage = [f"lineage: plot_basis_h2 of {', '.join(f'{t.manifest.artifact_id} sha256={t.manifest.sha256}' for t in tables)}", groups_text,
+               f"analysis target: {ANALYSIS_TARGET}"]
+    complete = all(t.manifest.complete for t in tables)
+    manifest = registry.save_table(result_rows, kind="analysis_result", columns=PLOT_H2_RESULT_COLUMNS, complete=complete,
+                                   source_request_ids=list(dict.fromkeys(r for t in tables for r in t.manifest.source_request_ids)),
+                                   study_ids=sites, variable_ids=sorted(variables), measurement=tables[0].manifest.measurement, quality_notes=lineage)
+    data = {"artifact_ids": [t.manifest.artifact_id for t in tables], "result_artifact_id": manifest.artifact_id, "sites": sites,
+            "variable_id": next(iter(variables)), "unit": unit, "error_from": a.error_from, "per_site": per_site, "mean_h2": mean_h2,
+            "entries_in_no_role": in_no_role, "claims": _claims_json(claims), "note": PLOT_H2_NOTE, "formula": PLOT_H2_FORMULA,
+            "analysis_target": ANALYSIS_TARGET, "value_policy": VALUE_POLICY}
+    warnings = [*gates]
+    if no_study or no_entry:
+        warnings.append(f"{no_study + no_entry} rows with an empty studyDbId or {a.by} are left out")
+    for table in tables:
+        warnings.extend(_timing_warnings(table, a.value))
+    return ToolResult(ok=True, data=data, artifact_ids=[*(t.manifest.artifact_id for t in tables), manifest.artifact_id], complete=complete,
+                      warnings=list(dict.fromkeys(warnings)))
+
+
 # --------------------------------------------------------------------------
-# ONE registry of the seventeen tools, schemas and dispatch
+# ONE registry of the eighteen tools, schemas and dispatch
 # --------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -3548,9 +3784,10 @@ ANALYST_TOOLS: dict[str, AnalystToolSpec] = {spec.name: spec for spec in [
     AnalystToolSpec("compare_trials_paired", CompareTrialsPairedArgs, tool_compare_trials_paired),
     AnalystToolSpec("stress_indices", StressIndicesArgs, tool_stress_indices),
     AnalystToolSpec("heterosis_population", HeterosisPopulationArgs, tool_heterosis_population),
+    AnalystToolSpec("plot_basis_h2", PlotBasisH2Args, tool_plot_basis_h2),
 ]}
 ANALYST_TOOL_NAMES = list(ANALYST_TOOLS)
-assert len(ANALYST_TOOL_NAMES) == 17
+assert len(ANALYST_TOOL_NAMES) == 18
 
 
 def analyst_tool_schemas() -> list[dict[str, Any]]:

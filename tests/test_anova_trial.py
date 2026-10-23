@@ -253,9 +253,9 @@ def test_every_number_is_a_claim_with_its_kind_source_and_plots(registry):
 
 
 def test_every_menu_and_prompt_names_the_tool():
-    assert "anova_trial" in at.ANALYST_TOOL_NAMES and len(at.ANALYST_TOOL_NAMES) == 17
+    assert "anova_trial" in at.ANALYST_TOOL_NAMES and len(at.ANALYST_TOOL_NAMES) == 18
     assert "anova_trial" in an.NUMERIC_TOOLS and "anova_trial" in an.DERIVING_TOOLS
-    assert "seventeen fixed tools" in an.ANALYST_SYSTEM_PROMPT and "anova_trial" in an.ANALYST_SYSTEM_PROMPT
+    assert "eighteen fixed tools" in an.ANALYST_SYSTEM_PROMPT and "anova_trial" in an.ANALYST_SYSTEM_PROMPT
     assert "anova_trial" in co.ANALYST_ACTIONS and "anova_trial(artifact_id=" in co.COORDINATOR_SYSTEM_PROMPT
     schema = next(s for s in at.analyst_tool_schemas() if s["name"] == "anova_trial")
     assert schema["inputSchema"]["required"] == ["artifact_id"] and "RCBD" in schema["description"]

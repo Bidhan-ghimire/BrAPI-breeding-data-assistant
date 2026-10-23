@@ -727,6 +727,54 @@ def _heterosis_block(claims: list[Claim], source_labels: dict[tuple[str, ...], s
     return lines, shown
 
 
+PLOT_H2_SENTENCE = ("Descriptive numbers only: a plot-basis heritability by convention (V_P = V_G + V_E, no published fixture), not a "
+                    "choice of entries.")
+_PLOT_H2_CALL = re.compile(r"^(clm_v2_[0-9a-f]{6}_[0-9]{4,}_h2plot-[0-9a-f]{8})_")
+
+
+def _plot_h2_block(claims: list[Claim], source_labels: dict[tuple[str, ...], str]) -> tuple[list[str], set[str]]:
+    """T7a (2026-10-23): the claims of one plot_basis_h2 call as a table (Site, h2, s2e with its df, s2P with its plots, s2g), the mean
+    of the site h2, the groups, the formula and the convention, then the descriptive sentence. Returns the lines and the IDs shown."""
+    calls: dict[str, list[Claim]] = defaultdict(list)
+    for claim in claims:
+        match = _PLOT_H2_CALL.match(claim.claim_id)
+        if match:
+            calls[match[1]].append(claim)
+    lines: list[str] = []
+    shown: set[str] = set()
+    for group in calls.values():
+        per = {(claim.transformation.split(" | ")[0], claim.filters.get("studyDbId")): claim for claim in group}
+        sites = sorted({site for _, site in per if site is not None})
+        if not sites or ("plot-basis heritability h2", sites[0]) not in per:
+            continue
+        first = per[("plot-basis heritability h2", sites[0])]
+        label = source_labels.get(tuple(sorted(first.source_artifact_hashes)), "")
+        segments = first.transformation.split(" | ")
+
+        def cell(claim: Claim | None, n: bool = False) -> str:
+            if claim is None or claim.value is None:
+                return "n/a"
+            return f"{_anova_number(claim.value)} ({claim.denominator.n})" if n else _anova_number(claim.value)
+
+        rows = [[site, cell(per.get(("plot-basis heritability h2", site))), cell(per.get(("error variance s2e", site)), True),
+                 cell(per.get(("phenotypic variance s2P", site)), True), cell(per.get(("genetic variance s2g", site)))] for site in sites]
+        lines += [f"**Plot-basis heritability, {len(sites)} site{'s' if len(sites) > 1 else ''}{label}**", "", _text(segments[1] + "."), "",
+                  *_table(["Site", "h2", "s2e (df)", "s2P (plots)", "s2g"], rows), ""]
+        mean = per.get(("plot-basis heritability h2, the mean of the sites", None))
+        if mean is not None:
+            lines.append(f"Mean of the site h2: {_anova_number(mean.value)}." if mean.value is not None else
+                         f"Mean of the site h2 not available ({_text(mean.missing_reason or 'reason not provided')}).")
+        for site in sites:
+            claim = per.get(("plot-basis heritability h2", site))
+            if claim is not None and claim.value is None:
+                lines.append(_text(f"h2 in study {site} not available: {claim.missing_reason or 'reason not provided'}."))
+            elif claim is not None and "set to 0: s2e is above s2P" in claim.transformation:
+                lines.append(_text(f"h2 in study {site} set to 0: s2e is above s2P."))
+        lines += [_text(f"Groups: {segments[2]}."), _text(f"{segments[3]}."), "", PLOT_H2_SENTENCE, ""]
+        shown |= {claim.claim_id for claim in group}
+    return lines, shown
+
+
 def _numeric_blocks(claims: list[Claim], sources: _Sources, source_labels: dict[tuple[str, ...], str], *, focus_mean: bool = False) -> list[str]:
     groups: dict[tuple[Any, ...], list[Claim]] = defaultdict(list)
     for claim in claims:
@@ -1039,7 +1087,8 @@ def answer_summary(controller: Any) -> str:
     pair_lines, in_pair = _pair_block(claims, source_labels)
     stress_lines, in_stress = _stress_block(claims, sources, source_labels)
     heterosis_lines, in_heterosis = _heterosis_block(claims, source_labels)
-    in_ranking |= in_threshold | in_correlation | in_anova | in_gxe | in_pair | in_stress | in_heterosis
+    plot_h2_lines, in_plot_h2 = _plot_h2_block(claims, source_labels)
+    in_ranking |= in_threshold | in_correlation | in_anova | in_gxe | in_pair | in_stress | in_heterosis | in_plot_h2
     # a mean the ranking table shows is not shown again (group_stats on the same table states the same entry mean; review)
     ranked_means = {(tuple(sorted(c.source_artifact_hashes)), tuple(sorted(c.filters.items())), c.value)
                     for c in claims if c.claim_id in in_ranking and c.kind == "mean" and c.claim_id not in in_threshold}
@@ -1055,7 +1104,7 @@ def answer_summary(controller: Any) -> str:
             buckets[(tuple(sorted(claim.source_artifact_hashes)), claim.grouping[0], claim.denominator.name, claim.denominator.n)].append(claim)
         else:
             other.append(claim)
-    lines: list[str] = [*ranking, *thresholds, *correlations, *anova_lines, *gxe_lines, *pair_lines, *stress_lines, *heterosis_lines]
+    lines: list[str] = [*ranking, *thresholds, *correlations, *anova_lines, *gxe_lines, *pair_lines, *stress_lines, *heterosis_lines, *plot_h2_lines]
     in_catalog_titles: set[str] = set()              # distinct counts a catalog block's title already leads with
     for key, group in buckets.items():
         block = _catalog_block(group, sources, source_labels.get(key[0], ""), focus_count=focus_count)

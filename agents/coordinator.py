@@ -68,7 +68,7 @@ RETRIEVER_ACTIONS = frozenset({"server_info", "search_studies", "study_types", "
                                "list_locations", "list_programs", "list_seasons", "get_observation_units", "export_metadata"})
 ANALYST_ACTIONS = frozenset({"table_info", "numeric_summary", "group_stats", "filter_rows", "concat_tables", "missing_report", "count_records",
                              "rank_entries", "threshold_count", "correlate_entry_means", "plot_design", "anova_trial",
-                             "gxe_partition", "compare_trials_paired", "stress_indices", "heterosis_population"})
+                             "gxe_partition", "compare_trials_paired", "stress_indices", "heterosis_population", "plot_basis_h2"})
 DISCOVERY_FAMILIES: frozenset[str] = frozenset({"serverinfo", "commoncropnames", "studies", "observationvariables", "locations", "programs", "seasons"})
 # Wording that makes a question about SEVERAL studies (so "all known studies" may be its scope). A question that names one study
 # by an unknown name has none of these, and then no study may be chosen for the user. Seen 2026-09-28: a strong model answered
@@ -501,6 +501,11 @@ Rules:
      study, then heterosis_population(artifact_ids=["<each site's table>"], offspring_prefixes=["..."], parent_a_prefixes=["..."],
      parent_b_prefixes=["..."], founder_prefixes=["..."], founder_names=["..."]) with only the prefixes and names the question
      writes (the app refuses any other); statistic kind "ratio"; descriptive numbers, never "best" or a choice of parents.
+   - the plot-basis heritability of an unreplicated offspring population (h2 = 1 - s2e / s2P per site; s2e the pooled within-entry
+     variance of the replicated entries, or of the checks only; s2P the variance of the offspring plots; the mean of the site h2):
+     get_observations of each site's study (with get_observation_units and plot_design when the error is the checks only), then
+     plot_basis_h2(artifact_ids=["<each site's table>"], offspring_prefixes=["..."], error_from="replicated" or "checks") with only
+     the prefixes the question writes; statistic kind "heritability"; a convention, descriptive numbers, never "best".
    - the replicates, blocks, plots per replicate or check entries of one study: get_observation_units, then
      plot_design(roster_artifact_id=...) on that plot list, then count_records(distinct_by="rep") for the replicates,
      count_records(group_by="rep") for the plots per replicate, or filter_rows(column="entryType", op="eq", value="check")
