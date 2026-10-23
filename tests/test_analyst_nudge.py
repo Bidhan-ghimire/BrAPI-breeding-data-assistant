@@ -24,9 +24,10 @@ from part2_support import synthetic_context
 
 RUN = "run_nudge"
 # The wording measured on gpt-6-luna (analyst_no_claim_20261019), pinned here, not read from the code. On 2026-10-21 (R1)
-# "rank_entries" joined the list of claim-making tools; that one change was not measured again on the model.
+# "rank_entries" (R1) and "compare_means" (R2, 2026-10-22) joined the list of claim-making tools; neither change was measured
+# again on the model.
 TESTED_WORDING = ("No tool has made a claim yet, so nothing can be reported. table_info and missing_report show counts for checking, "
-                  "but they make no claims. Only numeric_summary, group_stats, rank_entries and count_records make claims: numeric_summary's count "
+                  "but they make no claims. Only numeric_summary, group_stats, rank_entries, compare_means and count_records make claims: numeric_summary's count "
                   "claim is the number of valid values it used (one per unit under duplicate_policy=mean_per_unit); count_records "
                   "counts rows (all rows, or the rows kept by filter_rows, e.g. op is_valid_number keeps each row with a valid value). "
                   "Call the tool that states the number the question asks for, then finish again with the JSON object. If no tool "

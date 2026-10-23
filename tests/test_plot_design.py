@@ -230,14 +230,14 @@ def test_it_is_one_of_the_analysts_tools_and_the_planner_knows_it():
     import agents.analyst as an
     import agents.coordinator as co
 
-    assert "plot_design" in at.ANALYST_TOOL_NAMES and len(at.ANALYST_TOOL_NAMES) == 18
+    assert "plot_design" in at.ANALYST_TOOL_NAMES and len(at.ANALYST_TOOL_NAMES) == 19
     assert "plot_design" in an.DERIVING_TOOLS and "plot_design" not in an.NUMERIC_TOOLS
     schema = next(s for s in at.analyst_tool_schemas() if s["name"] == "plot_design")
     assert schema["inputSchema"]["required"] == ["roster_artifact_id"] and "replicate" in schema["description"].lower()
     prompt = " ".join(co.COORDINATOR_SYSTEM_PROMPT.split())
     assert "plot_design" in co.ANALYST_ACTIONS and "get_observation_units, then plot_design(roster_artifact_id=" in prompt
     analyst = " ".join(an.ANALYST_SYSTEM_PROMPT.split())
-    assert "eighteen fixed tools" in analyst and "plot_design" in analyst
+    assert "nineteen fixed tools" in analyst and "plot_design" in analyst
 
 
 def test_the_analysts_guard_refuses_a_plot_list_never_supplied(registry):

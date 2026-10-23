@@ -69,7 +69,7 @@ RETRIEVER_ACTIONS = frozenset({"server_info", "search_studies", "study_types", "
                                "list_locations", "list_programs", "list_seasons", "get_observation_units", "export_metadata"})
 ANALYST_ACTIONS = frozenset({"table_info", "numeric_summary", "group_stats", "filter_rows", "concat_tables", "missing_report", "count_records",
                              "rank_entries", "threshold_count", "correlate_entry_means", "plot_design", "anova_trial",
-                             "gxe_partition", "compare_trials_paired", "stress_indices", "heterosis_population", "plot_basis_h2"})
+                             "gxe_partition", "compare_trials_paired", "stress_indices", "heterosis_population", "plot_basis_h2", "compare_means"})
 DISCOVERY_FAMILIES: frozenset[str] = frozenset({"serverinfo", "commoncropnames", "studies", "observationvariables", "locations", "programs", "seasons"})
 # Wording that makes a question about SEVERAL studies (so "all known studies" may be its scope). A question that names one study
 # by an unknown name has none of these, and then no study may be chosen for the user. Seen 2026-09-28: a strong model answered
@@ -447,7 +447,7 @@ Rules:
 4. Steps: retriever actions are search_studies, list_variables, get_observations, get_observation_units, export_metadata,
    list_locations, list_seasons, get_study; analyst actions are table_info, numeric_summary, group_stats, count_records,
    rank_entries, missing_report, filter_rows, concat_tables, threshold_count, correlate_entry_means, plot_design, anova_trial,
-   gxe_partition. Each step depends only on earlier steps; every analyst step traces back to a
+   gxe_partition, compare_means. Each step depends only on earlier steps; every analyst step traces back to a
    retriever step, directly or through the earlier analyst steps it depends on (export -> filter -> count is fine; a step that
    depends on nothing is not). The list_* and search_* actions return
    previews only, never a table the analyst can use: a count over catalog rows (variables, studies, seasons, locations) needs an
@@ -529,6 +529,13 @@ Rules:
      present in every study; statistic kind "anova"; descriptive numbers, never "best" or "stable".
    - an entry's across-trial mean with every study weighted equally (the mean of its per-study means): concat_tables of the
      studies' tables, then rank_entries(basis="study_means"); the default (pooled) weights each study by its plots.
+   - two studies' means of ONE measured trait over ALL the entries of each study (not only the entries in both), or over their
+     plot values, and the percent between them, ONLY when the person asks for that: get_observations for each of the two
+     studies, then compare_means(base_study_db_id="<the reference study>", percent="reduction", shared_entries_only=false,
+     or mean_of="values") with statistic kind "ratio"; the change on the entries in both stays compare_trials_paired. Both
+     inputs are required. The reference study is the control, the earlier harvest, or Y in "X higher/lower than Y".
+     percent="reduction" when the question asks for a reduction, a loss, a drop, "lower" or "below": (base - other) / base x
+     100; percent="change" when it asks for a change, a gain, an increase, "higher" or "above": (other - base) / base x 100.
    - narrowing a table: filter_rows(column="studyType", op="eq", value="Advanced Yield Trial"); op is one of eq, ne, contains,
      gt, ge, lt, le, is_missing, is_valid_number. A catalog table comes from export_metadata(entity="variables"); entity is one
      of studies, variables, locations, programs, seasons.
@@ -674,12 +681,20 @@ def assemble_plan(question: str, draft: PlanDraft, metadata: KnownMetadata | Non
 
     # a study input must be a study of the scope and a variable input a variable of it (review 2026-10-21: a variable ID given as
     # study_db_id passed a check on the union of both, and the fetch list then held no study)
-    in_scope_ids = {"study_db_id": set(study_ids), "variable_db_id": set(scope.variable_ids)}
+    in_scope_ids = {"study_db_id": set(study_ids), "base_study_db_id": set(study_ids), "variable_db_id": set(scope.variable_ids)}
     for step in draft.steps:
         allowed = RETRIEVER_ACTIONS if step.agent == "retriever" else ANALYST_ACTIONS
         if step.action not in allowed:
             problems.append(f"{step.step_id}: {step.action!r} is not a {step.agent} action")
-        for key in ("study_db_id", "variable_db_id"):
+        if step.agent == "analyst" and step.action == "compare_means":      # the analyst's guard binds both (round 3 (A), 2026-10-22)
+            base = step.inputs.get("base_study_db_id")
+            if not isinstance(base, str) or not base.strip():
+                problems.append(f"{step.step_id}: compare_means needs base_study_db_id, the reference study: the control, the earlier "
+                                "harvest, or Y in \"X higher/lower than Y\"")
+            if step.inputs.get("percent") not in ("change", "reduction"):
+                problems.append(f"{step.step_id}: compare_means needs percent=\"reduction\" (a reduction, loss, drop, lower, below) or "
+                                "percent=\"change\" (a change, gain, increase, higher, above)")
+        for key in ("study_db_id", "base_study_db_id", "variable_db_id"):          # compare_means' base study is one of the scope's
             value = step.inputs.get(key)
             if isinstance(value, str) and value not in in_scope_ids[key]:
                 hint = (" - for a question about several studies leave study_db_id out: the controller gives the retriever the resolved "

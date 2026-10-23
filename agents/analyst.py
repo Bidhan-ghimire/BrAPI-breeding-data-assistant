@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -31,15 +31,15 @@ __all__ = [
 
 FIXTURE_DIR = PART2_DIR / "tests" / "fixtures" / "model_analyst"
 NUMERIC_TOOLS = frozenset({"numeric_summary", "group_stats", "count_records", "rank_entries", "threshold_count", "correlate_entry_means", "anova_trial",
-                           "gxe_partition", "compare_trials_paired", "stress_indices", "heterosis_population", "plot_basis_h2"})   # return claims
+                           "gxe_partition", "compare_trials_paired", "stress_indices", "heterosis_population", "plot_basis_h2", "compare_means"})   # return claims
 DERIVING_TOOLS = frozenset({"group_stats", "filter_rows", "concat_tables", "rank_entries", "threshold_count", "correlate_entry_means", "plot_design", "anova_trial",
-                            "gxe_partition", "compare_trials_paired", "stress_indices", "heterosis_population", "plot_basis_h2"})       # save new artifacts
+                            "gxe_partition", "compare_trials_paired", "stress_indices", "heterosis_population", "plot_basis_h2", "compare_means"})       # save new artifacts
 # Review 2 of R1 (2026-10-21): without "highest-yielding" this filter let "the highest-yielding clone, so it should be advanced"
 # through, so it stays until Bidhan decides how advice that rides on an ordering is caught (asked, not changed).
 _SUPERIORITY = re.compile(r"\b(best|superior|outperform\w*|top[- ]performing|winner|genetically (better|superior)|highest[- ]yielding)\b", re.IGNORECASE)
 
 ANALYST_SYSTEM_PROMPT = """You are the Analyst for a read-only plant-breeding database. You compute NOTHING yourself.
-You have eighteen fixed tools that read registered artifacts (handles like art_3f9a2c_0001) and return typed claims.
+You have nineteen fixed tools that read registered artifacts (handles like art_3f9a2c_0001) and return typed claims.
 Rules:
 1. Start with table_info for EVERY supplied artifact. Check that it is complete, that it measures the variable the
    question is about (trait, unit, timepoint), and whether duplicates or unknown independence are reported.
@@ -76,7 +76,10 @@ Rules:
    or from the checks) call plot_basis_h2(artifact_ids=[each site's table], offspring_prefixes=[...], error_from="replicated" or
    "checks") with only the prefixes the person wrote ("checks" needs plot_design's table); to rank entries by the mean of
    their per-study means (each study weighted equally) call
-   rank_entries(basis="study_means") on a table of every study (concat_tables); for catalog questions call count_records. Use exact column names from table_info. Never pass a file path, never invent a handle, never
+   rank_entries(basis="study_means") on a table of every study (concat_tables); for the means of two studies over ALL the
+   entries of each (not only the entries in both) or over their plot values, and the percent between them, when the person
+   asks for that, call compare_means, passing the plan's base_study_db_id and percent, and that study's table as
+   base_artifact_id; for catalog questions call count_records. Use exact column names from table_info. Never pass a file path, never invent a handle, never
    ask for a tool you do not have.
 4. If a tool refuses (duplicates, incomplete data), read its message: either name the aggregation rule it asks for
    (duplicate_policy) or stop with needs_clarification. anova_trial's cells rule is never yours to name: unless the person's own
@@ -99,7 +102,7 @@ or {"status": "needs_clarification", "question": "<one precise question>"}"""
 # on Luna but said numeric_summary counts valid values, which is false under mean_per_unit (it counts units; review).
 # This corrected wording recovered 19 of 19 nudged replays through this code on Luna.
 NO_CLAIM_NUDGE = ("No tool has made a claim yet, so nothing can be reported. table_info and missing_report show counts for checking, "
-                  "but they make no claims. Only numeric_summary, group_stats, rank_entries and count_records make claims: numeric_summary's count "
+                  "but they make no claims. Only numeric_summary, group_stats, rank_entries, compare_means and count_records make claims: numeric_summary's count "
                   "claim is the number of valid values it used (one per unit under duplicate_policy=mean_per_unit); count_records "
                   "counts rows (all rows, or the rows kept by filter_rows, e.g. op is_valid_number keeps each row with a valid value). "
                   "Call the tool that states the number the question asks for, then finish again with the JSON object. If no tool "
@@ -110,6 +113,14 @@ NO_CLAIM_NUDGE = ("No tool has made a claim yet, so nothing can be reported. tab
 # Inputs and the model's final payload
 # --------------------------------------------------------------------------
 
+class PlannedComparison(BaseModel):
+    """One compare_means step of the plan: the analyst's guard refuses a compare_means call that differs from it."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+    base_study_db_id: str = Field(min_length=1)
+    percent: Literal["change", "reduction"]
+
+
 class AnalysisInput(BaseModel):
     """What the controller hands the Analyst. Built by code, never by a model."""
 
@@ -118,6 +129,15 @@ class AnalysisInput(BaseModel):
     artifact_ids: list[str] = Field(min_length=1)
     requested_variable_ids: list[str] = Field(default_factory=list)   # from the Retriever's resolved entities, when known
     notes: list[str] = Field(default_factory=list)                    # e.g. resolved labels, for the model's context
+    planned_comparisons: list[PlannedComparison] = Field(default_factory=list)   # the plan's compare_means steps
+
+
+def planned_comparisons(steps: Any) -> list[PlannedComparison]:
+    """The plan's compare_means steps, which bind the analyst's calls (coach 2026-10-22 03:48 UTC, round 3 (A): the analyst
+    swapped base and other consistently, base_study_db_id "S2" with the S2 table, while the plan said S1, and the answer read
+    "Percent reduction -84.6 %"). A ready plan's compare_means step names both (agents/coordinator.py assemble_plan)."""
+    return [PlannedComparison(base_study_db_id=step.inputs["base_study_db_id"], percent=step.inputs["percent"])
+            for step in steps if step.agent == "analyst" and step.action == "compare_means"]
 
 
 class AnalystPayload(BaseModel):
@@ -245,6 +265,8 @@ class GuardedAnalystTools:
     allowed: set[str] = field(default_factory=set)
     model_claim_refs: bool = True  # False inside the MCP server; shortening belongs at the model boundary.
     question: str | None = None    # the question the controller holds (F4, F5); None inside the MCP server, which has none
+    # (base_study_db_id, percent) of each planned compare_means step; None = no plan to bind (the MCP server's own guard).
+    planned_comparisons: list[tuple[str, str]] | None = None
     claim_refs: dict[str, str] = field(default_factory=dict, init=False)  # model reference -> canonical ID
     _refs_by_id: dict[str, str] = field(default_factory=dict, init=False)
 
@@ -272,6 +294,11 @@ class GuardedAnalystTools:
         outside = [h for h in handles if h not in self.allowed]
         if outside:
             return self._refuse(name, args, "not_authorized", f"artifact {outside[0]!r} was not supplied to this analysis and was not produced by it")
+        asked = (args.get("base_study_db_id"), args.get("percent"))
+        if name == "compare_means" and self.planned_comparisons is not None and asked not in self.planned_comparisons:
+            planned = "; ".join(f"base_study_db_id={base!r}, percent={percent!r}" for base, percent in self.planned_comparisons)
+            return self._refuse(name, args, "not_authorized", f"compare_means must follow the plan's compare_means step "
+                                f"({planned or 'the plan has none'}); this call has base_study_db_id={asked[0]!r}, percent={asked[1]!r}")
         missing = [h for h in self.supplied if h not in self.inspected]
         if name != "table_info" and missing:
             return self._refuse(name, args, "invalid_argument", f"call table_info for {missing} before any calculation")
@@ -349,7 +376,8 @@ async def run_analyst(
         report = AnalysisReport(status="blocked", caveats=[f"blocked before any model call: {reason}"], methods=["precheck: requested variables vs artifact variable_ids"])
         return report, None, ""
     inner = raw_tools if raw_tools is not None else AnalystTools(ctx.registry)
-    tools = GuardedAnalystTools(inner, list(inputs.artifact_ids), question=inputs.question)
+    tools = GuardedAnalystTools(inner, list(inputs.artifact_ids), question=inputs.question,
+                                planned_comparisons=[(c.base_study_db_id, c.percent) for c in inputs.planned_comparisons])
     agent = await run_agent_loop(
         model, tools, agent_name="analyst", system_prompt=ANALYST_SYSTEM_PROMPT, user_message=_user_message(inputs),
         budget=budget, allowed_tools=set(ANALYST_TOOL_NAMES), log_dir=log_dir, run_id=run_id, model_requested=model_requested,

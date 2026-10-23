@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 from urllib.parse import urlsplit
 
-from agents.analyst import AnalysisInput, registry_prefix, run_analyst
+from agents.analyst import AnalysisInput, planned_comparisons, registry_prefix, run_analyst
 from agents.coordinator import (
     FOLLOW_UP_LABEL,
     WHOLE_SET_WORDS,
@@ -276,12 +276,39 @@ def analyst_questions(report: AnalysisReport | None) -> list[str]:
     return [c[len(_ASKED):].strip() for c in (report.caveats if report else []) if c.startswith(_ASKED) and c[len(_ASKED):].strip()]
 
 
+def analysis_input(plan: Plan, artifacts: list[str], notes: list[str], *, question: str | None = None) -> AnalysisInput:
+    """What the Analyst gets from a ready plan, built by code: the question, the reviewed artifacts, the plan's variables, the
+    notes, and the plan's compare_means steps, which bind its compare_means calls (coach 2026-10-22 03:48 UTC, round 3 (A))."""
+    return AnalysisInput(question=question or plan.question, artifact_ids=artifacts, requested_variable_ids=list(plan.scope.variable_ids),
+                         notes=notes, planned_comparisons=planned_comparisons(plan.steps))
+
+
 ANSWER_LIST_SHOWN = 30             # items the readable answer lists; all of them stay in the numbers table
 _NAME_COLUMNS = {                  # the columns shown beside an ID, taken from the SAME fetched table the claim came from
     "studyDbId": ("studyName", "locationName", "seasons"), "locationDbId": ("locationName", "countryName"),
     "germplasmDbId": ("germplasmName",), "observationVariableDbId": ("observationVariableName",),
     "observationUnitDbId": ("observationUnitName",), "seasonDbId": ("seasonName",), "programDbId": ("programName",),
 }
+
+
+def _percent_text(claim: Claim) -> str:
+    """A percent claim's value in the Full report: one decimal and never "-0.0" (compare_means), or the fewest decimals that keep
+    a partial share from reading as 0 or 100 (threshold_count's "share of ..."); the exact value stays in the claim (compare_means
+    round 4, 2026-10-22: the report showed up to 4 decimals and "-0 %")."""
+    value = float(claim.value)
+    for decimals in (1, 2, 3, 4):
+        text = f"{value:.{decimals}f}"
+        text = text[1:] if text.startswith("-") and float(text) == 0 else text
+        if not claim.transformation.startswith("share of") or float(text) not in (0.0, 100.0) or value in (0, 100):
+            return text
+    return text
+
+
+def _percent_claim(claim: Claim) -> bool:
+    """The claims _percent_text writes: compare_means' percent and threshold_count's share. Every other percent keeps
+    _plain_number's four decimals (round 5 review: T6's heterosis of 0.04321 % read "0.0 %")."""
+    return (claim.value is not None and claim.kind == "ratio" and claim.unit == "%"
+            and claim.transformation.startswith(("percent change =", "percent reduction =", "share of")))
 
 
 def _plain_number(value: float | int | None, reason: str | None = None) -> str:
@@ -343,7 +370,8 @@ def readable_answer(claims: list[Claim], registry: Any) -> list[str]:
             continue
         about = (" — " + ", ".join(c.grouping)) if c.grouping and not c.filters else ""
         about += f" ({', '.join(f'{k}={v}' for k, v in sorted(c.filters.items()))})" if c.filters else ""
-        lines.append(f"- {c.transformation}{about}: **{_plain_number(c.value, c.missing_reason)}{' ' + c.unit if c.unit else ''}** "
+        shown = _percent_text(c) if _percent_claim(c) else _plain_number(c.value, c.missing_reason)
+        lines.append(f"- {c.transformation}{about}: **{shown}{' ' + c.unit if c.unit and c.value is not None else ''}** "
                      f"({c.denominator.name}: {c.denominator.n})")
         if c.kind == "count" and len(c.grouping) == 1 and not c.filters and c.transformation.startswith("number of distinct"):
             column = c.grouping[0]
@@ -371,7 +399,8 @@ def readable_answer(claims: list[Claim], registry: Any) -> list[str]:
             elif kind == "count":
                 lines.append(f"  - {label}: {_plain_number(c.value)} of {c.denominator.n}")
             else:
-                lines.append(f"  - {label}: {_plain_number(c.value, c.missing_reason)}{' ' + c.unit if c.unit else ''} (n = {c.denominator.n})")
+                text = _percent_text(c) if _percent_claim(c) else _plain_number(c.value, c.missing_reason)
+                lines.append(f"  - {label}: {text}{' ' + c.unit if c.unit and c.value is not None else ''} (n = {c.denominator.n})")
         if len(group) > len(shown):
             lines.append(f"  - … and {len(group) - len(shown)} more; all of them are in the numbers table")
     return lines
@@ -1345,8 +1374,7 @@ class Controller:
                 model = self.models.analyst_factory(prefix)
             else:
                 model = await self._real_model()
-            inputs = AnalysisInput(question=question, artifact_ids=artifacts, requested_variable_ids=list(self.plan.scope.variable_ids),
-                                   notes=notes)
+            inputs = analysis_input(self.plan, artifacts, notes, question=question)
             self.analysis, agent, self.narrative = await run_analyst(inputs, model=model, ctx=self.ctx, budget=self.budget, run_id=self.run_id,
                                                                      log_dir=self.run_dir.parent, model_requested=self.models.requested, **tool_options)
             if agent is not None:

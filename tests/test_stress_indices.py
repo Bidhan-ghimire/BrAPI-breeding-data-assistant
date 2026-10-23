@@ -252,9 +252,9 @@ def test_every_number_the_answer_shows_is_backed_by_a_claim(tmp_path):
 
 
 def test_every_menu_and_prompt_names_the_tool():
-    assert "stress_indices" in at.ANALYST_TOOL_NAMES and len(at.ANALYST_TOOL_NAMES) == 18
+    assert "stress_indices" in at.ANALYST_TOOL_NAMES and len(at.ANALYST_TOOL_NAMES) == 19
     assert "stress_indices" in an.NUMERIC_TOOLS and "stress_indices" in an.DERIVING_TOOLS
-    assert "eighteen fixed tools" in an.ANALYST_SYSTEM_PROMPT and "stress_indices(nonstress_artifact_id=" in an.ANALYST_SYSTEM_PROMPT
+    assert "nineteen fixed tools" in an.ANALYST_SYSTEM_PROMPT and "stress_indices(nonstress_artifact_id=" in an.ANALYST_SYSTEM_PROMPT
     assert "stress_indices" in co.ANALYST_ACTIONS and "stress_indices(nonstress_artifact_id=" in co.COORDINATOR_SYSTEM_PROMPT
     schema = next(s for s in at.analyst_tool_schemas() if s["name"] == "stress_indices")
     assert schema["inputSchema"]["required"] == ["nonstress_artifact_id", "stress_artifact_id"] and "STI" in schema["description"]

@@ -149,6 +149,14 @@ def _display(number: float | None) -> str | None:
     return text if text not in ("", "-0") else "0"
 
 
+def _one_decimal(number: float | None) -> str | None:
+    """A percent to one decimal, never "-0.0" (compare_means; coach 2026-10-22 03:48 UTC, round 3 (C))."""
+    if number is None:
+        return None
+    text = f"{number:.1f}"
+    return "0.0" if text == "-0.0" else text
+
+
 def _stats(values: list[float]) -> dict[str, float | None]:
     if not values:
         return {"mean": None, "median": None, "min": None, "max": None, "sd": None}
@@ -585,6 +593,28 @@ class PlotBasisH2Args(ToolArgs):
     value: str = Field(default=VALUE_COL)
     entry_type: str = Field(default="entryType", description="the entry type column plot_design adds (check / test)")
     duplicate_policy: DuplicatePolicy = Field(default="reject", description="what to do with repeated measurements of one plot")
+    allow_incomplete: bool = Field(default=False)
+
+
+class CompareMeansArgs(ToolArgs):
+    base_artifact_id: ArtifactId = Field(description="the reference table (the control, the earlier harvest, the first site): a "
+                                                     "registered artifact handle such as art_3f9a2c_0001 (never a path)")
+    other_artifact_id: ArtifactId = Field(description="the compared table, a registered artifact handle (never a path)")
+    base_study_db_id: str = Field(min_length=1, description=("the reference study's ID as the plan names it: the base table must be "
+                                                             "that one study's table and the other table not (a swapped pair would "
+                                                             "turn a reduction around)"))
+    by: str = Field(default="germplasmDbId", description="the entry ID column (names are carried as labels)")
+    value: str = Field(default=VALUE_COL)
+    percent: Literal["change", "reduction"] = Field(description=(
+        "as the plan names it; change: (other - base) / base x 100, a drop is negative; reduction: (base - other) / base x 100, "
+        "a drop is positive"))
+    mean_of: Literal["entry_means", "values"] = Field(default="entry_means", description=(
+        "entry_means: each study's mean is the mean of its entry means; values: the mean of the valid values of its entries"))
+    shared_entries_only: bool = Field(default=True, description="use only the entries with a mean in both tables")
+    exclude: list[str] = Field(default_factory=list, max_length=50,
+                               description="entries (exact ID or exact name) left out of both means, for example the checks")
+    min_independent_n: int = Field(default=1, ge=1, description="exclusion threshold on independent units; not a design correction")
+    duplicate_policy: DuplicatePolicy = Field(default="reject")
     allow_incomplete: bool = Field(default=False)
 
 
@@ -3900,8 +3930,212 @@ def tool_plot_basis_h2(registry: ArtifactRegistry, a: PlotBasisH2Args) -> ToolRe
                       warnings=list(dict.fromkeys(warnings)))
 
 
+COMPARE_NOTE ="descriptive comparison of recorded values, not a test and not a recommendation"
+COMPARE_RESULT_COLUMNS = {"entry": "entry ID", "label": "entry name(s)", "base_mean": "entry mean in the base table ('' = none)",
+                          "other_mean": "entry mean in the other table ('' = none)", "used": "true when the entry is in the comparison (in both means; with shared_entries_only=false, in its own table's mean)",
+                          "reason": "why the entry is not used ('' = used)"}
+_UNKNOWN_ENTRY = "is not an entry ID or name in"
+
+
+def _left_out_in(sides: dict[str, dict[str, Any]], by: str, wanted: list[str]) -> set[str]:
+    """Entries given by exact ID or name, found in either table (a check may be in one only); unknown in both is refused."""
+    found: set[str] = set()
+    for name in wanted:
+        hits, first_error = set(), None
+        for side in sides.values():
+            try:
+                hits |= set(_entries(side["table"], by, side["label_col"], [name], "exclude"))
+            except AnalystError as exc:
+                if _UNKNOWN_ENTRY not in exc.message:                # an ambiguous name is refused, never guessed
+                    raise
+                first_error = first_error or exc
+        if not hits and first_error is not None:
+            raise first_error
+        found |= hits
+    return found
+
+
+def tool_compare_means(registry: ArtifactRegistry, a: CompareMeansArgs) -> ToolResult:
+    """Two tables' means of ONE trait and the percent between them, for example a drought arm against its irrigated control.
+    Each table's mean is the mean of its entry means (mean_of=entry_means) or of its entries' valid values (mean_of=values),
+    over the entries with a mean in both tables (unless shared_entries_only is false), after leaving out the excluded entries.
+    The percent is a change, (other - base) / base x 100, or a reduction, (base - other) / base x 100, the formula named in
+    the claim; a base mean that is negative, or that counts as zero (under 1e-9 in absolute value, or under 1e-9 of the largest
+    absolute plot value behind it, also when it averages entry means), gives no percent.
+    base_study_db_id and percent are the plan's own, and the base table must be the base study's table. Both tables must
+    measure the same variable in the same unit. Claims: the two means and the percent; the entry table is saved as an
+    analysis_result artifact. A descriptive comparison of recorded values, not a test and not a recommendation."""
+    if a.base_artifact_id == a.other_artifact_id:
+        raise AnalystError("invalid_argument", "base and other are the same table; compare two different tables")
+    if a.by.endswith("Name"):
+        raise AnalystError("invalid_argument", f"compare by the ID column, not {a.by!r}; names are carried as labels")
+    sides: dict[str, dict[str, Any]] = {}
+    for side, artifact in (("base", a.base_artifact_id), ("other", a.other_artifact_id)):
+        table = _load(registry, artifact)
+        _require_column(table, a.by, "entry column")
+        _require_column(table, a.value, "value column")
+        caveat = _completeness_gate(table, a.allow_incomplete)
+        classified = _classify(table, a.value)
+        used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy)
+        label_col = LABEL_FOR.get(a.by)
+        label_col = label_col if label_col in table.manifest.columns else None
+        results, no_group_rows = _group_results(table, a.by, a.value, classified, used, a.min_independent_n, label_col)
+        sides[side] = {"table": table, "caveat": caveat, "classified": classified, "used": used, "transformation": transformation,
+                       "label_col": label_col, "results": {g["group_id"]: g for g in results}, "no_group_rows": no_group_rows,
+                       "variable": _single_variable(table), "unit": table.manifest.measurement.unit,
+                       "study": ", ".join(sorted(table.manifest.study_ids)) or table.manifest.artifact_id}
+    base, other = sides["base"], sides["other"]
+    if base["table"].manifest.sha256 == other["table"].manifest.sha256:
+        raise AnalystError("invalid_argument", "base and other hold the same data; compare two different tables")
+    if set(base["table"].manifest.study_ids) != {a.base_study_db_id}:     # code checks the analyst's choice of base table
+        raise AnalystError("invalid_argument", f"base_artifact_id is a table of {base['study']}, not of the plan's base study "
+                                               f"{a.base_study_db_id!r}; pass that one study's table as base_artifact_id")
+    if a.base_study_db_id in other["table"].manifest.study_ids:
+        raise AnalystError("invalid_argument", f"other_artifact_id is also a table of the base study {a.base_study_db_id!r}")
+    if base["variable"] != other["variable"]:
+        raise AnalystError("invalid_argument", f"the tables measure different variables ({base['variable']!r} and {other['variable']!r}); "
+                                               "a percent compares one trait")
+    if base["unit"] != other["unit"]:
+        raise AnalystError("invalid_argument", f"the tables state different units ({base['unit']!r} and {other['unit']!r})")
+    left_out = _left_out_in(sides, a.by, a.exclude)
+    eligible = {side: {e for e, g in s["results"].items() if g["included"] and e not in left_out} for side, s in sides.items()}
+    under = {side: {e for e, g in s["results"].items() if not g["included"] and e not in left_out} for side, s in sides.items()}
+    shared = eligible["base"] & eligible["other"]
+    entries = {side: (shared if a.shared_entries_only else eligible[side]) for side in sides}
+    if not entries["base"] or not entries["other"]:
+        raise AnalystError("incomplete_data", ("no entry has a mean in both tables" if a.shared_entries_only else "a table has no entry mean")
+                           + f" after {len(left_out)} left out; nothing to compare")
+    used_entries = entries["base"] & entries["other"] if a.shared_entries_only else entries["base"] | entries["other"]
+
+    def reason(entry: str) -> str:
+        if entry in left_out:
+            return "left out before comparing"
+        for side, s in sides.items():
+            g = s["results"].get(entry)
+            if g is not None and not g["included"]:
+                return f"{side}: {g['exclusion_reason']}"
+        return "only in the base table" if entry in eligible["base"] else "only in the other table"
+
+    # one namespace per comparison: the same base against another table, or with other options, is another set of claims
+    variant = hashlib.sha256(json.dumps([a.base_artifact_id, a.other_artifact_id, a.percent, a.mean_of, a.shared_entries_only,
+                                         sorted(left_out), a.min_independent_n, a.duplicate_policy, a.allow_incomplete, a.value,
+                                         a.by]).encode("utf-8")).hexdigest()[:10]
+    caveats = [s["caveat"] for s in sides.values() if s["caveat"]]
+    claims: list[Claim] = []
+    means: dict[str, float] = {}
+    # Each entry a claim did not use is counted once, with the first reason that applies: left out, then under
+    # min_independent_n, then no usable mean in the other table. Rows are counted for the entries that mean used; every line
+    # names its study (coach 2026-10-22 03:48 UTC, round 3 (B)).
+    for side, s in sides.items():
+        mine, study = entries[side], s["study"]
+        across = sides["other" if side == "base" else "base"]["study"]
+        dropped = len(set(s["results"]) & left_out)
+        which = ("used: those with a mean in both tables" if a.shared_entries_only else "of this table") + \
+                (f", after {dropped} left out" if dropped else "")
+        valid_mine = sum(1 for row, _ in s["classified"].valid if row.get(a.by, "") in mine)
+        values = [number for row, number in s["used"] if row.get(a.by, "") in mine]
+        averaged = len(values) != valid_mine                # mean_per_unit merged duplicates among these entries' rows
+        rule = (f"duplicate_policy=mean_per_unit: {valid_mine} valid rows averaged within {len(values)} observation units before "
+                "pooling" if averaged else "valid values used as recorded (one row per observation unit)")
+        if a.mean_of == "entry_means":
+            means[side] = statistics.fmean(s["results"][e]["mean"] for e in sorted(mine))
+            n, method = len(mine), f"mean of entry means over the {len(mine)} entries {which}; entry mean of valid values"
+            denominator = "entries used" if a.shared_entries_only else "entries of this table"
+        else:
+            means[side] = statistics.fmean(values)
+            n, method = len(values), f"mean of the valid values of the {len(mine)} entries {which}"
+            denominator = (f"observation units of the entries used ({PER_UNIT})" if averaged else "valid numeric values of the entries used")
+        # the largest absolute RAW plot value behind this mean, also when it averages entry means: values that cancel inside one
+        # entry leave an entry mean of float residue as large as the entry means themselves (round 4 review, Finding A; T4's rule).
+        # The zero rule below is relative to it.
+        s["scale"] = max((abs(number) for row, number in s["classified"].valid if row.get(a.by, "") in mine), default=0.0)
+        # with shared entries, which entries are used depends on both tables, so either table's incompleteness marks both means
+        marks = caveats if a.shared_entries_only else ([s["caveat"]] if s["caveat"] else [])
+        transformation = f"{method}; {rule}" + "".join(f"; {c}" for c in marks)
+        exclusions = [Exclusion(reason=why, count=count) for why, count in (
+            (f"{study}: rows with an empty {a.by}", s["no_group_rows"]),
+            (f"{study}: entries left out before comparing", dropped),
+            (f"{study}: entries under min_independent_n={a.min_independent_n}", len(under[side])),
+            (f"{study}: entries without a usable mean in {across}", len(eligible[side] - mine)),
+            (f"{study}: raw-missing value token (entries used)", sum(s["results"][e]["n_raw_missing"] for e in mine)),
+            (f"{study}: invalid or non-finite value token (entries used)", sum(s["results"][e]["n_invalid"] for e in mine))) if count]
+        claims.append(Claim(claim_id=_claim_id(s["table"].manifest.artifact_id, "mean", side, namespace=f"cmp-{variant}"), kind="mean",
+                            value=means[side], unit=s["unit"], denominator=Denominator(name=denominator, n=n),
+                            source_artifact_hashes=[s["table"].manifest.sha256], filters={"studyDbId": s["study"]},
+                            transformation=transformation, exclusions=exclusions))
+    formula = "(other - base) / base x 100" if a.percent == "change" else "(base - other) / base x 100"
+    change = means["other"] - means["base"]
+    scale = base["scale"]
+    # a base mean under 1e-9, or under 1e-9 of the largest absolute plot value behind it, counts as zero (round 3 (C); round 4 made
+    # it relative: values near 1e8 that cancel to an exact 0 leave a float residue near 1e-8, review of round 3; round 5 takes the
+    # plot values in both modes)
+    zero = abs(means["base"]) < 1e-9 or abs(means["base"]) < 1e-9 * scale
+    percent = None if zero or means["base"] < 0 else (change if a.percent == "change" else -change) / means["base"] * 100
+    missing = (None if percent is not None else
+               f"the base mean counts as zero ({means['base']!r}: under 1e-9 in absolute value, or under 1e-9 of the largest absolute plot "
+               f"value behind it, {scale!r}); a percent of it is not defined" if zero
+               else f"the base mean is negative ({means['base']!r}); a percent of it is not defined")
+    pair = f"{base['study']} vs {other['study']}"
+    not_used = (set(base["results"]) | set(other["results"])) - used_entries
+    under_any = (under["base"] | under["other"]) & not_used
+    percent_exclusions = [Exclusion(reason=why, count=count) for why, count in (
+        (f"{pair}: entries left out before comparing", len(left_out)),
+        (f"{pair}: entries under min_independent_n={a.min_independent_n}", len(under_any)),
+        (f"{pair}: entries with a mean in only one of {base['study']} and {other['study']}", len(not_used - left_out - under_any)))
+        if count]
+    claims.append(Claim(claim_id=_claim_id(base["table"].manifest.artifact_id, "ratio", "percent", other["table"].manifest.artifact_id[4:],
+                                           namespace=f"cmp-{variant}"),
+                        kind="ratio", value=percent, unit="%", missing_reason=missing,
+                        denominator=Denominator(name="entries used" if a.shared_entries_only else "entries of the base table",
+                                                n=len(entries["base"])),
+                        source_artifact_hashes=[base["table"].manifest.sha256, other["table"].manifest.sha256],
+                        filters={"studyDbId": pair},
+                        transformation=(f"percent {a.percent} = {formula}; base {base['study']}, other {other['study']}; each mean as "
+                                        f"stated in its own claim ({a.mean_of}); left out: {', '.join(sorted(left_out)) or 'none'}; "
+                                        f"{COMPARE_NOTE}" + "".join(f"; {c}" for c in caveats)),
+                        exclusions=percent_exclusions))
+    union = sorted(set(base["results"]) | set(other["results"]))
+    labels = {e: "; ".join(sorted({s["results"][e]["label"] for s in sides.values() if e in s["results"] and s["results"][e]["label"]}))
+              for e in union}
+    text_rows = [{"entry": e, "label": labels[e],
+                  "base_mean": "" if e not in base["results"] or base["results"][e]["mean"] is None else repr(base["results"][e]["mean"]),
+                  "other_mean": "" if e not in other["results"] or other["results"][e]["mean"] is None else repr(other["results"][e]["mean"]),
+                  "used": "true" if e in used_entries else "false", "reason": "" if e in used_entries else reason(e)} for e in union]
+    lineage = [f"lineage: compare_means by {a.by}: base {base['table'].manifest.artifact_id} sha256={base['table'].manifest.sha256}, "
+               f"other {other['table'].manifest.artifact_id} sha256={other['table'].manifest.sha256}",
+               f"percent {a.percent} = {formula} ({a.mean_of}; shared_entries_only={a.shared_entries_only})",
+               f"left out: {sorted(left_out) or 'none'}", f"min_independent_n={a.min_independent_n} (exclusion threshold)",
+               f"analysis target: {ANALYSIS_TARGET}"]
+    complete = base["table"].manifest.complete and other["table"].manifest.complete
+    manifest = registry.save_table(text_rows, kind="analysis_result", columns=COMPARE_RESULT_COLUMNS, complete=complete,
+                                   source_request_ids=[*base["table"].manifest.source_request_ids, *other["table"].manifest.source_request_ids],
+                                   study_ids=sorted(set(base["table"].manifest.study_ids) | set(other["table"].manifest.study_ids)),
+                                   variable_ids=[base["variable"]], measurement=base["table"].manifest.measurement, quality_notes=lineage)
+    data = {
+        "base_artifact_id": a.base_artifact_id, "other_artifact_id": a.other_artifact_id, "result_artifact_id": manifest.artifact_id,
+        "variable_id": base["variable"], "unit": base["unit"], "by": a.by, "percent": a.percent, "formula": formula, "mean_of": a.mean_of,
+        "base_study": base["study"], "other_study": other["study"], "base_mean": means["base"], "other_mean": means["other"],
+        "percent_value": percent, "display": {"base_mean": _display(means["base"]), "other_mean": _display(means["other"]),
+                                              "percent": _one_decimal(percent)},
+        "entries_used": sorted(used_entries), "only_in_base": sorted(eligible["base"] - eligible["other"]),
+        "only_in_other": sorted(eligible["other"] - eligible["base"]),
+        "not_used": [{"entry": r["entry"], "label": r["label"], "reason": r["reason"]} for r in text_rows if r["used"] == "false"],
+        "left_out": sorted(left_out), "claims": _claims_json(claims), "analysis_target": ANALYSIS_TARGET, "note": COMPARE_NOTE,
+        "value_policy": VALUE_POLICY,
+    }
+    warnings = [*caveats]
+    for side, s in sides.items():
+        if a.duplicate_policy != "reject" and s["classified"].duplicate_note:
+            warnings.append(f"{side}: {s['classified'].duplicate_note}")
+        if not s["classified"].units_known:
+            warnings.append(f"{side}: independence unknown: min_independent_n was applied to valid values, not to units")
+        warnings.extend(f"{side}: {w}" for w in _timing_warnings(s["table"], a.value))
+    return ToolResult(ok=True, data=data, artifact_ids=[a.base_artifact_id, a.other_artifact_id, manifest.artifact_id],
+                      complete=complete, warnings=warnings)
+
+
 # --------------------------------------------------------------------------
-# ONE registry of the eighteen tools, schemas and dispatch
+# ONE registry of the nineteen tools, schemas and dispatch
 # --------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -3937,9 +4171,10 @@ ANALYST_TOOLS: dict[str, AnalystToolSpec] = {spec.name: spec for spec in [
     AnalystToolSpec("stress_indices", StressIndicesArgs, tool_stress_indices),
     AnalystToolSpec("heterosis_population", HeterosisPopulationArgs, tool_heterosis_population),
     AnalystToolSpec("plot_basis_h2", PlotBasisH2Args, tool_plot_basis_h2),
+    AnalystToolSpec("compare_means", CompareMeansArgs, tool_compare_means),
 ]}
 ANALYST_TOOL_NAMES = list(ANALYST_TOOLS)
-assert len(ANALYST_TOOL_NAMES) == 18
+assert len(ANALYST_TOOL_NAMES) == 19
 
 
 def analyst_tool_schemas() -> list[dict[str, Any]]:

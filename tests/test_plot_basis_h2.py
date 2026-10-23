@@ -230,9 +230,9 @@ def test_every_number_the_answer_shows_is_backed_by_a_claim(tmp_path):
 
 
 def test_every_menu_and_prompt_names_the_tool():
-    assert "plot_basis_h2" in at.ANALYST_TOOL_NAMES and len(at.ANALYST_TOOL_NAMES) == 18
+    assert "plot_basis_h2" in at.ANALYST_TOOL_NAMES and len(at.ANALYST_TOOL_NAMES) == 19
     assert "plot_basis_h2" in an.NUMERIC_TOOLS and "plot_basis_h2" in an.DERIVING_TOOLS
-    assert "eighteen fixed tools" in an.ANALYST_SYSTEM_PROMPT and "plot_basis_h2(artifact_ids=" in an.ANALYST_SYSTEM_PROMPT
+    assert "nineteen fixed tools" in an.ANALYST_SYSTEM_PROMPT and "plot_basis_h2(artifact_ids=" in an.ANALYST_SYSTEM_PROMPT
     assert "plot_basis_h2" in co.ANALYST_ACTIONS and "plot_basis_h2(artifact_ids=" in co.COORDINATOR_SYSTEM_PROMPT
 
 

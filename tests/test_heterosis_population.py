@@ -325,9 +325,9 @@ def test_every_number_the_answer_shows_is_backed_by_a_claim(tmp_path):
 
 
 def test_every_menu_and_prompt_names_the_tool():
-    assert "heterosis_population" in at.ANALYST_TOOL_NAMES and len(at.ANALYST_TOOL_NAMES) == 18
+    assert "heterosis_population" in at.ANALYST_TOOL_NAMES and len(at.ANALYST_TOOL_NAMES) == 19
     assert "heterosis_population" in an.NUMERIC_TOOLS and "heterosis_population" in an.DERIVING_TOOLS
-    assert "eighteen fixed tools" in an.ANALYST_SYSTEM_PROMPT and "heterosis_population(artifact_ids=" in an.ANALYST_SYSTEM_PROMPT
+    assert "nineteen fixed tools" in an.ANALYST_SYSTEM_PROMPT and "heterosis_population(artifact_ids=" in an.ANALYST_SYSTEM_PROMPT
     assert "heterosis_population" in co.ANALYST_ACTIONS and "heterosis_population(artifact_ids=" in co.COORDINATOR_SYSTEM_PROMPT
     schema = next(s for s in at.analyst_tool_schemas() if s["name"] == "heterosis_population")
     assert schema["inputSchema"]["required"] == ["artifact_ids"] and "mid-parent" in schema["description"]

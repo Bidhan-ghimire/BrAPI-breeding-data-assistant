@@ -62,6 +62,15 @@ def _number(value: float | int | None) -> str:
     return format(value, ".12g")
 
 
+def _percent(value: float | None) -> str:
+    """compare_means' percent: one decimal, never "-0.0" (coach 2026-10-22 03:48 UTC, round 3 (C); the exact value stays in the
+    claim and the Full report)."""
+    if value is None:
+        return "Not available"
+    text = f"{value:.1f}"
+    return "0.0" if text == "-0.0" else text
+
+
 def _table(headers: list[str], rows: list[list[Any]]) -> list[str]:
     return ["| " + " | ".join(headers) + " |", "| " + " | ".join("---" for _ in headers) + " |",
             *["| " + " | ".join(_text(cell) for cell in row) + " |" for row in rows]]
@@ -782,12 +791,19 @@ def _plot_h2_block(claims: list[Claim], source_labels: dict[tuple[str, ...], str
     return lines, shown
 
 
+def _call_of(claim: Claim) -> str:
+    """compare_means' claims carry their call's namespace (cmp-<variant>) in the ID: two comparisons with the same counts but other
+    entries left out are two calls, never one table (review of round 3; round 4, 2026-10-22)."""
+    match = re.search(r"_(cmp-[0-9a-f]+)_", claim.claim_id)
+    return match.group(1) if match else ""
+
+
 def _numeric_blocks(claims: list[Claim], sources: _Sources, source_labels: dict[tuple[str, ...], str], *, focus_mean: bool = False) -> list[str]:
     groups: dict[tuple[Any, ...], list[Claim]] = defaultdict(list)
     for claim in claims:
         key = (tuple(sorted(claim.source_artifact_hashes)), tuple(sorted(claim.filters.items())), tuple(claim.grouping),
                claim.denominator.name, claim.denominator.n, claim.n_independent_units,
-               tuple((item.reason, item.count) for item in claim.exclusions), _claim_method(claim))
+               tuple((item.reason, item.count) for item in claim.exclusions), _claim_method(claim), _call_of(claim))
         groups[key].append(claim)
     lines: list[str] = []
     labels = {"mean": "Mean", "median": "Median", "min": "Minimum", "max": "Maximum", "sd": "Sample standard deviation", "count": "Count",
@@ -808,11 +824,19 @@ def _numeric_blocks(claims: list[Claim], sources: _Sources, source_labels: dict[
         rendered = []
         for claim in group:
             label = labels.get(claim.kind, claim.kind.title())
+            if claim.kind == "ratio" and claim.unit == "%":                     # compare_means' percent, never a bare "Ratio" (R2)
+                label = ("Percent reduction" if claim.transformation.startswith("percent reduction") else
+                         "Percent change" if claim.transformation.startswith("percent change") else
+                         "Share" if claim.transformation.startswith("share of") else "Percent")
+                left = re.search(r"; left out: ([^;]+)", claim.transformation)
+                if left and left.group(1) != "none":                            # round 4: two comparisons get their own labels
+                    label += f" (left out: {left.group(1)})"
             if claim.transformation == DISTINCT and len(claim.grouping) == 1:          # not a row count (count labels, item 6)
                 label = f"Distinct {claim.grouping[0]} values"
             elif claim.transformation in (ROW_COUNT, FREQUENCY):
                 label = "Rows"
-            value = _number(claim.value)
+            value = (_percent(claim.value) if claim.kind == "ratio" and claim.unit == "%"           # compare_means' own rule only
+                     and claim.transformation.startswith(("percent change =", "percent reduction =")) else _number(claim.value))
             if claim.value is None:
                 value += ": " + (claim.missing_reason or "reason not provided")
             if claim.kind != "count":
@@ -844,7 +868,7 @@ def _human_note(note: str) -> str:
     if text.startswith(_CODE_STOP):     # a stop written by code (catalog_answers, metadata_answers): its plain line;
         asked = text[len(_CODE_STOP):].strip()                                 # the exact check stays in the Full report
         return catalog_plain(asked) or metadata_plain(asked) or _CODE_STOP_OTHER
-    text = re.sub(r"^(?:(?:numeric_summary|group_stats|count_records|rank_entries|threshold_count|correlate_entry_means|analysis target|model(?: note)?)\s*:\s*)+", "", text, flags=re.I)
+    text = re.sub(r"^(?:(?:numeric_summary|group_stats|count_records|rank_entries|threshold_count|correlate_entry_means|compare_means|analysis target|model(?: note)?)\s*:\s*)+", "", text, flags=re.I)
     if "no complete artifact is eligible for analysis" in text.lower():
         return re.sub("no complete artifact is eligible for analysis", "No complete data table was available for analysis, so an answer could not be calculated.", text, flags=re.I)
     # Normalize only the two known unit-only messages; other caveat wording is preserved.

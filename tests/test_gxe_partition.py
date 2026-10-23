@@ -373,9 +373,9 @@ def test_the_answer_names_the_ranking_basis(tmp_path):
 
 
 def test_every_menu_and_prompt_names_the_tool():
-    assert "gxe_partition" in at.ANALYST_TOOL_NAMES and len(at.ANALYST_TOOL_NAMES) == 18
+    assert "gxe_partition" in at.ANALYST_TOOL_NAMES and len(at.ANALYST_TOOL_NAMES) == 19
     assert "gxe_partition" in an.NUMERIC_TOOLS and "gxe_partition" in an.DERIVING_TOOLS
-    assert "eighteen fixed tools" in an.ANALYST_SYSTEM_PROMPT and "gxe_partition" in an.ANALYST_SYSTEM_PROMPT
+    assert "nineteen fixed tools" in an.ANALYST_SYSTEM_PROMPT and "gxe_partition" in an.ANALYST_SYSTEM_PROMPT
     assert "basis=\"study_means\"" in an.ANALYST_SYSTEM_PROMPT
     assert "gxe_partition" in co.ANALYST_ACTIONS and "gxe_partition(artifact_ids=" in co.COORDINATOR_SYSTEM_PROMPT
     assert "basis=\"study_means\"" in co.COORDINATOR_SYSTEM_PROMPT
