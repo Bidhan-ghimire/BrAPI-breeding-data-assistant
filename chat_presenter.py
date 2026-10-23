@@ -341,7 +341,7 @@ def _correlation_block(claims: list[Claim], source_labels: dict[tuple[str, ...],
     tables it correlated and what was left out, then the descriptive sentence. Returns the lines and the IDs of the claims shown."""
     calls: dict[str, list[Claim]] = defaultdict(list)
     for claim in claims:
-        if claim.kind == "correlation":
+        if claim.kind == "correlation" and not _PAIR_CALL.match(claim.claim_id):     # compare_trials_paired's r is in its own table (T4)
             calls[claim.claim_id.rsplit("_correlation_", 1)[0]].append(claim)
     lines: list[str] = []
     shown: set[str] = set()
@@ -519,6 +519,72 @@ def _gxe_block(claims: list[Claim], source_labels: dict[tuple[str, ...], str]) -
     return lines, shown
 
 
+PAIR_SENTENCE = "Descriptive numbers only: a comparison of recorded entry means of two trials, not a recommendation."
+_PAIR_CALL = re.compile(r"^(clm_v2_[0-9a-f]{6}_[0-9]{4,}_pair-[0-9a-f]{8})_")
+_PAIR_STUDIES = re.compile(r" in study (.+); other: study (.+)$")
+
+
+def _pair_block(claims: list[Claim], source_labels: dict[tuple[str, ...], str]) -> tuple[list[str], set[str]]:
+    """T4 (2026-10-23): the claims of one compare_trials_paired call as the two trial means (Trial, Study, Mean of the entry
+    means), the mean difference and the percent, the paired and the Welch t (Test, t, df, p), Pearson r between the trials, the
+    SD and SE of the differences and what was left out, then the descriptive sentence. Returns the lines and the IDs shown."""
+    calls: dict[str, list[Claim]] = defaultdict(list)
+    for claim in claims:
+        match = _PAIR_CALL.match(claim.claim_id)
+        if match:
+            calls[match[1]].append(claim)
+    lines: list[str] = []
+    shown: set[str] = set()
+    for group in calls.values():
+        named = {claim.transformation.split(" | ")[0]: claim for claim in group}
+        base, other = named.get("mean of the base trial's entry means"), named.get("mean of the other trial's entry means")
+        if base is None or other is None:
+            continue
+        studies = _PAIR_STUDIES.search(base.transformation.split(" | ")[1])
+        unit = f" {_text(base.unit)}" if base.unit else ""
+        label = source_labels.get(tuple(sorted(base.source_artifact_hashes)), "")
+        means = [[side, studies[i] if studies else "", "n/a" if claim.value is None else _anova_number(claim.value)]
+                 for i, (side, claim) in enumerate((("Base", base), ("Other", other)), 1)]
+        lines += [f"**Paired comparison of entry means, {base.denominator.n} entries in both trials{label}**", "",
+                  *_table(["Trial", "Study", "Mean of the entry means"], means), ""]
+        difference = next((claim for head, claim in named.items() if head.startswith("mean difference ")), None)
+        sides = difference.transformation.split(" | ")[0][len("mean difference "):] if difference is not None else ""
+        if difference is not None and difference.value is not None:   # an ASCII minus: the Windows console's cp1252 has no U+2212 (round 2)
+            lines.append(f"Mean difference ({sides}) {_anova_number(difference.value)}{unit}.")
+        percent = next((claim for head, claim in named.items() if head.startswith("percent ")), None)
+        if percent is not None:
+            word = "reduction" if percent.transformation.startswith("percent reduction") else "change"
+            lines.append(f"Percent {word} of the base mean {_anova_number(percent.value)} %." if percent.value is not None else
+                         f"Percent {word} of the base mean not available ({_text(percent.missing_reason or 'reason not provided')}).")
+        tests = []
+        for text, head in (("Paired t: the entries as pairs", "paired t"), ("Welch t: two independent samples", "Welch t")):
+            t, df, p = named.get(head), named.get(f"{head}: df"), named.get(f"{head}: p")
+            if t is not None:
+                tests.append([text, "n/a" if t.value is None else _anova_number(t.value),
+                              "n/a" if df is None or df.value is None else str(int(df.value)) if head == "paired t" else _anova_number(df.value),
+                              _anova_cell("p", p)])
+        if tests:
+            lines += ["", *_table(["Test", f"t ({sides})" if sides else "t", "df", "p"], tests), ""]    # the sign's direction (review F1)
+        for head in ("paired t", "Welch t"):
+            claim = named.get(head)
+            if claim is not None and claim.value is None:
+                lines.append(f"{head[0].upper()}{head[1:]} not available: {_text(claim.missing_reason or 'reason not provided')}.")
+        r = named.get("Pearson r of the entry means between the trials")
+        if r is not None:
+            lines.append(f"Pearson r of the entry means between the trials {_correlation(r.value)}." if r.value is not None else
+                         f"Pearson r of the entry means between the trials not available ({_text(r.missing_reason or 'reason not provided')}).")
+        sd, se = named.get("SD of the differences"), named.get("SE of the mean difference")
+        if sd is not None and se is not None and sd.value is not None and se.value is not None:
+            lines.append(f"SD of the differences {_anova_number(sd.value)}{unit}; SE of the mean difference {_anova_number(se.value)}{unit}.")
+        left = "; ".join(f"{item.reason[len('entries '):].replace('left out: ', '')} {item.count}" for item in base.exclusions
+                         if item.reason.startswith("entries "))
+        if left:
+            lines.append(_text(f"Left out: {left}."))
+        lines += ["The paired t treats the entries as the sampling units; the plot error within each trial is not used.", "", PAIR_SENTENCE, ""]
+        shown |= {claim.claim_id for claim in group}
+    return lines, shown
+
+
 def _numeric_blocks(claims: list[Claim], sources: _Sources, source_labels: dict[tuple[str, ...], str], *, focus_mean: bool = False) -> list[str]:
     groups: dict[tuple[Any, ...], list[Claim]] = defaultdict(list)
     for claim in claims:
@@ -529,7 +595,7 @@ def _numeric_blocks(claims: list[Claim], sources: _Sources, source_labels: dict[
     lines: list[str] = []
     labels = {"mean": "Mean", "median": "Median", "min": "Minimum", "max": "Maximum", "sd": "Sample standard deviation", "count": "Count",
               "correlation": "Correlation", "anova": "ANOVA", "precision": "Precision", "variance": "Variance component",
-              "heritability": "Heritability"}
+              "heritability": "Heritability", "test": "Test"}
     for key, group in groups.items():
         first = group[0]
         hashes = key[0]
@@ -828,7 +894,8 @@ def answer_summary(controller: Any) -> str:
     correlations, in_correlation = _correlation_block(claims, source_labels)
     anova_lines, in_anova = _anova_block(claims, source_labels)
     gxe_lines, in_gxe = _gxe_block(claims, source_labels)
-    in_ranking |= in_threshold | in_correlation | in_anova | in_gxe
+    pair_lines, in_pair = _pair_block(claims, source_labels)
+    in_ranking |= in_threshold | in_correlation | in_anova | in_gxe | in_pair
     # a mean the ranking table shows is not shown again (group_stats on the same table states the same entry mean; review)
     ranked_means = {(tuple(sorted(c.source_artifact_hashes)), tuple(sorted(c.filters.items())), c.value)
                     for c in claims if c.claim_id in in_ranking and c.kind == "mean" and c.claim_id not in in_threshold}
@@ -844,7 +911,7 @@ def answer_summary(controller: Any) -> str:
             buckets[(tuple(sorted(claim.source_artifact_hashes)), claim.grouping[0], claim.denominator.name, claim.denominator.n)].append(claim)
         else:
             other.append(claim)
-    lines: list[str] = [*ranking, *thresholds, *correlations, *anova_lines, *gxe_lines]
+    lines: list[str] = [*ranking, *thresholds, *correlations, *anova_lines, *gxe_lines, *pair_lines]
     in_catalog_titles: set[str] = set()              # distinct counts a catalog block's title already leads with
     for key, group in buckets.items():
         block = _catalog_block(group, sources, source_labels.get(key[0], ""), focus_count=focus_count)

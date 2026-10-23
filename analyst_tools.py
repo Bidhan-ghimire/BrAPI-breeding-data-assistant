@@ -505,6 +505,21 @@ class GxePartitionArgs(ToolArgs):
     allow_incomplete: bool = Field(default=False)
 
 
+class CompareTrialsPairedArgs(ToolArgs):
+    base_artifact_id: ArtifactId = Field(description="the measurements of the reference trial: ONE study (a registered handle such as "
+                                                     "art_3f9a2c_0001); the change is stated relative to its mean")
+    other_artifact_id: ArtifactId = Field(description="the measurements of the trial compared with it: ONE other study, the same variable")
+    by: str = Field(default="germplasmDbId", description="the entry ID column both tables share (names are carried as labels)")
+    value: str = Field(default=VALUE_COL)
+    percent: Literal["change", "reduction"] = Field(default="change", description="change: the differences other - base and the percent "
+                                                    "100 x (mean other - mean base) / mean base; reduction: base - other and 100 x (mean "
+                                                    "base - mean other) / mean base; as the question words it")
+    exclude: list[str] = Field(default_factory=list, max_length=50, description="entries (exact ID or exact name) left out, for example the checks")
+    name_prefix: str | None = Field(default=None, min_length=1, description="keep only the entries whose name starts with this exact text, for example PH17.")
+    duplicate_policy: DuplicatePolicy = Field(default="reject", description="what to do with repeated measurements of one plot")
+    allow_incomplete: bool = Field(default=False)
+
+
 # --------------------------------------------------------------------------
 # The thirteen tools
 # --------------------------------------------------------------------------
@@ -1326,6 +1341,8 @@ class _EntryMeans:
     classified: Classified
     dropped: set[str]                               # entries without a mean under entries=in_every_study (review: saved and named)
     manifest_only: list[str]                        # studies the manifest lists that have no row (review: said, not ignored)
+    peaks: dict[str, float]                         # entry -> the largest absolute RAW value behind its mean, before any averaging (T4)
+    no_entry_values: int                            # valid values with a study but no entry ID (T4 review F2: counted, not dropped)
 
 
 def _entry_means(table: Table, a: CorrelateEntryMeansArgs, label_col: str | None) -> _EntryMeans:
@@ -1357,22 +1374,29 @@ def _entry_means(table: Table, a: CorrelateEntryMeansArgs, label_col: str | None
             if label_col and row.get(label_col, ""):
                 labels[row[a.by]].add(row[label_col])
     per_study: dict[str, dict[str, list[float]]] = {}
+    peaks: dict[str, float] = {}
+    no_entry_values = 0
     for row, number in used:
         if row.get(a.by, "") and row.get("studyDbId", ""):
             per_study.setdefault(row[a.by], {}).setdefault(row["studyDbId"], []).append(number)
+        elif row.get("studyDbId", ""):
+            no_entry_values += 1
+    for row, number in classified.valid:                     # the raw values: mean_per_unit's plot averages can be residue (T4 review 2, F1)
+        if row.get(a.by, "") and row.get("studyDbId", ""):
+            peaks[row[a.by]] = max(peaks.get(row[a.by], 0.0), abs(number))
     means: dict[str, tuple[float, int, int]] = {}
     not_in_every_study = 0
     dropped: set[str] = set()
     for entry in sorted(per_study):
         study_means = {study: statistics.fmean(values) for study, values in per_study[entry].items()}
-        if a.entries == "in_every_study" and len(study_means) < len(studies):
+        if getattr(a, "entries", "in_every_study") == "in_every_study" and len(study_means) < len(studies):   # T4: one study a side
             not_in_every_study += 1
             dropped.add(entry)
             continue
         means[entry] = (statistics.fmean(study_means.values()), sum(len(v) for v in per_study[entry].values()), len(study_means))
     manifest_only = sorted(set(table.manifest.study_ids) - studies)
     return _EntryMeans(table, variable, means, labels, sorted(studies), not_in_every_study, no_study_rows, transformation, caveat, classified,
-                       dropped, manifest_only)
+                       dropped, manifest_only, peaks, no_entry_values)
 
 
 def _tie_key(scaled: float) -> float:
@@ -1487,6 +1511,8 @@ def tool_correlate_entry_means(registry: ArtifactRegistry, a: CorrelateEntryMean
         exclusions += [Exclusion(reason=f"{side}: {item.reason}", count=item.count) for item in _exclusions(e.classified)]
         if e.no_study_rows:
             exclusions.append(Exclusion(reason=f"{side}: rows with an empty studyDbId", count=e.no_study_rows))
+        if e.no_entry_values:                                 # T4 review F2: a valid value without an entry ID is counted
+            exclusions.append(Exclusion(reason=f"{side}: rows with an empty {a.by}", count=e.no_entry_values))
         if e.not_in_every_study:
             exclusions.append(Exclusion(reason=f"entries not in every study of {side}", count=e.not_in_every_study))
     removed = sum(1 for e in excluded if e in x.means or e in y.means)              # named entries that had a mean to lose (review)
@@ -2618,8 +2644,248 @@ def tool_gxe_partition(registry: ArtifactRegistry, a: GxePartitionArgs) -> ToolR
                       warnings=warnings)
 
 
+# T4 (coach 2026-10-23 01:51 UTC, NEXT 4; research build order T4): ONE trait in two studies, on the entries with a mean in both.
+# Measured first (t4_compare_trials_paired_20261023/UNLOCKS.md): 12 benchmark rows in one call (the paired t of C33.2, D14.6 and
+# D16.1; the means and the percent of C27.1-2, C30.1-4, C33.1, C34.1 and D14.1) and 3 in one call per pair. compare_means (frozen,
+# item (12)) is not used.
+PAIR_NOTE = "descriptive comparison of recorded entry means of two trials, not a recommendation"
+PAIR_ZERO = 1e-12           # a mean or an SD at or below this share of the largest plot value behind the means is 0: float residue
+PAIR_PAIRED_NOTE = "the entries as the sampling units: the plot error within each trial is not used (not a mixed-model contrast)"
+PAIR_WELCH_NOTE = "the same entries as two independent samples (ignores the pairing)"
+PAIR_RESULT_COLUMNS = {
+    "entry": "exact entry ID", "label": "name carried from the label column, if any",
+    "paired": "true when the entry has a mean in both trials and is compared",
+    "left_out": "why an entry is not compared ('' when paired): only in base, only in other, excluded, outside the name prefix",
+    "base_mean": "the entry's mean in the base trial, full precision ('' = none)", "base_n_values": "valid values behind base_mean",
+    "other_mean": "the entry's mean in the other trial, full precision ('' = none)", "other_n_values": "valid values behind other_mean",
+    "difference": "other_mean - base_mean (base_mean - other_mean under percent='reduction'), full precision ('' when not paired)",
+    "percent": "100 x difference / base_mean ('' when not paired, or when base_mean is 0 or negative)",
+    "percent_note": "why percent is empty for a paired entry ('' otherwise)",
+}
+
+
+def _scaled_sd(values: list[float]) -> float:
+    """The sample SD (n - 1), computed on the values divided by their largest absolute value: squares of 1e180 would overflow and
+    squares of 1e-160 underflow (T4)."""
+    scale = max(abs(v) for v in values)
+    if scale == 0:
+        return 0.0
+    scaled = [v / scale for v in values]
+    mean = math.fsum(scaled) / len(scaled)
+    return scale * math.sqrt(math.fsum((v - mean) ** 2 for v in scaled) / (len(scaled) - 1))
+
+
+def tool_compare_trials_paired(registry: ArtifactRegistry, a: CompareTrialsPairedArgs) -> ToolResult:
+    """The change of ONE trait between two studies (trials), on the entries with a mean in both (research build order T4): the
+    mean of the entry means in each trial, the mean difference and the percent of the base mean (percent="change": other - base;
+    "reduction": base - other), the paired t on the entries' differences (n - 1 df) with its two-sided p, Welch's t with the
+    Welch-Satterthwaite df and its p (the same entries as two independent samples, ignoring the pairing), the SD and SE of the
+    differences and Pearson r of the entry means between the trials. An entry's mean in a trial is the mean of its valid values
+    there. Named entries can be left out (exclude) and one family kept (name_prefix). Undefined numbers carry their reason: the
+    percent when the base mean is 0 or any entry mean is negative (not a ratio scale), t when every entry changed by the same
+    amount, r when one trial's entry means are all equal; 0 and equal are judged against the largest plot value behind the means. Refused, never guessed: fewer than 3 shared entries; a table with other than one study; the same study, table
+    or rows twice; two variables; a value of 1e200 or more; several values of one plot unless duplicate_policy='mean_per_unit'.
+    Every entry and why it was or was not compared is saved as an analysis_result artifact. Descriptive numbers of recorded
+    values, never a choice of entries or a judgement such as an acceptable harvest date."""
+    base_table, other_table = _load(registry, a.base_artifact_id), _load(registry, a.other_artifact_id)
+    if base_table.manifest.artifact_id == other_table.manifest.artifact_id or base_table.manifest.sha256 == other_table.manifest.sha256:
+        raise AnalystError("invalid_argument", f"{base_table.manifest.artifact_id} and {other_table.manifest.artifact_id} hold the same rows; "
+                                               "compare two different studies")
+    if a.by.endswith("Name"):
+        raise AnalystError("invalid_argument", f"pair by the ID column, not {a.by!r}; names are carried as labels")
+    label_col = LABEL_FOR.get(a.by)
+    label_col = label_col if label_col in base_table.manifest.columns and label_col in other_table.manifest.columns else None
+    if a.name_prefix is not None and label_col is None:
+        raise AnalystError("invalid_argument", f"name_prefix needs a name column beside {a.by!r} in both tables")
+    base, other = _entry_means(base_table, a, label_col), _entry_means(other_table, a, label_col)
+    for side, e in (("base", base), ("other", other)):
+        if len(e.studies) != 1:
+            raise AnalystError("unsupported", f"the {side} table {e.table.manifest.artifact_id} holds {len(e.studies)} studies "
+                                              f"({', '.join(e.studies) or 'none'}); each side is ONE study: split it with filter_rows on studyDbId")
+    if base.studies == other.studies:
+        raise AnalystError("unsupported", f"both tables hold the same study ({base.studies[0]}); compare two different studies")
+    if base.variable != other.variable:
+        raise AnalystError("unsupported", f"the base table measures {base.variable} and the other {other.variable}; a paired comparison needs "
+                                          "ONE variable (one trait) in both studies")
+    names = {entry: base.labels.get(entry, set()) | other.labels.get(entry, set()) for entry in set(base.labels) | set(other.labels)}
+    excluded = _entries_in_any([base_table, other_table], a.by, label_col, a.exclude, "exclude")
+    candidates = sorted(set(base.means) | set(other.means))
+    outside = {e for e in candidates if a.name_prefix is not None and e not in excluded and not any(n.startswith(a.name_prefix) for n in names.get(e, ()))}
+    kept = [e for e in candidates if e not in excluded and e not in outside]
+    paired = [e for e in kept if e in base.means and e in other.means]
+    only_base = sum(1 for e in kept if e in base.means and e not in other.means)
+    only_other = sum(1 for e in kept if e in other.means and e not in base.means)
+    removed = sum(1 for e in excluded if e in base.means or e in other.means)              # named entries that had a mean to lose
+    if len(paired) < 3:
+        raise AnalystError("unsupported", f"{len(paired)} entries have a mean in both trials; a paired comparison needs at least 3 (only in "
+                                          f"base: {only_base}, only in other: {only_other}, excluded: {removed}, outside the name prefix: "
+                                          f"{len(outside)})")
+
+    g = len(paired)
+    sign = -1.0 if a.percent == "reduction" else 1.0
+    direction = "base - other" if a.percent == "reduction" else "other - base"
+    first_side, second_side = direction.split(" - ")
+    xs, ys = [base.means[e][0] for e in paired], [other.means[e][0] for e in paired]
+    diffs = [sign * (y - x) for x, y in zip(xs, ys)]
+    mean_base, mean_other, dbar = math.fsum(xs) / g, math.fsum(ys) / g, math.fsum(diffs) / g
+    # 0 and equal are judged against the largest plot value behind the paired means, never against the means themselves: when an
+    # entry's plot values cancel (0.1 + 0.2 - 0.3) its mean is residue, and round 1 stated a percent, t and r from it (round 2)
+    base_peak, other_peak = max(base.peaks[e] for e in paired), max(other.peaks[e] for e in paired)
+    scale = max(base_peak, other_peak)
+    negative = (sum(1 for v in xs if v < -PAIR_ZERO * base_peak), sum(1 for v in ys if v < -PAIR_ZERO * other_peak))
+    not_ratio = any(negative)                                 # on either side the trait then has no ratio scale (review 2, F2)
+    # the zero rule (compare_means round 4, review Q1): an exact 0 that float arithmetic leaves as 2e-9 must give no percent
+    if not_ratio:
+        percent, percent_reason = None, (f"the entry means include negative values ({negative[0]} in the base trial, {negative[1]} in the "
+                                         "other): the values are not on a ratio scale, so a percent is not stated")
+    elif mean_base > PAIR_ZERO * base_peak:
+        percent, percent_reason = 100 * dbar / mean_base, None
+    else:
+        percent, percent_reason = None, "the base trial's mean is 0 at the data's precision: a percent of it is undefined"
+    sd = _scaled_sd(diffs)
+    t = p = t_reason = None
+    if sd <= PAIR_ZERO * scale:
+        sd = 0.0
+        t_reason = ("every paired entry changed by the same amount (the SD of the differences is 0 at the data's precision): the paired t "
+                    "is undefined")
+    else:
+        t = dbar / (sd / math.sqrt(g))
+        p = pvalues.t_two_sided_p(t, g - 1)
+    se = sd / math.sqrt(g)
+    sx, sy = _scaled_sd(xs), _scaled_sd(ys)
+    welch_t = welch_df = welch_p = welch_reason = None
+    if sx <= PAIR_ZERO * base_peak and sy <= PAIR_ZERO * other_peak:
+        welch_reason = "the entry means are all equal within each trial (both SDs are 0 at the data's precision): Welch's t is undefined"
+    else:
+        vx, vy = (sx / scale) ** 2 / g, (sy / scale) ** 2 / g          # divided by the scale squared: neither overflows nor underflows
+        welch_t = (dbar / scale) / math.sqrt(vx + vy)
+        welch_df = (vx + vy) ** 2 / ((vx ** 2 + vy ** 2) / (g - 1))
+        welch_p = pvalues.t_two_sided_p(welch_t, welch_df)
+    r = r_reason = None
+    for side, values, side_peak in (("base", xs, base_peak), ("other", ys, other_peak)):
+        if len({_tie_key(v / side_peak) if side_peak else 0.0 for v in values}) == 1:
+            r_reason = f"the {side} trial's entry means are all equal at 12 significant digits over the {g} paired entries: r is undefined"
+            break
+    if r_reason is None:
+        top_x, top_y = max(abs(v) for v in xs), max(abs(v) for v in ys)
+        r = statistics.correlation([v / top_x for v in xs], [v / top_y for v in ys])
+
+    exclusions: list[Exclusion] = []
+    for side, e in (("base", base), ("other", other)):
+        exclusions += [Exclusion(reason=f"{side}: {item.reason}", count=item.count) for item in _exclusions(e.classified)]
+        if e.no_study_rows:
+            exclusions.append(Exclusion(reason=f"{side}: rows with an empty studyDbId", count=e.no_study_rows))
+        if e.no_entry_values:                                 # review F2: a valid value without an entry ID is counted
+            exclusions.append(Exclusion(reason=f"{side}: rows with an empty {a.by}", count=e.no_entry_values))
+    for reason, n in (("entries only in the base trial", only_base), ("entries only in the other trial", only_other),
+                      ("entries left out: excluded", removed), ("entries left out: outside the name prefix", len(outside))):
+        if n:
+            exclusions.append(Exclusion(reason=reason, count=n))
+    unit = base_table.manifest.measurement.unit
+    trait = base_table.manifest.measurement.trait or base.variable
+    tail = " | " + " | ".join([f"base: {trait}{f' ({unit})' if unit else ''} in study {base.studies[0]}; other: study {other.studies[0]}",
+                               f"{g} entries with a mean in both trials",
+                               f"entry mean = the mean of the entry's valid values in the trial; base: {base.transformation}; other: "
+                               f"{other.transformation}", PAIR_NOTE])
+    variant = hashlib.sha256(json.dumps([base_table.manifest.sha256, other_table.manifest.sha256, a.by, a.value, a.percent, sorted(excluded),
+                                         a.name_prefix, a.duplicate_policy, a.allow_incomplete]).encode("utf-8")).hexdigest()[:8]
+    namespace = f"pair-{variant}"
+    aid = base_table.manifest.artifact_id
+    paired_text = f"paired t = mean difference {direction} / (SD of the differences / sqrt(n)), n - 1 df; {PAIR_PAIRED_NOTE}"
+    welch_text = (f"Welch t = (mean {first_side} - mean {second_side}) / sqrt(s2 base / n + s2 other / n), Welch-Satterthwaite df; "
+                  f"{PAIR_WELCH_NOTE}")
+    common = {"denominator": Denominator(name="entries with a mean in both trials (pairs)", n=g), "n_independent_units": None,
+              "source_artifact_hashes": [base_table.manifest.sha256, other_table.manifest.sha256], "grouping": [a.by], "exclusions": exclusions}
+    # the headline numbers first: the coordinator's view keeps 20 claims (coordination_runtime VIEW_CLAIMS)
+    claims = [
+        Claim(claim_id=_claim_id(aid, "mean", "base", namespace=namespace), kind="mean", value=mean_base, unit=unit,
+              transformation=f"mean of the base trial's entry means{tail}", **common),
+        Claim(claim_id=_claim_id(aid, "mean", "other", namespace=namespace), kind="mean", value=mean_other, unit=unit,
+              transformation=f"mean of the other trial's entry means{tail}", **common),
+        Claim(claim_id=_claim_id(aid, "ratio", "percent", namespace=namespace), kind="ratio", value=percent, unit="%", missing_reason=percent_reason,
+              transformation=f"percent {a.percent} of the mean{tail} | percent {a.percent} = 100 x (mean {first_side} - mean {second_side}) / mean base",
+              **common),
+        Claim(claim_id=_claim_id(aid, "mean", "difference", namespace=namespace), kind="mean", value=dbar, unit=unit,
+              transformation=f"mean difference {direction}{tail} | the mean of the entries' differences {direction} (= mean {first_side} - mean "
+                             f"{second_side})", **common),
+        Claim(claim_id=_claim_id(aid, "test", "paired", "t", namespace=namespace), kind="test", value=t, missing_reason=t_reason,
+              transformation=f"paired t{tail} | {paired_text}", **common),
+        Claim(claim_id=_claim_id(aid, "test", "paired", "p", namespace=namespace), kind="test", value=p, missing_reason=t_reason,
+              transformation=f"paired t: p{tail} | two-sided" + (P_UNDERFLOW if p == 0 else ""), **common),
+        Claim(claim_id=_claim_id(aid, "test", "paired", "df", namespace=namespace), kind="test", value=g - 1,
+              transformation=f"paired t: df{tail}", **common),
+        Claim(claim_id=_claim_id(aid, "test", "welch", "t", namespace=namespace), kind="test", value=welch_t, missing_reason=welch_reason,
+              transformation=f"Welch t{tail} | {welch_text}", **common),
+        Claim(claim_id=_claim_id(aid, "test", "welch", "p", namespace=namespace), kind="test", value=welch_p, missing_reason=welch_reason,
+              transformation=f"Welch t: p{tail} | two-sided" + (P_UNDERFLOW if welch_p == 0 else ""), **common),
+        Claim(claim_id=_claim_id(aid, "test", "welch", "df", namespace=namespace), kind="test", value=welch_df, missing_reason=welch_reason,
+              transformation=f"Welch t: df{tail} | Welch-Satterthwaite", **common),
+        Claim(claim_id=_claim_id(aid, "correlation", "pearson", namespace=namespace), kind="correlation", value=r, missing_reason=r_reason,
+              transformation=f"Pearson r of the entry means between the trials{tail}", **common),
+        Claim(claim_id=_claim_id(aid, "precision", "se", namespace=namespace), kind="precision", value=se, unit=unit,
+              transformation=f"SE of the mean difference{tail} | SD of the differences / sqrt(n)", **common),
+        Claim(claim_id=_claim_id(aid, "sd", "differences", namespace=namespace), kind="sd", value=sd, unit=unit,
+              transformation=f"SD of the differences{tail} | sample SD (n - 1) of the entries' differences {direction}", **common),
+        Claim(claim_id=_claim_id(aid, "count", "pairs", namespace=namespace), kind="count", value=g,
+              transformation=f"entries in both trials{tail}", **common),
+    ]
+
+    paired_set = set(paired)
+    label = {entry: "; ".join(sorted(found)) for entry, found in names.items()}
+    result_rows = []
+    for e in sorted(set(candidates) | excluded):
+        bm, om = base.means.get(e), other.means.get(e)
+        why = ("excluded" if e in excluded else "outside the name prefix" if e in outside else "" if e in paired_set
+               else "only in base" if bm is not None else "only in other")
+        difference = percent_cell = note = ""
+        if e in paired_set:
+            d = sign * (om[0] - bm[0])
+            difference = repr(d)
+            if not_ratio:                                     # the rows follow the headline (review 2, F2)
+                note = "the entry means include negative values: no percent"
+            elif bm[0] > PAIR_ZERO * base.peaks[e]:
+                percent_cell = repr(100 * d / bm[0])
+            else:
+                note = "base mean is 0: no percent"
+        result_rows.append({"entry": e, "label": label.get(e, ""), "paired": "true" if e in paired_set else "false", "left_out": why,
+                            "base_mean": "" if bm is None else repr(bm[0]), "base_n_values": "" if bm is None else str(bm[1]),
+                            "other_mean": "" if om is None else repr(om[0]), "other_n_values": "" if om is None else str(om[1]),
+                            "difference": difference, "percent": percent_cell, "percent_note": note})
+    lineage = [f"lineage: compare_trials_paired of {base_table.manifest.artifact_id} sha256={base_table.manifest.sha256} (base) and "
+               f"{other_table.manifest.artifact_id} sha256={other_table.manifest.sha256} (other)", f"percent rule: {a.percent} ({direction})",
+               f"left out: excluded {sorted(excluded)}, name_prefix {a.name_prefix!r}", f"analysis target: {ANALYSIS_TARGET}"]
+    complete = bool(base_table.manifest.complete and other_table.manifest.complete)
+    manifest = registry.save_table(result_rows, kind="analysis_result", columns=PAIR_RESULT_COLUMNS, complete=complete,
+                                   source_request_ids=list(dict.fromkeys([*base_table.manifest.source_request_ids, *other_table.manifest.source_request_ids])),
+                                   study_ids=[base.studies[0], other.studies[0]], variable_ids=[base.variable],
+                                   measurement=base_table.manifest.measurement, quality_notes=lineage)
+    data = {"base_artifact_id": base_table.manifest.artifact_id, "other_artifact_id": other_table.manifest.artifact_id,
+            "result_artifact_id": manifest.artifact_id, "base_study": base.studies[0], "other_study": other.studies[0], "variable_id": base.variable,
+            "unit": unit, "percent_rule": a.percent, "direction": direction, "n_pairs": g, "mean_base": mean_base, "mean_other": mean_other,
+            "mean_difference": dbar, "percent": percent, "percent_missing_reason": percent_reason, "sd_difference": sd, "se_difference": se,
+            "paired": {"t": t, "df": g - 1, "p": p, "missing_reason": t_reason},
+            "welch": {"t": welch_t, "df": welch_df, "p": welch_p, "missing_reason": welch_reason},
+            "pearson_r": r, "pearson_missing_reason": r_reason, "unpaired": {"only in base": only_base, "only in other": only_other},
+            "left_out": {"excluded": removed, "outside the name prefix": len(outside)}, "excluded_named": sorted(excluded),
+            "claims": _claims_json(claims), "note": PAIR_NOTE, "paired_text": paired_text, "welch_text": welch_text,
+            "analysis_target": ANALYSIS_TARGET, "value_policy": VALUE_POLICY}
+    warnings = [w for e in (base, other) for w in (e.caveat, e.classified.duplicate_note if a.duplicate_policy != "reject" else None) if w]
+    if only_base or only_other or removed or outside:
+        warnings.append(f"{only_base + only_other + removed + len(outside)} entries not compared (only in one trial, excluded or outside the "
+                        f"name prefix); {g} paired")
+    for side, e in (("base", base), ("other", other)):
+        if not e.classified.units_known:
+            warnings.append(f"{side}: independence unknown: some valid rows name no observation unit")
+        if e.manifest_only:
+            warnings.append(f"{side}: the table's manifest lists {'a study' if len(e.manifest_only) == 1 else 'studies'} with no row: "
+                            f"{', '.join(e.manifest_only)}")
+        warnings.extend(f"{side}: {w}" for w in _timing_warnings(e.table, a.value))
+    return ToolResult(ok=True, data=data, artifact_ids=[base_table.manifest.artifact_id, other_table.manifest.artifact_id, manifest.artifact_id],
+                      complete=complete, warnings=warnings)
+
+
 # --------------------------------------------------------------------------
-# ONE registry of the fourteen tools, schemas and dispatch
+# ONE registry of the fifteen tools, schemas and dispatch
 # --------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -2651,9 +2917,10 @@ ANALYST_TOOLS: dict[str, AnalystToolSpec] = {spec.name: spec for spec in [
     AnalystToolSpec("plot_design", PlotDesignArgs, tool_plot_design),
     AnalystToolSpec("anova_trial", AnovaTrialArgs, tool_anova_trial),
     AnalystToolSpec("gxe_partition", GxePartitionArgs, tool_gxe_partition),
+    AnalystToolSpec("compare_trials_paired", CompareTrialsPairedArgs, tool_compare_trials_paired),
 ]}
 ANALYST_TOOL_NAMES = list(ANALYST_TOOLS)
-assert len(ANALYST_TOOL_NAMES) == 14
+assert len(ANALYST_TOOL_NAMES) == 15
 
 
 def analyst_tool_schemas() -> list[dict[str, Any]]:

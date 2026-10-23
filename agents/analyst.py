@@ -30,15 +30,15 @@ __all__ = [
 
 FIXTURE_DIR = PART2_DIR / "tests" / "fixtures" / "model_analyst"
 NUMERIC_TOOLS = frozenset({"numeric_summary", "group_stats", "count_records", "rank_entries", "threshold_count", "correlate_entry_means", "anova_trial",
-                           "gxe_partition"})   # return claims
+                           "gxe_partition", "compare_trials_paired"})   # return claims
 DERIVING_TOOLS = frozenset({"group_stats", "filter_rows", "concat_tables", "rank_entries", "threshold_count", "correlate_entry_means", "plot_design", "anova_trial",
-                            "gxe_partition"})       # save new artifacts
+                            "gxe_partition", "compare_trials_paired"})       # save new artifacts
 # Review 2 of R1 (2026-10-21): without "highest-yielding" this filter let "the highest-yielding clone, so it should be advanced"
 # through, so it stays until Bidhan decides how advice that rides on an ordering is caught (asked, not changed).
 _SUPERIORITY = re.compile(r"\b(best|superior|outperform\w*|top[- ]performing|winner|genetically (better|superior)|highest[- ]yielding)\b", re.IGNORECASE)
 
 ANALYST_SYSTEM_PROMPT = """You are the Analyst for a read-only plant-breeding database. You compute NOTHING yourself.
-You have fourteen fixed tools that read registered artifacts (handles like art_3f9a2c_0001) and return typed claims.
+You have fifteen fixed tools that read registered artifacts (handles like art_3f9a2c_0001) and return typed claims.
 Rules:
 1. Start with table_info for EVERY supplied artifact. Check that it is complete, that it measures the variable the
    question is about (trait, unit, timepoint), and whether duplicates or unknown independence are reported.
@@ -56,7 +56,11 @@ Rules:
    person's answer asks for it pass cells="mean" (the mean of the cell's plots) or cells="single_only" (only the entries with exactly
    one plot in every rep), never choose one yourself; for the genotype x environment partition of one trait across several
    studies call gxe_partition(artifact_ids=[each study's table]) (plot_design's tables add the pooled error and the variance
-   components); to rank entries by the mean of their per-study means (each study weighted equally) call
+   components); for the change of one trait between two studies on the entries in both (the two trial means, the
+   difference, the percent change or reduction, the paired t, Welch's t, the correlation between the trials) call
+   compare_trials_paired(base_artifact_id=<the reference study's table>, other_artifact_id=<the other study's table>,
+   percent="change" (other - base) or "reduction" (base - other) as the question words it); to rank entries by the mean of
+   their per-study means (each study weighted equally) call
    rank_entries(basis="study_means") on a table of every study (concat_tables); for catalog questions call count_records. Use exact column names from table_info. Never pass a file path, never invent a handle, never
    ask for a tool you do not have.
 4. If a tool refuses (duplicates, incomplete data), read its message: either name the aggregation rule it asks for

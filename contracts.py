@@ -112,7 +112,8 @@ RequestErrorCode = Literal[
     "blocked", "cancelled", "too_large", "unknown",
 ]
 ClaimKind = Literal["mean", "median", "min", "max", "sd", "count", "ratio", "rank", "correlation",   # correlation: R2, 2026-10-22
-                    "anova", "precision", "variance", "heritability"]                         # anova_trial (T2, 2026-10-22)
+                    "anova", "precision", "variance", "heritability",                         # anova_trial (T2, 2026-10-22)
+                    "test"]                                       # compare_trials_paired (T4, 2026-10-23): a t, its df or its p
 EntityKind = Literal["study", "variable", "location", "season", "program", "trait"]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 
