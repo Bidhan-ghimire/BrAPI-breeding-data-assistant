@@ -580,9 +580,10 @@ def _pair_block(claims: list[Claim], source_labels: dict[tuple[str, ...], str]) 
                          if item.reason.startswith("entries "))
         if left:
             lines.append(_text(f"Left out: {left}."))
-        named_out = next((part for part in base.transformation.split(" | ") if part.startswith("left out by name: ")), None)
-        if named_out:
-            lines.append(_text(f"L{named_out[1:]}."))
+        for start in ("left out by name: ", "left out by prefix: "):     # the person's names, then the prefix kept (coach 07:48 UTC)
+            named_out = next((part for part in base.transformation.split(" | ") if part.startswith(start)), None)
+            if named_out:
+                lines.append(_text(f"L{named_out[1:]}."))
         lines += ["The paired t treats the entries as the sampling units; the plot error within each trial is not used.", "", PAIR_SENTENCE, ""]
         shown |= {claim.claim_id for claim in group}
     return lines, shown
@@ -644,9 +645,10 @@ def _stress_block(claims: list[Claim], sources: _Sources, source_labels: dict[tu
                          if item.reason.startswith("entries "))
         if left:
             lines.append(_text(f"Left out: {left}."))
-        named_out = next((part for part in mean_p.transformation.split(" | ") if part.startswith("left out by name: ")), None)
-        if named_out:
-            lines.append(_text(f"L{named_out[1:]}."))
+        for start in ("left out by name: ", "left out by prefix: "):     # the person's names, then the prefix kept (coach 07:48 UTC)
+            named_out = next((part for part in mean_p.transformation.split(" | ") if part.startswith(start)), None)
+            if named_out:
+                lines.append(_text(f"L{named_out[1:]}."))
         lines += ["", STRESS_SENTENCE, ""]
         shown |= {claim.claim_id for claim in group}
     return lines, shown

@@ -93,7 +93,9 @@ def test_a_named_entry_without_a_mean_is_named_apart(registry, tool):
                                              second: save(registry, "S2", trial(4.0, seed=0.4), empty=("E7",)),
                                              "exclude": ["clone E5", "clone E7"]})
     assert r.ok, r.error
-    assert all("left out by name: clone E5 (1 entry); named, no mean in either trial: clone E7" in k.transformation for k in claims(r))
+    # coach 07:48 UTC (5): the category's words name the trait ("named, no <trait> value in either trial")
+    assert all("left out by name: clone E5 (1 entry); named, no SYNTHETIC yield value in either trial: clone E7" in k.transformation
+               for k in claims(r))
 
 
 @pytest.mark.parametrize("tool", sorted(TOOLS))

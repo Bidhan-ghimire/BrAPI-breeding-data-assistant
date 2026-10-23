@@ -169,10 +169,12 @@ def test_every_table_argument_of_every_tool_is_checked_before_the_tool_runs():
     """Coach 2026-10-22 03:48 UTC (answer 1): the guard checks every argument that carries a table handle and refuses a table
     never supplied before the tool runs. On dev these are artifact_id (10 tools with anova_trial, and plot_design's measurements table), artifact_ids
     (concat_tables, correlate_entry_means, gxe_partition), roster_artifact_id (missing_report, plot_design), and
-    base_artifact_id and other_artifact_id (compare_trials_paired, T4), and nonstress_artifact_id and stress_artifact_id (stress_indices, T5); heterosis_population's artifact_ids (T6)."""
+    base_artifact_id and other_artifact_id (compare_trials_paired, T4), and nonstress_artifact_id and stress_artifact_id (stress_indices, T5); heterosis_population's artifact_ids (T6);
+    roster_artifact_ids (T4 and T5: the plot lists of the two studies, coach 2026-10-23 07:48 UTC (5))."""
     arguments = _handle_arguments()
     assert {argument for _, argument, _ in arguments} == {"artifact_id", "artifact_ids", "roster_artifact_id", "base_artifact_id",
-                                                          "other_artifact_id", "nonstress_artifact_id", "stress_artifact_id"} and len(arguments) == 22
+                                                          "other_artifact_id", "nonstress_artifact_id", "stress_artifact_id",
+                                                          "roster_artifact_ids"} and len(arguments) == 24
     for tool, argument, listed in arguments:
         inner = _RecordingTools()
         guard = an.GuardedAnalystTools(inner=inner, supplied=["art_ok_0001"], inspected={"art_ok_0001"})

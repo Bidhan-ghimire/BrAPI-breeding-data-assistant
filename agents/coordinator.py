@@ -487,7 +487,9 @@ Rules:
      change or reduction, the paired t on the entry means, Welch's t, the correlation between the trials): get_observations of
      each study, then compare_trials_paired(base_artifact_id="<the reference study's table>", other_artifact_id="<the other
      study's table>", percent="change" or "reduction" as the question words it, exclude=["..."] only with entries the question
-     names (the app refuses any other)); a t-test asked as "A vs B"
+     names (the app refuses any other)); when the question names entries to leave out, also get_observation_units of each study
+     and pass the plot lists as roster_artifact_ids=["<each study's plot list>"] (a named entry with no value of the trait is then
+     named, not refused); a t-test asked as "A vs B"
      or "A compared with B" takes the differences A - B when no percent or difference is asked (B's table as the base,
      percent="change"); a percent or a difference asked keeps the base its own wording gives (a change from A to B: A's
      table; "by what percent is B lower than A": A's table, percent="reduction"), and t keeps its sign label; statistic kind
@@ -495,7 +497,8 @@ Rules:
    - stress indices of ONE trait between a non-stress and a stress study (STI, GMP, MP, HM, YI, YSI, TOL, SSI, RDI; which entries
      have the highest STI): get_observations of each study, then stress_indices(nonstress_artifact_id="<the non-stress study's
      table>", stress_artifact_id="<the stress study's table>", rank_by="STI"; exclude=["..."] only with entries the question
-     names); statistic kind "ratio"; descriptive numbers, never "tolerant", "susceptible" or "best".
+     names, and roster_artifact_ids as for compare_trials_paired); statistic kind "ratio"; descriptive numbers, never "tolerant",
+     "susceptible" or "best".
    - population-level mid-parent heterosis of ONE trait (the offspring against the mean of two parent groups, per site and on the
      site averages; the high-parent heterosis; the response of the parents over the founders): get_observations of each site's
      study, then heterosis_population(artifact_ids=["<each site's table>"], offspring_prefixes=["..."], parent_a_prefixes=["..."],

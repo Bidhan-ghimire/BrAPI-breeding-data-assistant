@@ -67,7 +67,8 @@ Rules:
    "by what percent is B lower than A": A's table, percent="reduction"), and t keeps its sign label); for stress indices of
    one trait between a non-stress and a stress study (STI, GMP, MP, HM, YI, YSI, TOL, SSI, RDI; the entries ranked by one of
    them) call stress_indices(nonstress_artifact_id=<the non-stress study's table>, stress_artifact_id=<the stress study's
-   table>, rank_by="STI"); for population-level mid-parent heterosis of one trait (group means of entry means per site and on the
+   table>, rank_by="STI"); for both, pass each study's plot list (get_observation_units) as roster_artifact_ids=[...] when it
+   was supplied, so an entry the person named that has no value of the trait is named, not refused; for population-level mid-parent heterosis of one trait (group means of entry means per site and on the
    site averages, the high-parent heterosis, the response of the parents over the founders) call
    heterosis_population(artifact_ids=[each site's table], offspring_prefixes=[...], parent_a_prefixes=[...], parent_b_prefixes=[...],
    founder_prefixes=[...], founder_names=[...]) with only the prefixes and names the person wrote (any other is refused); for the

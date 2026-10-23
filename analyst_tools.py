@@ -507,6 +507,11 @@ class GxePartitionArgs(ToolArgs):
     allow_incomplete: bool = Field(default=False)
 
 
+PLOT_LISTS_TEXT = ("the plot lists (get_observation_units) of the two studies, when the person names entries to leave out: a name in "
+                   "neither table but in a plot list is an entry of the trial without a value of the trait, named apart; a name in "
+                   "neither is refused")
+
+
 class CompareTrialsPairedArgs(ToolArgs):
     base_artifact_id: ArtifactId = Field(description="the measurements of the reference trial: ONE study (a registered handle such as "
                                                      "art_3f9a2c_0001); the change is stated relative to its mean")
@@ -518,6 +523,7 @@ class CompareTrialsPairedArgs(ToolArgs):
                                                     "base - mean other) / mean base; as the question words it")
     exclude: list[str] = Field(default_factory=list, max_length=50, description="entries (exact ID or exact name) left out, for example the checks")
     name_prefix: str | None = Field(default=None, min_length=1, description="keep only the entries whose name starts with this exact text, for example PH17.")
+    roster_artifact_ids: list[ArtifactId] = Field(default_factory=list, max_length=2, description=PLOT_LISTS_TEXT)
     duplicate_policy: DuplicatePolicy = Field(default="reject", description="what to do with repeated measurements of one plot")
     allow_incomplete: bool = Field(default=False)
 
@@ -536,6 +542,7 @@ class StressIndicesArgs(ToolArgs):
     exclude: list[str] = Field(default_factory=list, max_length=50, description="entries (exact ID or exact name) the person named to leave "
                                                                                 "out, for example the checks")
     name_prefix: str | None = Field(default=None, min_length=1, description="keep only the entries whose name starts with this exact text, for example PH17.")
+    roster_artifact_ids: list[ArtifactId] = Field(default_factory=list, max_length=2, description=PLOT_LISTS_TEXT)
     duplicate_policy: DuplicatePolicy = Field(default="reject", description="what to do with repeated measurements of one plot")
     allow_incomplete: bool = Field(default=False)
 
@@ -2798,13 +2805,15 @@ class _Pairing:
     removed: int
     excluded_labels: list[str]                      # the person's names per left-out entry with a mean, in their order ("E5 / clone E5")
     named_no_mean: list[str]                        # the person's names for entries with no mean in either trial (review finding 1)
+    plot_lists: list[str]                           # the studies' plot lists given (roster_artifact_ids; coach 07:48 UTC, (5))
 
 
 def _pair_two_trials(registry: ArtifactRegistry, base_id: str, other_id: str, a: Any, sides: tuple[str, str] = ("base", "other"),
                      needs: str = "a paired comparison needs") -> _Pairing:
     """Two measurement tables of ONE study each and one variable, their entry means and the entries with a mean in both; named
-    entries left out (exclude) and one family kept (name_prefix). Refused, never guessed: the same table, rows or study twice, a
-    table of other than one study, two variables, name_prefix without a name column, fewer than 3 shared entries."""
+    entries left out (exclude) and one family kept (name_prefix); a name neither table holds is looked up in the studies' plot lists
+    (roster_artifact_ids). Refused, never guessed: the same table, rows or study twice, a table of other than one study, two
+    variables, name_prefix without a name column, fewer than 3 shared entries."""
     base_table, other_table = _load(registry, base_id), _load(registry, other_id)
     if base_table.manifest.artifact_id == other_table.manifest.artifact_id or base_table.manifest.sha256 == other_table.manifest.sha256:
         raise AnalystError("invalid_argument", f"{base_table.manifest.artifact_id} and {other_table.manifest.artifact_id} hold the same rows; "
@@ -2829,10 +2838,11 @@ def _pair_two_trials(registry: ArtifactRegistry, base_id: str, other_id: str, a:
     if all(units) and "".join(units[0].lower().split()) != "".join(units[1].lower().split()):   # review of T5: t/ha beside kg/ha
         raise AnalystError("unsupported", f"the {sides[0]} table is in {units[0]} and the {sides[1]} in {units[1]}; {needs} ONE unit "
                                           "in both studies")
+    plot_lists = _plot_lists(registry, a.roster_artifact_ids, a.by, [base.studies[0], other.studies[0]])
     names = {entry: base.labels.get(entry, set()) | other.labels.get(entry, set()) for entry in set(base.labels) | set(other.labels)}
     named: dict[str, list[str]] = {}                          # entry -> the names the person gave for it (left_out_names, 06:49 UTC)
     for name in dict.fromkeys(a.exclude):
-        for entry in sorted(_entries_in_any([base_table, other_table], a.by, label_col, [name], "exclude")):
+        for entry in sorted(_named_entries([base_table, other_table], plot_lists, a.by, label_col, name)):
             named.setdefault(entry, []).append(name)
     excluded = set(named)
     candidates = sorted(set(base.means) | set(other.means))
@@ -2848,7 +2858,75 @@ def _pair_two_trials(registry: ArtifactRegistry, base_id: str, other_id: str, a:
                                           f"prefix: {len(outside)})")
     return _Pairing(base_table, other_table, base, other, label_col, names, excluded, outside, candidates, paired, only_base, only_other,
                     removed, [_names_label(given) for entry, given in named.items() if entry in base.means or entry in other.means],
-                    [_names_label(given) for entry, given in named.items() if not (entry in base.means or entry in other.means)])
+                    [_names_label(given) for entry, given in named.items() if not (entry in base.means or entry in other.means)],
+                    [t.manifest.artifact_id for t in plot_lists])
+
+
+def _plot_lists(registry: ArtifactRegistry, ids: list[str], by: str, studies: list[str]) -> list[Table]:
+    """The studies' plot lists (get_observation_units): the trial's entries, with or without a value of the trait (coach
+    2026-10-23 07:48 UTC, (5)). One per study, of a study compared, with the entry column; anything else is refused."""
+    lists: list[Table] = []
+    for artifact_id in dict.fromkeys(ids):
+        table = _load(registry, artifact_id)
+        where = sorted(set(table.manifest.study_ids))
+        if table.manifest.kind != "observation_units":
+            raise AnalystError("invalid_argument", f"plot list {artifact_id} is {table.manifest.kind}, not observation_units (the plot "
+                                                   "list from get_observation_units)")
+        if len(where) != 1:
+            raise AnalystError("invalid_argument", f"the plot list {artifact_id} is of {where}; pass one plot list per study")
+        if "studyDbId" not in table.manifest.columns:
+            raise AnalystError("invalid_argument", f"the plot list {artifact_id} has no column 'studyDbId'")
+        strays = sorted({row.get("studyDbId", "").strip() for row in table.rows} - set(where))
+        if strays:                                            # the rows, not only the manifest (review of this set, finding 5)
+            raise AnalystError("invalid_argument", f"the plot list {artifact_id} is of study {where[0]} but holds rows of {strays}; pass "
+                                                   "the plot list as get_observation_units saved it")
+        if where[0] not in studies:
+            raise AnalystError("invalid_argument", f"the plot list {artifact_id} is of study {where[0]}, not of a study compared "
+                                                   f"({', '.join(studies)})")
+        if any(set(t.manifest.study_ids) == set(where) for t in lists):
+            raise AnalystError("invalid_argument", f"two plot lists of study {where[0]}; pass one per study")
+        if by not in table.manifest.columns:
+            raise AnalystError("invalid_argument", f"the plot list {artifact_id} has no column {by!r}")
+        lists.append(table)
+    return lists
+
+
+def _knows(table: Table, by: str, label_col: str | None, name: str) -> bool:
+    """Whether the table holds the name as an entry ID or as an entry's name, as _entries reads them."""
+    return bool(name) and any(row.get(by) == name or (label_col is not None and row.get(label_col) == name and bool(row.get(by)))
+                              for row in table.rows)
+
+
+def _named_entries(tables: list[Table], plot_lists: list[Table], by: str, label_col: str | None, name: str) -> set[str]:
+    """The entries one exclude name gives: from the measurement tables, as before. A name no table holds at all is looked up in
+    the studies' plot lists (coach 07:48 UTC, (5): in C27.3 Beauregard and Tanzania have no dry-matter plot, so no table holds
+    them). A name a table holds never goes on (named twice there, or the ID of another: refused as before); a name in no plot
+    list stays unknown and is refused: "unknown" = absent from the trial's entries. The plot lists name only entries no table holds:
+    one a table holds under another name is refused (review of this set, finding 1), and an incomplete plot list is searched as the
+    part fetched, never as the whole trial (finding 2)."""
+    try:
+        return _entries_in_any(tables, by, label_col, [name], "exclude")
+    except AnalystError as error:
+        if not plot_lists or any(_knows(t, by, label_col, name) for t in tables):
+            raise
+        label = LABEL_FOR.get(by)
+        if not any(_knows(t, by, label, name) for t in plot_lists):
+            known = sorted({row[col] for t in plot_lists for row in t.rows for col in (by, label) if col and row.get(col)})
+            close = difflib.get_close_matches(name, known, n=3, cutoff=0.6)
+            raise AnalystError(error.code, f"exclude {name!r} is not an entry ID or name in {', '.join(t.manifest.artifact_id for t in tables)}"
+                                           f" nor in the plot lists {', '.join(t.manifest.artifact_id for t in plot_lists)}"
+                                           + ("" if all(t.manifest.complete for t in plot_lists) else
+                                              " (incomplete: only the plots fetched were searched)")
+                                           + (f"; the closest are {close}" if close else "")) from None
+        found = _entries_in_any(plot_lists, by, label, [name], "exclude")
+        held = sorted(e for e in found if any(_knows(t, by, None, e) for t in tables))
+        if held:
+            called = sorted({row[label_col] for t in tables for row in t.rows if label_col and row.get(by) == held[0] and row.get(label_col)})
+            raise AnalystError("invalid_argument", f"exclude {name!r} is entry {held[0]} in the plot lists, which the tables hold as "
+                                                   + (", ".join(repr(c) for c in called) if called else "an ID without a name")
+                                                   + "; refused, never guessed: use the tables' name if the person wrote it, or ask which "
+                                                   "entry is meant") from None
+        return found
 
 
 def _names_label(given: list[str]) -> str:
@@ -2863,8 +2941,22 @@ def _left_out_by_name(p: _Pairing) -> list[str]:
         return []
     count = len(p.excluded_labels)                        # the entries that had a mean: p.removed, listed one by one
     left = (f"{', '.join(p.excluded_labels)} ({count} {'entry' if count == 1 else 'entries'})" if count else "no entry with a mean")
-    # an entry the person named that has no mean in either trial is named apart, never dropped (review of this set, finding 1)
-    return [f"left out by name: {left}" + (f"; named, no mean in either trial: {', '.join(p.named_no_mean)}" if p.named_no_mean else "")]
+    # an entry the person named that has no mean in either trial is named apart, never dropped (review of this set, finding 1), in
+    # the coach's words with the trait (07:48 UTC, (5)): its plots hold no valid value, or only its plot list holds it
+    trait = (p.base_table.manifest.measurement.trait or p.base.variable).replace(" | ", " / ")
+    fetched = "" if p.base_table.manifest.complete and p.other_table.manifest.complete else " (in the rows fetched)"   # finding 3
+    return [f"left out by name: {left}" + (f"; named, no {trait} value in either trial{fetched}: {', '.join(p.named_no_mean)}"
+                                           if p.named_no_mean else "")]
+
+
+def _left_out_by_prefix(p: _Pairing, prefix: str | None) -> list[str]:
+    """The family the person kept, as the tool applied it (coach 07:48 UTC, (4)): "left out by prefix: outside PH17.* (N entries)",
+    N = the entries with a mean outside it; an entry the person named is counted by name, never again here. "outside": the prefix
+    keeps the family, so "left out by prefix: PH17.*" alone would read as if the family were left out."""
+    if prefix is None:
+        return []
+    n = len(p.outside)
+    return [f"left out by prefix: outside {prefix.replace(' | ', ' / ')}* ({n} {'entry' if n == 1 else 'entries'})"]
 
 
 def tool_compare_trials_paired(registry: ArtifactRegistry, a: CompareTrialsPairedArgs) -> ToolResult:
@@ -2883,7 +2975,8 @@ def tool_compare_trials_paired(registry: ArtifactRegistry, a: CompareTrialsPaire
     base_table, other_table, base, other, label_col = p.base_table, p.other_table, p.base, p.other, p.label_col
     names, excluded, outside, candidates, paired = p.names, p.excluded, p.outside, p.candidates, p.paired
     only_base, only_other, removed = p.only_base, p.only_other, p.removed
-    left_out_named = _left_out_by_name(p)                     # before p is reused for the paired t's p-value
+    left_out_named = [*_left_out_by_name(p), *_left_out_by_prefix(p, a.name_prefix)]   # before p is reused for the paired t's p-value
+    plot_lists = p.plot_lists
 
     g = len(paired)
     sign = -1.0 if a.percent == "reduction" else 1.0
@@ -3017,7 +3110,8 @@ def tool_compare_trials_paired(registry: ArtifactRegistry, a: CompareTrialsPaire
                             "difference": difference, "percent": percent_cell, "percent_note": note})
     lineage = [f"lineage: compare_trials_paired of {base_table.manifest.artifact_id} sha256={base_table.manifest.sha256} (base) and "
                f"{other_table.manifest.artifact_id} sha256={other_table.manifest.sha256} (other)", f"percent rule: {a.percent} ({direction})",
-               f"left out: excluded {sorted(excluded)}, name_prefix {a.name_prefix!r}", f"analysis target: {ANALYSIS_TARGET}"]
+               f"left out: excluded {sorted(excluded)}, name_prefix {a.name_prefix!r}",
+               *([f"plot lists: {', '.join(plot_lists)}"] if plot_lists else []), f"analysis target: {ANALYSIS_TARGET}"]
     complete = bool(base_table.manifest.complete and other_table.manifest.complete)
     manifest = registry.save_table(result_rows, kind="analysis_result", columns=PAIR_RESULT_COLUMNS, complete=complete,
                                    source_request_ids=list(dict.fromkeys([*base_table.manifest.source_request_ids, *other_table.manifest.source_request_ids])),
@@ -3152,7 +3246,7 @@ def tool_stress_indices(registry: ArtifactRegistry, a: StressIndicesArgs) -> Too
     tail = " | " + " | ".join([f"non-stress (Yp): {trait}{f' ({unit})' if unit else ''} in study {p.base.studies[0]}; stress (Ys): study "
                                f"{p.other.studies[0]}", f"{g} entries with a mean in both trials",
                                f"entry mean = the mean of the entry's valid values in the trial; non-stress: {p.base.transformation}; "
-                               f"stress: {p.other.transformation}", *_left_out_by_name(p), STRESS_NOTE])
+                               f"stress: {p.other.transformation}", *_left_out_by_name(p), *_left_out_by_prefix(p, a.name_prefix), STRESS_NOTE])
     variant = hashlib.sha256(json.dumps([p.base_table.manifest.sha256, p.other_table.manifest.sha256, a.by, a.value, a.rank_by, a.order,
                                          sorted(p.excluded), a.name_prefix, a.duplicate_policy, a.allow_incomplete]).encode("utf-8")).hexdigest()[:8]
     namespace = f"stress-{variant}"
@@ -3201,7 +3295,8 @@ def tool_stress_indices(registry: ArtifactRegistry, a: StressIndicesArgs) -> Too
                             "note": "; ".join(f"{index}: {reason}" for index, reason in why.get(e, {}).items())})
     lineage = [f"lineage: stress_indices of {p.base_table.manifest.artifact_id} sha256={p.base_table.manifest.sha256} (non-stress) and "
                f"{p.other_table.manifest.artifact_id} sha256={p.other_table.manifest.sha256} (stress)", f"ranked by {a.rank_by}, {first}",
-               f"left out: excluded {sorted(p.excluded)}, name_prefix {a.name_prefix!r}", f"analysis target: {ANALYSIS_TARGET}"]
+               f"left out: excluded {sorted(p.excluded)}, name_prefix {a.name_prefix!r}",
+               *([f"plot lists: {', '.join(p.plot_lists)}"] if p.plot_lists else []), f"analysis target: {ANALYSIS_TARGET}"]
     complete = bool(p.base_table.manifest.complete and p.other_table.manifest.complete)
     manifest = registry.save_table(result_rows, kind="analysis_result", columns=STRESS_RESULT_COLUMNS, complete=complete,
                                    source_request_ids=list(dict.fromkeys([*p.base_table.manifest.source_request_ids,
