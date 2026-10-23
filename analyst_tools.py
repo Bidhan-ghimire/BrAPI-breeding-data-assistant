@@ -540,6 +540,29 @@ class StressIndicesArgs(ToolArgs):
     allow_incomplete: bool = Field(default=False)
 
 
+class HeterosisPopulationArgs(ToolArgs):
+    artifact_ids: list[ArtifactId] = Field(min_length=1, max_length=20,
+                                           description="the measurements of ONE trait: one table per site, or one table of several sites "
+                                                       "(concat_tables); each study is one site")
+    offspring_prefixes: list[str] = Field(default_factory=list, max_length=20, description="the offspring group: exact name prefixes the "
+                                          "person wrote, for example PH17. (a trailing * is the wildcard)")
+    offspring_names: list[str] = Field(default_factory=list, max_length=200, description="the offspring group: exact entry names or IDs "
+                                       "the person wrote")
+    parent_a_prefixes: list[str] = Field(default_factory=list, max_length=20, description="the first parent group: name prefixes the "
+                                         "person wrote")
+    parent_a_names: list[str] = Field(default_factory=list, max_length=200, description="the first parent group: entry names or IDs")
+    parent_b_prefixes: list[str] = Field(default_factory=list, max_length=20, description="the second parent group; leave it and "
+                                         "parent_b_names empty for one parent group (the mid-parent is then its mean)")
+    parent_b_names: list[str] = Field(default_factory=list, max_length=200, description="the second parent group: entry names or IDs")
+    founder_prefixes: list[str] = Field(default_factory=list, max_length=20, description="the founders, for the response of the parents "
+                                        "over the founders (optional)")
+    founder_names: list[str] = Field(default_factory=list, max_length=200, description="the founders: entry names or IDs")
+    by: str = Field(default="germplasmDbId", description="the entry ID column (names are carried as labels)")
+    value: str = Field(default=VALUE_COL)
+    duplicate_policy: DuplicatePolicy = Field(default="reject", description="what to do with repeated measurements of one plot")
+    allow_incomplete: bool = Field(default=False)
+
+
 # --------------------------------------------------------------------------
 # The thirteen tools
 # --------------------------------------------------------------------------
@@ -3195,8 +3218,302 @@ def tool_stress_indices(registry: ArtifactRegistry, a: StressIndicesArgs) -> Too
                       complete=complete, warnings=warnings)
 
 
+# T6 (research build order tool 7): population-level heterosis from group means. The groups are the person's (BrAPI carries no
+# grouping); the analyst's guard checks that every prefix and name is written in their words (agents/analyst.py).
+HET_GROUPS = (("offspring", "offspring"), ("parent A", "parent_a"), ("parent B", "parent_b"), ("founder", "founder"))
+HET_NOTE = "descriptive population means of the groups the person named, not a choice of parents"
+HET_FORMULAS = {
+    "mid-parent heterosis %": "% = 100 x (mean offspring - MP) / MP",
+    "mid-parent heterosis": "mean offspring - MP",
+    "high-parent heterosis %": "% = 100 x (mean offspring - HP) / HP, HP = the higher parent-group mean",
+    "response of the parents over the founders %": "% = 100 x (MP - mean founder) / mean founder",
+}
+HET_RESULT_COLUMNS = {
+    "study": "the site (studyDbId)", "group": "offspring, parent A, parent B or founder ('' = in no group)", "entry": "exact entry ID",
+    "label": "name carried from the label column", "mean": "the entry's mean in the study, full precision", "values": "valid values behind it",
+}
+
+
+def _het_numbers(means: dict[str, float], peak: float) -> dict[str, tuple[float | None, str | None]]:
+    """The mid-parent, the heterosis, the high-parent heterosis and the response over the founders from group means; a percent on a
+    base that is 0 at the data's precision (judged against the largest plot value, T4's rule) is undefined with the reason."""
+    o, pa, pb, f = means["offspring"], means["parent A"], means.get("parent B"), means.get("founder")
+    mp = pa if pb is None else (pa + pb) / 2
+    zero = PAIR_ZERO * peak
+    out: dict[str, tuple[float | None, str | None]] = {"mid-parent mean": (mp, None), "mid-parent heterosis": (o - mp, None),
+                                                        "mid-parent heterosis %": (None, "the mid-parent mean is 0") if mp <= zero else
+                                                        (100 * (o - mp) / mp, None)}
+    if pb is not None:
+        hp = max(pa, pb)
+        out["high-parent heterosis %"] = (None, "the high-parent mean is 0") if hp <= zero else (100 * (o - hp) / hp, None)
+    if f is not None:
+        out["response of the parents over the founders %"] = (None, "the founder mean is 0") if f <= zero else (100 * (mp - f) / f, None)
+    return out
+
+
+def tool_heterosis_population(registry: ArtifactRegistry, a: HeterosisPopulationArgs) -> ToolResult:
+    """Population-level mid-parent heterosis of ONE trait (research build order tool 7): per site (study) the group means - each the
+    unweighted mean of its entries' means, an entry's mean the mean of its valid values there - of the offspring and one or two
+    parent groups, the mid-parent MP = (mean parent A + mean parent B) / 2 (parent A's mean for one group), the heterosis
+    mean offspring - MP and 100 x (mean offspring - MP) / MP, the high-parent heterosis 100 x (mean offspring - HP) / HP (HP the
+    higher parent mean), and with founders the response of the parents over the founders 100 x (MP - mean founder) / mean
+    founder; with several sites the same on the group means averaged over the sites (each site weighted equally), which is not
+    the mean of the per-site percents. The groups are name prefixes and names the person wrote. Refused, never guessed: an
+    entry in two groups, a prefix or name that matches no entry, a group without a value in a site, negative group means (no
+    ratio scale), two variables or units, the same rows twice. Every grouped entry's mean is saved as an analysis_result
+    artifact. Descriptive numbers of recorded values, never a choice of parents or entries."""
+    tables: list[Table] = []
+    seen: dict[str, str] = {}
+    for aid in a.artifact_ids:
+        table = _load(registry, aid)
+        for key in (table.manifest.artifact_id, table.manifest.sha256):
+            if key in seen:
+                raise AnalystError("invalid_argument", f"{seen[key]} and {table.manifest.artifact_id} hold the same rows; pass each table once")
+            seen[key] = table.manifest.artifact_id
+        tables.append(table)
+    if a.by.endswith("Name"):
+        raise AnalystError("invalid_argument", f"use the entry ID column, not {a.by!r}; names are carried as labels")
+    label_col = LABEL_FOR.get(a.by)
+    variables: set[str] = set()
+    for table in tables:
+        _require_column(table, a.by, "entry column")
+        _require_column(table, a.value, "value column")
+        _require_column(table, "studyDbId", "study column")
+        if label_col is None or label_col not in table.manifest.columns:
+            raise AnalystError("invalid_argument", f"{table.manifest.artifact_id} has no name column beside {a.by!r}; the groups are given by name")
+        variables.add(_single_variable(table))
+    if len(variables) > 1:
+        raise AnalystError("unsupported", f"the tables hold {len(variables)} variables {sorted(variables)}; population heterosis needs one "
+                                          "variable (one trait)")
+    stated = [((t.manifest.measurement.unit if t.manifest.measurement else None) or "").strip() for t in tables]
+    units = list(dict.fromkeys(u for u in stated if u))
+    if len({"".join(u.lower().split()) for u in units}) > 1:
+        raise AnalystError("unsupported", f"the tables are in {' and '.join(units)}; population heterosis needs ONE unit in every site")
+    if units and not all(stated):                             # review of T6, finding 5: t/ha beside no unit
+        raise AnalystError("unsupported", f"some tables state the unit {units[0]} and some state none; population heterosis needs ONE "
+                                          "unit in every site")
+    specs: dict[str, tuple[list[str], list[str]]] = {}
+    starred: set[str] = set()                                 # prefixes passed with their * (written as patterns)
+    for label, key in HET_GROUPS:
+        starred |= {p[:-1] for p in getattr(a, f"{key}_prefixes") if p.endswith("*")}
+        prefixes = [p[:-1] if p.endswith("*") else p for p in getattr(a, f"{key}_prefixes")]
+        names = list(getattr(a, f"{key}_names"))
+        if any(not p.strip() for p in prefixes) or any(not n.strip() for n in names):
+            raise AnalystError("invalid_argument", f"the {label} group holds an empty prefix or name")
+        if prefixes or names:
+            specs[label] = (prefixes, names)
+    if "offspring" not in specs or "parent A" not in specs:
+        raise AnalystError("invalid_argument", "population heterosis needs an offspring group and at least one parent group (parent_a), "
+                                               "each given by the name prefixes or names the person wrote")
+
+    gates: list[str] = []
+    notes: list[str] = []
+    exclusions: list[Exclusion] = []
+    values: dict[tuple[str, str], list[float]] = {}           # (study, entry) -> the valid values used
+    peaks: dict[tuple[str, str], float] = {}                  # (study, entry) -> the largest absolute raw value (T4's residue rule)
+    names_of: dict[str, set[str]] = {}
+    plot_table: dict[str, str] = {}
+    studies_seen: set[str] = set()                           # every study of the tables, with or without a valid value (review finding 1)
+    no_study = no_entry = 0
+    for table in tables:
+        studies_seen |= set(table.manifest.study_ids) | {row.get("studyDbId", "").strip() for row in table.rows} - {""}
+        gate = _completeness_gate(table, a.allow_incomplete)
+        if gate:
+            gates.append(f"{table.manifest.artifact_id}: {gate}")
+        classified = _classify(table, a.value)
+        big = max((abs(number) for _, number in classified.valid), default=0.0)
+        if big >= 1e200:
+            raise AnalystError("unsupported", f"{table.manifest.artifact_id} holds a value of 1e200 or more in absolute value ({big!r}); "
+                                              "group means of such values are not computed")
+        used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy)
+        notes.append(transformation)
+        exclusions += _exclusions(classified)
+        for row in table.rows:
+            entry = row.get(a.by, "").strip()
+            if entry:
+                names_of.setdefault(entry, set())
+                if row.get(label_col, ""):
+                    names_of[entry].add(row[label_col])
+            plot = row.get(UNIT_COL, "").strip()
+            if plot:
+                if plot_table.setdefault(plot, table.manifest.artifact_id) != table.manifest.artifact_id:
+                    raise AnalystError("unsupported", f"plot {plot} is in both {plot_table[plot]} and {table.manifest.artifact_id}; pass tables "
+                                                      "that do not overlap")
+        for row, number in used:
+            study, entry = row.get("studyDbId", "").strip(), row.get(a.by, "").strip()
+            if not study:
+                no_study += 1
+            elif not entry:
+                no_entry += 1
+            else:
+                values.setdefault((study, entry), []).append(number)
+        for row, number in classified.valid:
+            study, entry = row.get("studyDbId", "").strip(), row.get(a.by, "").strip()
+            if study and entry:
+                peaks[(study, entry)] = max(peaks.get((study, entry), 0.0), abs(number))
+
+    def matches(entry: str, label: str) -> bool:
+        prefixes, names = specs[label]
+        own = names_of.get(entry, set())
+        return any(n.startswith(p) for p in prefixes for n in own) or any(x == entry or x in own for x in names)
+
+    member: dict[str, str] = {}
+    for entry in sorted(names_of):
+        found = [label for label in specs if matches(entry, label)]
+        if len(found) > 1:
+            raise AnalystError("invalid_argument", f"entry {entry} ({'; '.join(sorted(names_of[entry])) or 'no name'}) is in both the "
+                                                   f"{found[0]} group and the {found[1]} group; give groups that do not overlap")
+        if found:
+            member[entry] = found[0]
+    for label, (prefixes, names) in specs.items():
+        for prefix in prefixes:
+            if not any(n.startswith(prefix) for own in names_of.values() for n in own):
+                raise AnalystError("invalid_argument", f"prefix {prefix!r} of the {label} group matches no entry name in the tables")
+        for name in names:
+            if not any(name == entry or name in own for entry, own in names_of.items()):
+                raise AnalystError("invalid_argument", f"{name!r} of the {label} group is not an entry ID or name in the tables")
+    all_names = {n for own in names_of.values() for n in own}
+    for label, (prefixes, _) in specs.items():                # review finding 2: "Isabel" as a prefix took Isabela too
+        for prefix in prefixes:
+            longer = sorted(n for n in all_names if n.startswith(prefix) and n != prefix)
+            if prefix not in starred and prefix in all_names and longer:
+                raise AnalystError("invalid_argument", f"prefix {prefix!r} of the {label} group is an entry's whole name and also starts "
+                                                       f"{', '.join(longer[:3])}{' and others' if len(longer) > 3 else ''}; pass it as a "
+                                                       "name, or the prefix the person wrote")
+
+    sites = sorted(studies_seen | {study for study, _ in values})
+    group_mean: dict[tuple[str, str], float] = {}
+    group_n: dict[tuple[str, str], int] = {}
+    group_peak: dict[tuple[str, str], float] = {}
+    entry_mean: dict[tuple[str, str], float] = {}
+    for site in sites:
+        for label in specs:
+            entries = sorted(e for e, g in member.items() if g == label and (site, e) in values)
+            if not entries:
+                raise AnalystError("unsupported", f"the {label} group has no entry with a valid value in study {site}; each group needs a mean "
+                                                  "in every site")
+            for e in entries:
+                entry_mean[(site, e)] = math.fsum(values[(site, e)]) / len(values[(site, e)])
+            group_mean[(site, label)] = math.fsum(entry_mean[(site, e)] for e in entries) / len(entries)
+            group_n[(site, label)] = len(entries)
+            group_peak[(site, label)] = max(peaks.get((site, e), 0.0) for e in entries)
+    for key, mean in list(group_mean.items()):
+        if mean < -PAIR_ZERO * group_peak[key]:
+            raise AnalystError("unsupported", f"population heterosis needs values on a ratio scale; the {key[1]} group's mean in study {key[0]} "
+                                              f"is negative ({mean!r})")
+        if abs(mean) <= PAIR_ZERO * group_peak[key]:             # a mean of float residue is 0 (0.1 + 0.2 - 0.3), T4's rule
+            group_mean[key] = 0.0
+    per_site = {site: _het_numbers({label: group_mean[(site, label)] for label in specs},
+                                   max(group_peak[(site, label)] for label in specs)) for site in sites}
+    averages = {label: math.fsum(group_mean[(site, label)] for site in sites) / len(sites) for label in specs} if len(sites) > 1 else None
+    across = _het_numbers(averages, max(group_peak.values())) if averages is not None else None
+
+    unit = units[0] if units else None
+    trait = tables[0].manifest.measurement.trait if tables[0].manifest.measurement and tables[0].manifest.measurement.trait else next(iter(variables))
+    groups_text = "; ".join(f"{label}: {', '.join([*(p + '*' for p in prefixes), *names])}" for label, (prefixes, names) in specs.items())
+    mp_formula = "MP = (mean parent A + mean parent B) / 2" if "parent B" in specs else "MP = mean parent A (one parent group)"
+    tail = " | ".join([f"{trait}{f' ({unit})' if unit else ''} in studies {', '.join(sites)}", f"groups: {groups_text}",
+                       "group mean = the unweighted mean of its entries' means; entry mean = the mean of its valid values in the study; "
+                       + "; ".join(dict.fromkeys(notes)), HET_NOTE])
+    in_no_group = len({e for (_, e) in values if e not in member})
+    for reason, n in (("entries in no group the person named", in_no_group), ("rows with an empty studyDbId", no_study),
+                      (f"rows with an empty {a.by}", no_entry)):
+        if n:
+            exclusions.append(Exclusion(reason=reason, count=n))
+    variant = hashlib.sha256(json.dumps([sorted(t.manifest.sha256 for t in tables), a.by, a.value, sorted((k, v) for k, v in specs.items()),
+                                         a.duplicate_policy, a.allow_incomplete]).encode("utf-8")).hexdigest()[:8]
+    namespace = f"het-{variant}"
+    aid = tables[0].manifest.artifact_id
+    common = {"n_independent_units": None, "source_artifact_hashes": sorted(t.manifest.sha256 for t in tables), "grouping": ["studyDbId"],
+              "exclusions": exclusions}
+    slug = {"mid-parent heterosis %": "mph-pct", "mid-parent heterosis": "mph", "mid-parent mean": "mp", "high-parent heterosis %": "hph-pct",
+            "response of the parents over the founders %": "response-pct"}
+
+    def formula(head: str) -> str:
+        return f"{HET_FORMULAS[head]}; {mp_formula}" if head in HET_FORMULAS else mp_formula
+
+    def number_claims(numbers, site: str | None) -> list[Claim]:
+        out = []
+        on = " on the site averages" if site is None else ""
+        heads = ["mid-parent heterosis %", "mid-parent mean", "mid-parent heterosis", "response of the parents over the founders %",
+                 "high-parent heterosis %"] if site is not None else ["mid-parent heterosis %", "mid-parent heterosis",
+                 "response of the parents over the founders %", "high-parent heterosis %"]
+        for head in heads:
+            if head not in numbers:
+                continue
+            value, reason = numbers[head]
+            percent = head.endswith("%")
+            if site is None:
+                denominator = Denominator(name="sites averaged, each site weighted equally", n=len(sites))
+            elif head.startswith("response"):
+                denominator = Denominator(name=f"entries of the founder group in study {site}", n=group_n[(site, "founder")])
+            elif head == "mid-parent mean":
+                denominator = Denominator(name=f"parent groups in study {site}", n=2 if "parent B" in specs else 1)
+            else:
+                denominator = Denominator(name=f"entries of the offspring group in study {site}", n=group_n[(site, "offspring")])
+            out.append(Claim(claim_id=_claim_id(aid, "ratio" if percent else "mean", slug[head], site or "averages", namespace=namespace),
+                             kind="ratio" if percent else "mean", value=value, unit="%" if percent else unit, missing_reason=reason,
+                             denominator=denominator, filters={} if site is None else {"studyDbId": site},
+                             transformation=f"{head}{on} | {tail} | {formula(head)}", **common))
+        return out
+
+    def mean_claims(site: str | None) -> list[Claim]:
+        out = []
+        over = " over the sites" if site is None else ""
+        for label in specs:
+            value = averages[label] if site is None else group_mean[(site, label)]
+            denominator = (Denominator(name="sites averaged, each site weighted equally", n=len(sites)) if site is None else
+                           Denominator(name=f"entries of the {label} group in study {site}", n=group_n[(site, label)]))
+            out.append(Claim(claim_id=_claim_id(aid, "mean", f"group-{label.replace(' ', '-')}", site or "averages", namespace=namespace),
+                             kind="mean", value=value, unit=unit, denominator=denominator, filters={} if site is None else {"studyDbId": site},
+                             transformation=f"{label} mean{over} | {tail} | group mean = the unweighted mean of its entries' means", **common))
+        return out
+
+    claims: list[Claim] = []
+    if across is not None:                                    # the averages over the sites first: the coordinator's view keeps 20 claims
+        claims += number_claims(across, None)
+        claims += mean_claims(None)
+        mp_value, _ = across["mid-parent mean"]
+        claims.append(Claim(claim_id=_claim_id(aid, "mean", "mp", "averages", namespace=namespace), kind="mean", value=mp_value, unit=unit,
+                            denominator=Denominator(name="sites averaged, each site weighted equally", n=len(sites)),
+                            transformation=f"mid-parent mean over the sites | {tail} | {mp_formula}", **common))
+    for site in sites:
+        claims += number_claims(per_site[site], site)
+    for site in sites:
+        claims += mean_claims(site)
+
+    result_rows = [{"study": site, "group": member.get(e, ""), "entry": e, "label": "; ".join(sorted(names_of.get(e, set()))),
+                    "mean": repr(math.fsum(values[(site, e)]) / len(values[(site, e)])), "values": str(len(values[(site, e)]))}
+                   for site, e in sorted(values)]
+    lineage = [f"lineage: heterosis_population of {', '.join(f'{t.manifest.artifact_id} sha256={t.manifest.sha256}' for t in tables)}",
+               f"groups: {groups_text}", f"analysis target: {ANALYSIS_TARGET}"]
+    complete = all(t.manifest.complete for t in tables)
+    manifest = registry.save_table(result_rows, kind="analysis_result", columns=HET_RESULT_COLUMNS, complete=complete,
+                                   source_request_ids=list(dict.fromkeys(r for t in tables for r in t.manifest.source_request_ids)),
+                                   study_ids=sites, variable_ids=sorted(variables), measurement=tables[0].manifest.measurement,
+                                   quality_notes=lineage)
+
+    def as_data(numbers):
+        return {head: {"value": value, "reason": reason} for head, (value, reason) in numbers.items()}
+
+    data = {"artifact_ids": [t.manifest.artifact_id for t in tables], "result_artifact_id": manifest.artifact_id, "sites": sites,
+            "variable_id": next(iter(variables)), "unit": unit, "groups_named": {label: {"prefixes": p, "names": n} for label, (p, n) in specs.items()},
+            "groups": {site: {label: {"mean": group_mean[(site, label)], "entries": group_n[(site, label)]} for label in specs} for site in sites},
+            "per_site": {site: as_data(per_site[site]) for site in sites}, "averages": averages,
+            "on_the_averages": as_data(across) if across is not None else None, "entries_in_no_group": in_no_group,
+            "claims": _claims_json(claims), "note": HET_NOTE, "formulas": HET_FORMULAS, "analysis_target": ANALYSIS_TARGET,
+            "value_policy": VALUE_POLICY}
+    warnings = [*gates]
+    if in_no_group:
+        warnings.append(f"{in_no_group} entries are in no group the person named and are left out")
+    for table in tables:
+        warnings.extend(_timing_warnings(table, a.value))
+    return ToolResult(ok=True, data=data, artifact_ids=[*(t.manifest.artifact_id for t in tables), manifest.artifact_id], complete=complete,
+                      warnings=list(dict.fromkeys(warnings)))                 # each warning once (review finding 6)
+
+
 # --------------------------------------------------------------------------
-# ONE registry of the sixteen tools, schemas and dispatch
+# ONE registry of the seventeen tools, schemas and dispatch
 # --------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -3230,9 +3547,10 @@ ANALYST_TOOLS: dict[str, AnalystToolSpec] = {spec.name: spec for spec in [
     AnalystToolSpec("gxe_partition", GxePartitionArgs, tool_gxe_partition),
     AnalystToolSpec("compare_trials_paired", CompareTrialsPairedArgs, tool_compare_trials_paired),
     AnalystToolSpec("stress_indices", StressIndicesArgs, tool_stress_indices),
+    AnalystToolSpec("heterosis_population", HeterosisPopulationArgs, tool_heterosis_population),
 ]}
 ANALYST_TOOL_NAMES = list(ANALYST_TOOLS)
-assert len(ANALYST_TOOL_NAMES) == 16
+assert len(ANALYST_TOOL_NAMES) == 17
 
 
 def analyst_tool_schemas() -> list[dict[str, Any]]:

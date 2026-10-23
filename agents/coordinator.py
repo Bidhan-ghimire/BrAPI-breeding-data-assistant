@@ -68,7 +68,7 @@ RETRIEVER_ACTIONS = frozenset({"server_info", "search_studies", "study_types", "
                                "list_locations", "list_programs", "list_seasons", "get_observation_units", "export_metadata"})
 ANALYST_ACTIONS = frozenset({"table_info", "numeric_summary", "group_stats", "filter_rows", "concat_tables", "missing_report", "count_records",
                              "rank_entries", "threshold_count", "correlate_entry_means", "plot_design", "anova_trial",
-                             "gxe_partition", "compare_trials_paired", "stress_indices"})
+                             "gxe_partition", "compare_trials_paired", "stress_indices", "heterosis_population"})
 DISCOVERY_FAMILIES: frozenset[str] = frozenset({"serverinfo", "commoncropnames", "studies", "observationvariables", "locations", "programs", "seasons"})
 # Wording that makes a question about SEVERAL studies (so "all known studies" may be its scope). A question that names one study
 # by an unknown name has none of these, and then no study may be chosen for the user. Seen 2026-09-28: a strong model answered
@@ -496,6 +496,11 @@ Rules:
      have the highest STI): get_observations of each study, then stress_indices(nonstress_artifact_id="<the non-stress study's
      table>", stress_artifact_id="<the stress study's table>", rank_by="STI"; exclude=["..."] only with entries the question
      names); statistic kind "ratio"; descriptive numbers, never "tolerant", "susceptible" or "best".
+   - population-level mid-parent heterosis of ONE trait (the offspring against the mean of two parent groups, per site and on the
+     site averages; the high-parent heterosis; the response of the parents over the founders): get_observations of each site's
+     study, then heterosis_population(artifact_ids=["<each site's table>"], offspring_prefixes=["..."], parent_a_prefixes=["..."],
+     parent_b_prefixes=["..."], founder_prefixes=["..."], founder_names=["..."]) with only the prefixes and names the question
+     writes (the app refuses any other); statistic kind "ratio"; descriptive numbers, never "best" or a choice of parents.
    - the replicates, blocks, plots per replicate or check entries of one study: get_observation_units, then
      plot_design(roster_artifact_id=...) on that plot list, then count_records(distinct_by="rep") for the replicates,
      count_records(group_by="rep") for the plots per replicate, or filter_rows(column="entryType", op="eq", value="check")

@@ -31,15 +31,15 @@ __all__ = [
 
 FIXTURE_DIR = PART2_DIR / "tests" / "fixtures" / "model_analyst"
 NUMERIC_TOOLS = frozenset({"numeric_summary", "group_stats", "count_records", "rank_entries", "threshold_count", "correlate_entry_means", "anova_trial",
-                           "gxe_partition", "compare_trials_paired", "stress_indices"})   # return claims
+                           "gxe_partition", "compare_trials_paired", "stress_indices", "heterosis_population"})   # return claims
 DERIVING_TOOLS = frozenset({"group_stats", "filter_rows", "concat_tables", "rank_entries", "threshold_count", "correlate_entry_means", "plot_design", "anova_trial",
-                            "gxe_partition", "compare_trials_paired", "stress_indices"})       # save new artifacts
+                            "gxe_partition", "compare_trials_paired", "stress_indices", "heterosis_population"})       # save new artifacts
 # Review 2 of R1 (2026-10-21): without "highest-yielding" this filter let "the highest-yielding clone, so it should be advanced"
 # through, so it stays until Bidhan decides how advice that rides on an ordering is caught (asked, not changed).
 _SUPERIORITY = re.compile(r"\b(best|superior|outperform\w*|top[- ]performing|winner|genetically (better|superior)|highest[- ]yielding)\b", re.IGNORECASE)
 
 ANALYST_SYSTEM_PROMPT = """You are the Analyst for a read-only plant-breeding database. You compute NOTHING yourself.
-You have sixteen fixed tools that read registered artifacts (handles like art_3f9a2c_0001) and return typed claims.
+You have seventeen fixed tools that read registered artifacts (handles like art_3f9a2c_0001) and return typed claims.
 Rules:
 1. Start with table_info for EVERY supplied artifact. Check that it is complete, that it measures the variable the
    question is about (trait, unit, timepoint), and whether duplicates or unknown independence are reported.
@@ -67,7 +67,11 @@ Rules:
    "by what percent is B lower than A": A's table, percent="reduction"), and t keeps its sign label); for stress indices of
    one trait between a non-stress and a stress study (STI, GMP, MP, HM, YI, YSI, TOL, SSI, RDI; the entries ranked by one of
    them) call stress_indices(nonstress_artifact_id=<the non-stress study's table>, stress_artifact_id=<the stress study's
-   table>, rank_by="STI"); to rank entries by the mean of
+   table>, rank_by="STI"); for population-level mid-parent heterosis of one trait (group means of entry means per site and on the
+   site averages, the high-parent heterosis, the response of the parents over the founders) call
+   heterosis_population(artifact_ids=[each site's table], offspring_prefixes=[...], parent_a_prefixes=[...], parent_b_prefixes=[...],
+   founder_prefixes=[...], founder_names=[...]) with only the prefixes and names the person wrote (any other is refused); to rank
+   entries by the mean of
    their per-study means (each study weighted equally) call
    rank_entries(basis="study_means") on a table of every study (concat_tables); for catalog questions call count_records. Use exact column names from table_info. Never pass a file path, never invent a handle, never
    ask for a tool you do not have.
@@ -192,6 +196,23 @@ def not_the_persons(args: Mapping[str, Any], words: str, tool: str = "anova_tria
 
 PERSONS_TOOLS = ("anova_trial", "compare_trials_paired", "stress_indices")    # threshold_count's own line stays (coach 04:49 UTC)
 
+# T6: heterosis_population's groups are the person's (BrAPI carries no grouping): every prefix (prefix_named) and every name
+# (named_in) is checked before the tool runs.
+HET_GROUP_ARGS = ("offspring_prefixes", "offspring_names", "parent_a_prefixes", "parent_a_names", "parent_b_prefixes", "parent_b_names",
+                  "founder_prefixes", "founder_names")
+
+
+def groups_not_the_persons(args: Mapping[str, Any], words: str) -> str | None:
+    """Why a heterosis_population call's groups are not the person's, or None (T6). A prefix counts as prefix_named says (E14.1 writes
+    "PJ14.*" but "PZ14 parents likewise": PZ14. through its stem); a name only as written, whole."""
+    for key in HET_GROUP_ARGS:
+        items = args.get(key)
+        for item in items if isinstance(items, list) else []:
+            if isinstance(item, str) and not (prefix_named(item, words) if key.endswith("_prefixes") else named_in(item, words)):
+                return (f"{key} {item!r} is not written in the person's words: the groups of heterosis_population are the person's, as they "
+                        "wrote them; if they named none, finish with needs_clarification and ask which entries form each group")
+    return None
+
 
 @dataclass
 class ToolRecord:
@@ -242,8 +263,9 @@ class GuardedAnalystTools:
         missing = [h for h in self.supplied if h not in self.inspected]
         if name != "table_info" and missing:
             return self._refuse(name, args, "invalid_argument", f"call table_info for {missing} before any calculation")
-        if name in PERSONS_TOOLS and self.question is not None:
-            refusal = not_the_persons(args, person_words(self.question), name)
+        if name in (*PERSONS_TOOLS, "heterosis_population") and self.question is not None:
+            words = person_words(self.question)
+            refusal = groups_not_the_persons(args, words) if name == "heterosis_population" else not_the_persons(args, words, name)
             if refusal:
                 return self._refuse(name, args, "invalid_argument", refusal)
         result = await self.inner.call(name, args)

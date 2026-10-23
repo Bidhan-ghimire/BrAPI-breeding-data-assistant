@@ -652,6 +652,81 @@ def _stress_block(claims: list[Claim], sources: _Sources, source_labels: dict[tu
     return lines, shown
 
 
+HETEROSIS_SENTENCE = "Descriptive numbers only: population means of the groups the question named, not a choice of parents."
+_HET_CALL = re.compile(r"^(clm_v2_[0-9a-f]{6}_[0-9]{4,}_het-[0-9a-f]{8})_")
+_HET_ROWS = (("Offspring", "offspring mean"), ("Parent A", "parent A mean"), ("Parent B", "parent B mean"),
+             ("Mid-parent", "mid-parent mean"), ("Founders", "founder mean"))
+
+
+def _heterosis_block(claims: list[Claim], source_labels: dict[tuple[str, ...], str]) -> tuple[list[str], set[str]]:
+    """T6 (2026-10-23): the claims of one heterosis_population call as the group means per site and on the averages over the sites
+    (Group, each study, Mean of the sites), the mid-parent heterosis in the trait's unit and in percent, the high-parent heterosis,
+    the response of the parents over the founders, the groups as named, the formulas and what was left out, then the descriptive
+    sentence. Returns the lines and the IDs of the claims shown."""
+    calls: dict[str, list[Claim]] = defaultdict(list)
+    for claim in claims:
+        match = _HET_CALL.match(claim.claim_id)
+        if match:
+            calls[match[1]].append(claim)
+    lines: list[str] = []
+    shown: set[str] = set()
+    for group in calls.values():
+        per = {(claim.transformation.split(" | ")[0], claim.filters.get("studyDbId")): claim for claim in group}
+        sites = sorted({site for _, site in per if site is not None})
+        if not sites or ("mid-parent mean", sites[0]) not in per:
+            continue
+        across = len(sites) > 1
+        first = per[("mid-parent mean", sites[0])]
+        # a difference of percent contents is in percentage points (review of T6, finding 3: dry matter read "-0.5568 %")
+        unit = " percentage points" if first.unit == "%" else f" {_text(first.unit)}" if first.unit else ""
+        label = source_labels.get(tuple(sorted(first.source_artifact_hashes)), "")
+        rows = []
+        for name, head in _HET_ROWS:
+            cells = [per.get((head, site)) for site in sites] + ([per.get((f"{head} over the sites", None))] if across else [])
+            if all(cell is None for cell in cells):
+                continue
+            rows.append([name, *("n/a" if cell is None or cell.value is None else _anova_number(cell.value) for cell in cells)])
+        lines += [f"**Population heterosis of group means, {len(sites)} site{'s' if across else ''}{label}**", "",
+                  _text(first.transformation.split(" | ")[1] + "."), "",            # the trait, its unit and the studies (review finding 3)
+                  *_table(["Group", *sites, *(["Mean of the sites"] if across else [])], rows), ""]
+
+        def percent(claim: Claim | None) -> str:
+            if claim is None:
+                return "n/a"
+            return f"{_anova_number(claim.value)} %" if claim.value is not None else \
+                f"not available: {_text(claim.missing_reason or 'reason not provided')}"
+
+        def where(site: str | None) -> str:
+            return f"study {site}" if site is not None else "on the site averages"
+
+        places = [*sites, *([None] if across else [])]
+        on = lambda site: " on the site averages" if site is None else ""                     # noqa: E731
+        parts = []
+        for site in places:
+            difference, share = per.get((f"mid-parent heterosis{on(site)}", site)), per.get((f"mid-parent heterosis %{on(site)}", site))
+            if difference is not None and difference.value is not None:
+                parts.append(f"{where(site)} {_anova_number(difference.value)}{unit} ({percent(share)})")
+        if parts:
+            lines.append(f"Mid-parent heterosis (offspring - mid-parent): {'; '.join(parts)}.")
+        for title, head in (("High-parent heterosis", "high-parent heterosis %"),
+                            ("Response of the parents over the founders (mid-parent - founders)", "response of the parents over the founders %")):
+            found = [(site, per.get((f"{head}{on(site)}", site))) for site in places]
+            if any(claim is not None for _, claim in found):
+                lines.append(f"{title}: {'; '.join(f'{where(site)} {percent(claim)}' for site, claim in found if claim is not None)}.")
+        segments = first.transformation.split(" | ")
+        groups = next((segment for segment in segments if segment.startswith("groups: ")), "")
+        if groups:
+            lines.append(_text(f"Groups as named: {groups[len('groups: '):]}."))
+        lines.append(_text(f"{segments[-1]}; heterosis % = 100 x (mean offspring - MP) / MP; each group mean is the unweighted mean of its "
+                           f"entries' means."))
+        left = "; ".join(f"{item.reason[len('entries '):]} {item.count}" for item in first.exclusions if item.reason.startswith("entries "))
+        if left:
+            lines.append(_text(f"Left out: {left}."))
+        lines += ["", HETEROSIS_SENTENCE, ""]
+        shown |= {claim.claim_id for claim in group}
+    return lines, shown
+
+
 def _numeric_blocks(claims: list[Claim], sources: _Sources, source_labels: dict[tuple[str, ...], str], *, focus_mean: bool = False) -> list[str]:
     groups: dict[tuple[Any, ...], list[Claim]] = defaultdict(list)
     for claim in claims:
@@ -963,7 +1038,8 @@ def answer_summary(controller: Any) -> str:
     gxe_lines, in_gxe = _gxe_block(claims, source_labels)
     pair_lines, in_pair = _pair_block(claims, source_labels)
     stress_lines, in_stress = _stress_block(claims, sources, source_labels)
-    in_ranking |= in_threshold | in_correlation | in_anova | in_gxe | in_pair | in_stress
+    heterosis_lines, in_heterosis = _heterosis_block(claims, source_labels)
+    in_ranking |= in_threshold | in_correlation | in_anova | in_gxe | in_pair | in_stress | in_heterosis
     # a mean the ranking table shows is not shown again (group_stats on the same table states the same entry mean; review)
     ranked_means = {(tuple(sorted(c.source_artifact_hashes)), tuple(sorted(c.filters.items())), c.value)
                     for c in claims if c.claim_id in in_ranking and c.kind == "mean" and c.claim_id not in in_threshold}
@@ -979,7 +1055,7 @@ def answer_summary(controller: Any) -> str:
             buckets[(tuple(sorted(claim.source_artifact_hashes)), claim.grouping[0], claim.denominator.name, claim.denominator.n)].append(claim)
         else:
             other.append(claim)
-    lines: list[str] = [*ranking, *thresholds, *correlations, *anova_lines, *gxe_lines, *pair_lines, *stress_lines]
+    lines: list[str] = [*ranking, *thresholds, *correlations, *anova_lines, *gxe_lines, *pair_lines, *stress_lines, *heterosis_lines]
     in_catalog_titles: set[str] = set()              # distinct counts a catalog block's title already leads with
     for key, group in buckets.items():
         block = _catalog_block(group, sources, source_labels.get(key[0], ""), focus_count=focus_count)
