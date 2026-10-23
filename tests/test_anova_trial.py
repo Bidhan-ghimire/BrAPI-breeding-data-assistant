@@ -499,3 +499,81 @@ def test_missing_plots_speak_of_least_squares_means(registry):
     drop = tuple(zip(RICE, (1, 2, 3, 4, 1, 2)))                           # every entry 3 plots, 6 cells empty: the equal-count note
     r = anova(registry, save(registry, plots(RICE, drop=drop)))
     assert all("least-squares entry means" in k.transformation and "adjusted entry means" not in k.transformation for k in claims(r))
+
+
+
+# --- 8. the C28 cell rule (coach 2026-10-23 00:49 UTC): default refuse, two opt-ins only with the person's answer -------
+
+def doubled_rice(*, drop=()):
+    """RICE with two cells holding two plots: entry 50 in rep 2 (6.0 and 5.9), entry 75 in rep 1 (5.3 and 5.1)."""
+    rows = plots(RICE, drop=drop)
+    return rows + [("P50-2b", "50", "2", "5.9"), ("P75-1b", "75", "1", "5.1")]
+
+
+def test_two_plots_in_one_cell_are_still_refused_by_default_and_the_opt_ins_are_named(registry):
+    r = anova(registry, save(registry, doubled_rice()))
+    assert not r.ok and "entry 50 has 2 plots in rep 2" in r.error.message
+    assert "cells='mean'" in r.error.message and "cells='single_only'" in r.error.message and "if the person asks" in r.error.message
+
+
+def test_cells_mean_averages_a_cells_plots(registry):
+    r = anova(registry, save(registry, doubled_rice()), cells="mean")
+    assert r.ok, r.error
+    averaged = {"50": [5.3, 5.95, 4.7, 4.3], "75": [5.2, 5.7, 5.5, 4.7]}
+    reference = anova(registry, save(registry, plots({**RICE, **averaged})))
+    for source in ("rep", "entry", "error"):
+        for quantity in ("ss", "ms"):
+            assert table(r)[source][quantity] == pytest.approx(table(reference)[source][quantity], rel=1e-12)
+    assert r.data["plots_used"] == 24 and r.data["cells_rule"] == "mean"
+    assert all("cells='mean': the plots of 2 entry x rep cell(s) averaged (4 plots into one value each)" in k.transformation for k in claims(r))
+    assert any("cells='mean'" in w for w in r.warnings)
+
+
+def test_cells_single_only_keeps_the_entries_with_one_plot_in_every_rep(registry):
+    """50 has two plots in rep 2, 75 misses rep 3. Not the C28 gold's set: a named check with one plot per rep stays (review)."""
+    rows = [row for row in doubled_rice() if row[0] not in ("P75-1b", "P75-3")]
+    r = anova(registry, save(registry, rows), cells="single_only")
+    assert r.ok, r.error
+    kept = {e: v for e, v in RICE.items() if e not in ("50", "75")}
+    reference = anova(registry, save(registry, plots(kept)))
+    for source in ("rep", "entry", "error"):
+        assert table(r)[source]["ss"] == pytest.approx(table(reference)[source]["ss"], rel=1e-12)
+    note = ("cells='single_only': the entries with exactly one plot in every rep, 4 of 6 (1 with several plots in a rep and 1 with a rep "
+            "missing left out)")
+    assert all(note in k.transformation for k in claims(r)) and r.data["plots_used"] == 16
+    assert all(k.n_independent_units == 16 for k in claims(r))
+    left = {e.reason: e.count for e in claims(r)[0].exclusions}
+    assert left["plots left out by cells='single_only': entries with several plots in a rep"] == 5
+    assert left["plots left out by cells='single_only': entries with a rep missing"] == 3
+
+
+def test_a_rule_that_changes_nothing_keeps_the_default_ids_and_one_that_acts_has_its_own(registry):
+    """Review: on a table without a doubled cell a rule changed nothing but issued a second set of claim IDs."""
+    tid = save(registry, plots(RICE))
+    plain = {k.claim_id for k in claims(anova(registry, tid))}
+    for rule in ("refuse", "mean", "single_only"):
+        assert plain == {k.claim_id for k in claims(anova(registry, tid, cells=rule))}, rule
+    doubled = save(registry, doubled_rice())
+    assert {k.claim_id for k in claims(anova(registry, doubled, cells="mean"))}.isdisjoint(
+        {k.claim_id for k in claims(anova(registry, doubled, cells="single_only"))})
+
+
+def test_the_analyst_never_picks_a_cell_rule_itself():
+    assert "cells=\"mean\"" in an.ANALYST_SYSTEM_PROMPT and "cells=\"single_only\"" in an.ANALYST_SYSTEM_PROMPT
+    assert "never choose one yourself" in an.ANALYST_SYSTEM_PROMPT
+
+
+
+def test_cells_mean_counts_cells_and_keeps_the_plot_units(registry):
+    """Review: under mean the replication note said "plot counts" for cells, and n_independent_units was the cell count."""
+    r = anova(registry, save(registry, doubled_rice()), cells="mean")
+    assert "every entry has 4 cell(s)" in r.data["replication_basis"] and "plot(s)" not in r.data["replication_basis"]
+    assert all(k.n_independent_units == 26 for k in claims(r))                  # 26 plots, 24 cells
+    assert "the error mean square mixes single plots and cell means: approximate" in r.data["cells_note"]
+    lineage = at._load(registry, r.data["result_artifact_id"]).manifest.quality_notes
+    assert any("cells='mean'" in note for note in lineage)
+
+
+def test_the_prompt_keeps_the_cells_rule_for_the_person():
+    """Review: rule 4 told the analyst to name the aggregation rule a refusal asks for."""
+    assert "anova_trial's cells rule is never yours to name" in an.ANALYST_SYSTEM_PROMPT

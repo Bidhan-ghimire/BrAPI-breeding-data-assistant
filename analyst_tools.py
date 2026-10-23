@@ -484,6 +484,10 @@ class AnovaTrialArgs(ToolArgs):
                                                 "one, the analysis is one-way (entries only)")
     duplicate_policy: DuplicatePolicy = Field(default="reject", description="what to do with repeated measurements of one plot")
     allow_incomplete: bool = Field(default=False, description="analyse an incomplete artifact anyway, clearly labelled")
+    cells: Literal["refuse", "mean", "single_only"] = Field(default="refuse", description="an entry with several plots in one rep: refuse "
+                                                            "(default), mean = the mean of the cell's plots, single_only = only the entries "
+                                                            "with exactly one plot in every rep; a rule other than refuse only when the "
+                                                            "person asked for it")
 
 
 class GxePartitionArgs(ToolArgs):
@@ -2036,8 +2040,9 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
     with missing plots gets the least-squares analysis with reps first, labelled "sequential least squares, reps first (the OLS fit)"; with
     unequal plot counts r is the harmonic mean of the entries' plot counts, flagged. Values are averaged per plot first only
     with duplicate_policy='mean_per_unit'. Refused, never guessed: more than one study or variable, two plots of one entry in
-    one rep, a rep on only some plots, a design that is not connected, fewer than 2 entries, an RCBD with fewer than 2 reps, no
-    error degrees of freedom. Descriptive numbers of recorded values, never a choice of entries."""
+    one rep (unless the person asked for cells='mean', the cell's plots averaged, or cells='single_only', only the entries with
+    exactly one plot in every rep; either is labelled), a rep on only some plots, a design that is not connected, fewer than 2
+    entries, an RCBD with fewer than 2 reps, no error degrees of freedom. Descriptive numbers of recorded values, never a choice of entries."""
     table = _load(registry, a.artifact_id)
     variable = _single_variable(table)
     studies = set(table.manifest.study_ids)
@@ -2095,13 +2100,49 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
     entries = sorted({e for e, _, _ in plots})
     if len(entries) < 2:
         raise AnalystError("unsupported", f"an analysis of variance needs at least 2 entries; the table has {len(entries)} with a valid value")
+    cells_note = None
+    averaged_cells = False
     if rcbd:
         cells = Counter((e, r) for e, r, _ in plots)
         doubled = [(e, r, k) for (e, r), k in sorted(cells.items()) if k > 1]
-        if doubled:
+        if doubled and a.cells == "refuse":
             e, r, k = doubled[0]
             raise AnalystError("unsupported", f"entry {e} has {k} plots in rep {r}: not an RCBD (one plot per entry and rep); "
-                                              f"{len(doubled)} entry x rep cell(s) hold more than one plot")
+                                              f"{len(doubled)} entry x rep cell(s) hold more than one plot. Only if the person asks: "
+                                              "cells='mean' averages a cell's plots, cells='single_only' keeps only the entries with exactly "
+                                              "one plot in every rep")
+        if a.cells == "mean" and doubled:                         # C28 cell rule (coach 2026-10-23 00:49 UTC), the person's choice
+            units_before = len({row[UNIT_COL] for row, _ in used}) if classified.units_known else None
+            values_of: dict[tuple[str, Any], list[float]] = {}
+            for e, r, v in plots:
+                values_of.setdefault((e, r), []).append(v)
+            plots = [(e, r, math.fsum(vs) / len(vs)) for (e, r), vs in values_of.items()]
+            averaged_cells = True
+            cells_note = (f"cells='mean': the plots of {len(doubled)} entry x rep cell(s) averaged ({sum(k for *_, k in doubled)} plots into "
+                          "one value each); the error mean square mixes single plots and cell means: approximate")
+        elif a.cells == "single_only":
+            all_reps = {r for _, r, _ in plots}
+            per_entry: dict[str, dict[Any, int]] = {}
+            for (e, r), k in cells.items():
+                per_entry.setdefault(e, {})[r] = k
+            several = {e for e, counts in per_entry.items() if max(counts.values()) > 1}
+            gaps = {e for e, counts in per_entry.items() if e not in several and len(counts) < len(all_reps)}
+            keep = set(per_entry) - several - gaps
+            if len(keep) < 2:
+                raise AnalystError("unsupported", f"cells='single_only' keeps {len(keep)} entries with exactly one plot in every rep; an "
+                                                  "analysis of variance needs at least 2")
+            if keep != set(per_entry):                            # a rule that leaves nothing out changes nothing (review)
+                for reason, left in (("entries with several plots in a rep", several), ("entries with a rep missing", gaps)):
+                    if left:
+                        exclusions.append(Exclusion(reason=f"plots left out by cells='single_only': {reason}",
+                                                    count=sum(1 for p in plots if p[0] in left)))
+                plots = [p for p in plots if p[0] in keep]
+                used = [(row, value) for row, value in used if row[a.entry].strip() in keep]
+                cells_note = (f"cells='single_only': the entries with exactly one plot in every rep, {len(keep)} of {len(per_entry)} "
+                              f"({len(several)} with several plots in a rep and {len(gaps)} with a rep missing left out)")
+        if cells_note:
+            entries = sorted({e for e, _, _ in plots})
+            cells = Counter((e, r) for e, r, _ in plots)
         reps = sorted({r for _, r, _ in plots})  # type: ignore[type-var]
         if len(reps) < 2:
             raise AnalystError("unsupported", f"an RCBD needs at least 2 reps; every plot states rep {reps[0]!r}")
@@ -2121,13 +2162,13 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
     r_eff = float(counts[0]) if equal else len(counts) / math.fsum(1.0 / k for k in counts)
     approximate = res.adjusted or not equal
     if not approximate:
-        basis = f"every entry has {counts[0]} plot(s)"
+        basis = f"every entry has {counts[0]} {'cell' if averaged_cells else 'plot'}(s)"
     elif equal:
-        basis = (f"r = {r_eff:.6g} plots per entry, but {res.empty_cells} entry x rep cell(s) have no plot, so the least-squares entry "
+        basis = (f"r = {r_eff:.6g} {'cells' if averaged_cells else 'plots'} per entry, but {res.empty_cells} entry x rep cell(s) have no plot, so the least-squares entry "
                  "means are correlated: SE, SED and LSD are approximate (the SED of least-squares means differs per pair: larger on average, and "
                  "for some pairs much larger)")
     else:
-        basis = (f"r = {r_eff:.6g}, the harmonic mean of the entries' plot counts ({min(counts)} to {max(counts)}): SE, SED, LSD and H2 "
+        basis = (f"r = {r_eff:.6g}, the harmonic mean of the entries' {'cell' if averaged_cells else 'plot'} counts ({min(counts)} to {max(counts)}): SE, SED, LSD and H2 "
                  "are approximate")
     ms_e, ms_g = res.ms_error, res.ms_entry
     zero_error = ms_e == 0
@@ -2147,9 +2188,11 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
     unit = getattr(measurement, "unit", None)
     trait = getattr(measurement, "trait", None) or variable
     study = next(iter(studies))
-    variant = hashlib.sha256(json.dumps([a.value, a.entry, a.rep, a.duplicate_policy, a.allow_incomplete]).encode()).hexdigest()[:8]
+    variant = hashlib.sha256(json.dumps([a.value, a.entry, a.rep, a.duplicate_policy, a.allow_incomplete]
+                                        + ([a.cells] if cells_note else [])).encode()).hexdigest()[:8]
     namespace = f"anova-{variant}"
-    shape = f"{res.n} plots: {res.entries} entries x {res.reps} reps" if rcbd else f"{res.n} plots: {res.entries} entries, no reps"
+    units_word = "entry x rep cells" if averaged_cells else "plots"
+    shape = f"{res.n} {units_word}: {res.entries} entries x {res.reps} reps" if rcbd else f"{res.n} plots: {res.entries} entries, no reps"
     context = [f"{trait} in study {study}", shape]
     if res.adjusted:
         context.append(f"sequential least squares, reps first (the OLS fit): {res.empty_cells} entry x rep cell(s) without a plot")     # Luna E16.1: "adjusted" read as not OLS
@@ -2162,10 +2205,15 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
     elif stated_blocks and not rcbd:
         context.append("blocks not modelled: the plots state blocks but no reps; this one-way analysis ignores the blocks (if the "
                        "blocks are the reps, pass rep='block')")
+    if cells_note:
+        context.append(cells_note)
     context += [transformation, ANOVA_NOTE] + ([gate] if gate else [])
     tail = " | " + " | ".join(context)
     n_units = len({row[UNIT_COL] for row, _ in used}) if classified.units_known else None
-    common = {"denominator": Denominator(name="plots in the analysis", n=res.n), "n_independent_units": n_units,
+    if averaged_cells:
+        n_units = units_before                                # the distinct plots behind the cells; None when unknown (review)
+    common = {"denominator": Denominator(name="entry x rep cells in the analysis (the plots of some averaged)" if averaged_cells
+                                         else "plots in the analysis", n=res.n), "n_independent_units": n_units,
               "source_artifact_hashes": [table.manifest.sha256], "grouping": [a.entry] + ([a.rep] if rcbd else []), "exclusions": exclusions}
     claims: list[Claim] = []
     for row in res.rows:
@@ -2200,7 +2248,8 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
 
     result_rows = [{"source": row["source"], "df": str(row["df"]),
                     **{q: "" if row[q] is None else repr(row[q]) for q in ("ss", "ms", "f", "p")}} for row in res.rows]
-    lineage = [f"lineage: anova_trial of {aid} sha256={table.manifest.sha256}", f"design: {res.design}" + (", sequential least squares, reps first (the OLS fit)" if res.adjusted else ""),
+    lineage = [f"lineage: anova_trial of {aid} sha256={table.manifest.sha256}", f"design: {res.design}" + (", sequential least squares, reps first (the OLS fit)" if res.adjusted else "")
+               + (f"; {cells_note}" if cells_note else ""),
                f"analysis target: {ANALYSIS_TARGET}"]
     manifest = registry.save_table(result_rows, kind="analysis_result", columns=ANOVA_RESULT_COLUMNS, complete=table.manifest.complete,
                                    source_request_ids=list(table.manifest.source_request_ids), study_ids=[study], variable_ids=[variable],
@@ -2210,6 +2259,8 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
         warnings.append(f"the table has no {a.rep!r} column: one-way analysis (entries only); for an RCBD, plot_design adds each plot's rep")
     elif not rcbd:
         warnings.append(f"no plot states a rep in column {a.rep!r}: one-way analysis (entries only)")
+    if cells_note:
+        warnings.append(cells_note)
     if res.adjusted:
         warnings.append(f"{res.empty_cells} entry x rep cell(s) have no plot: sequential least squares, reps first (the OLS fit)")
     if approximate:
@@ -2228,7 +2279,8 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
         warnings.append("independence unknown: some valid rows name no observation unit")
     warnings.extend(_timing_warnings(table, a.value))
     data = {"artifact_id": aid, "result_artifact_id": manifest.artifact_id, "design": res.design, "balanced": res.balanced,
-            "adjusted": res.adjusted, "anova": res.rows, "plots_used": res.n, "grand_mean": res.grand_mean, "cv_percent": cv, "se": se,
+            "adjusted": res.adjusted, "anova": res.rows, "plots_used": res.n, "cells_rule": a.cells, "cells_note": cells_note,
+            "grand_mean": res.grand_mean, "cv_percent": cv, "se": se,
             "sed": sed, "lsd_5pct": lsd, "t_0975": pvalues.t_quantile(0.975, res.df_error), "sigma2_g": s2g, "sigma2_e": ms_e,
             "sigma2_g_estimate": s2g_raw, "h2": h2, "h2_set_to_zero": set_to_zero, "replication": r_eff, "replication_basis": basis,
             "balance": {"entries": res.entries, "reps": res.reps, "plots": res.n, "empty_cells": res.empty_cells,
