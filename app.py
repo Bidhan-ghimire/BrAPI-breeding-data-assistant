@@ -159,12 +159,21 @@ def _never_asked(prompt: str) -> str:
     raise RuntimeError("a catalog setup at startup never asks a person")
 
 
+def _older_than_limit(summary: Any, config: Any) -> bool:
+    """A saved catalog older than APP_CATALOG_MAX_AGE_HOURS counts as missing, at startup, at the front door and in a run alike;
+    an unknown date counts as fresh, as in a run."""
+    hours = getattr(config, "catalog_max_age_hours", None)
+    return bool(summary is not None and hours and summary.fetched_at is not None
+                and datetime.now(timezone.utc) - summary.fetched_at > timedelta(hours=hours))
+
+
 def prepare_catalogs(make_config: Callable[[str], RunConfig] = live_config, *,
                      make_models: Callable[[], Models] | None = None) -> str:
     """At app startup (app_space.main), with APP_CATALOG_STANDING_APPROVAL on (Part D): refuse to start while the access
-    notes carry no review date; when the two catalogs are not completely saved, prepare them now under the operator's
-    standing approval, as a recorded run with no planner, no model call and no measurements. With the setting off nothing
-    happens here: a visitor approves the catalog setup when a question needs it, as before. Returns one line for the log."""
+    notes carry no review date; when the two catalogs are not completely saved, or are older than APP_CATALOG_MAX_AGE_HOURS,
+    prepare them now under the operator's standing approval, as a recorded run with no planner, no model call and no
+    measurements. With the setting off nothing happens here: a visitor approves the catalog setup when a question needs it,
+    as before. Returns one line for the log."""
     off = "catalog standing approval: off (a visitor approves the catalog setup when a question needs it)"
     try:
         config = make_config(CATALOG_SETUP_QUESTION)
@@ -182,7 +191,8 @@ def prepare_catalogs(make_config: Callable[[str], RunConfig] = live_config, *,
         raise SystemExit("refusing to start: APP_CATALOG_STANDING_APPROVAL is on, but the access notes have no valid "
                          "'Reviewed by Bidhan on: YYYY-MM-DD' line (a real date, not in the future); review them first, "
                          "or turn the setting off")
-    if catalog_summary.from_cache(config) is not None:
+    summary = catalog_summary.from_cache(config)
+    if summary is not None and not _older_than_limit(summary, config):    # older ones are downloaded again (status doc, other open)
         return "catalog standing approval: on; the study and trait catalogs are already saved, nothing was requested"
     controller = Controller(dataclasses.replace(config, catalog_setup_only=True, bootstrap_catalogs=True),
                             models=(make_models or default_models)(), answer_fn=_never_asked)
@@ -430,9 +440,7 @@ def _saved_catalog(config_for: Callable[[str], RunConfig], text: str) -> catalog
         summary = catalog_summary.from_cache(config)
     except Exception:  # a bad setting only means no summary; the message is still sorted
         return None
-    hours = getattr(config, "catalog_max_age_hours", None)
-    if (summary is not None and hours and summary.fetched_at is not None    # an unknown date counts as fresh, as in a run
-            and datetime.now(timezone.utc) - summary.fetched_at > timedelta(hours=hours)):
+    if _older_than_limit(summary, config):
         return None
     return summary
 

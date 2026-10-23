@@ -247,6 +247,68 @@ def test_a_run_refuses_a_bad_age_or_a_refresh_that_is_not_a_setup_run(changes, p
     assert problem in ctl.RunConfig(question=Q, **changes).validate()
 
 
+def test_startup_downloads_saved_catalogs_older_than_the_limit_again(place):
+    """Status doc, other open (coach 2026-10-23 12:49 UTC, NEXT 2): at startup (app.prepare_catalogs, the operator's standing
+    approval on) a saved catalog counted as saved whatever its age, so these 2026-06-01 catalogs were kept with a 24-hour limit
+    until a visitor's question set them aside. Startup applies the limit as the front door and a run do: they are downloaded again
+    under the standing approval, and the next startup finds them within the limit and requests nothing."""
+    make_config = place.kwargs(24, standing=True)["make_config"]
+    line = app.prepare_catalogs(make_config, make_models=synthetic_models)
+    assert line.startswith("catalog standing approval: on; catalog setup completed (run run_") and place.server.calls == CATALOGS
+    result, _ = saved_run(place.root, line.rsplit("(run ", 1)[1].rstrip(")"))
+    assert any("set aside before: the saved catalogs were fetched 2026-06-01" in note for note in result.notes)
+    again = app.prepare_catalogs(make_config, make_models=synthetic_models)
+    assert again == "catalog standing approval: on; the study and trait catalogs are already saved, nothing was requested"
+    assert place.server.calls == CATALOGS
+
+
+def test_startup_without_a_limit_keeps_the_saved_catalogs_as_before(place):
+    line = app.prepare_catalogs(place.kwargs(None, standing=True)["make_config"], make_models=synthetic_models)
+    assert line == "catalog standing approval: on; the study and trait catalogs are already saved, nothing was requested"
+    assert place.server.calls == []
+
+
+def test_saved_catalogs_with_an_unknown_date_are_kept_at_startup_and_at_the_front_door(place, monkeypatch):
+    """As in a run (Controller._why_set_aside), saved catalogs whose fetch date was not recorded count as fresh under a limit."""
+    make_config = place.kwargs(24, standing=True)["make_config"]
+    saved = catalog_summary.from_cache(make_config(Q))
+    assert saved is not None and saved.fetched_at is not None
+    unknown = dataclasses.replace(saved, fetched_at=None)
+    monkeypatch.setattr(catalog_summary, "from_cache", lambda config: unknown)
+    line = app.prepare_catalogs(make_config, make_models=synthetic_models)
+    assert line == "catalog standing approval: on; the study and trait catalogs are already saved, nothing was requested"
+    assert app._saved_catalog(make_config, "tell me about the synthetic location") is unknown
+    assert place.server.calls == []
+
+
+def test_saved_catalogs_exactly_at_the_limit_are_kept_as_in_a_run(place, monkeypatch):
+    """Review finding (2026-10-23): no test sat on the limit itself, so `>=` for `>` passed. As in a run (set aside only when
+    OLDER than the limit), catalogs exactly 24 hours old are kept; one microsecond more counts as missing."""
+    now = datetime(2026, 6, 2, tzinfo=timezone.utc)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(app, "datetime", Clock)
+    config = place.kwargs(24)["make_config"](Q)
+    saved = catalog_summary.from_cache(config)
+    assert not app._older_than_limit(dataclasses.replace(saved, fetched_at=now - timedelta(hours=24)), config)
+    assert app._older_than_limit(dataclasses.replace(saved, fetched_at=now - timedelta(hours=24, microseconds=1)), config)
+
+
+def test_old_saved_catalogs_are_not_requested_at_startup_without_the_standing_approval_or_its_review_date(place):
+    """Review finding (2026-10-23): no test held old saved catalogs with the setting off or with no review date. Both are
+    checked before the catalogs' age: off, nothing is requested; on without a review date, the app refuses to start."""
+    line = app.prepare_catalogs(place.kwargs(24, standing=False)["make_config"], make_models=synthetic_models)
+    assert line.startswith("catalog standing approval: off") and place.server.calls == []
+    (place.root / "ACCESS_NOTES.md").write_text("Not reviewed yet.\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        app.prepare_catalogs(place.kwargs(24, standing=True)["make_config"], make_models=synthetic_models)
+    assert place.server.calls == []
+
+
 # --------------------------------------------------------------------------
 # Review findings (2026-10-16)
 # --------------------------------------------------------------------------
