@@ -106,7 +106,7 @@ DATA_REVIEW_PROMPT = "continue to analysis / cancel: "
 _ASKED = "clarification needed: "            # how agents.analyst records the Analyst's question in the report's caveats
 _clock = time.monotonic                      # the clock the budget uses (llm.run_agent_loop's default); tests replace it
 MAX_CLARIFICATION_ROUNDS = 5       # an upper bound for any caller; the command line uses 1, the chat 3
-MAX_OBSERVATION_PAGES = 10         # pages per plot-record fetch any run may ask for (the benchmark's budget; the app's own is 1)
+MAX_OBSERVATION_PAGES = 20         # pages per plot-record fetch any run may ask for (the benchmark's budget; the app's own is 1)
 STATES = ("supervise", "config", "plan", "clarify", "metadata", "catalog_list", "catalog_setup", "resolve", "approve", "retrieve", "review_data", "analyze",
           "render", "accept", "record")
 AnswerFn = Callable[[str], str]

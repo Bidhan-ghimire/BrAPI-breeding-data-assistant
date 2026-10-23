@@ -1,6 +1,7 @@
 """
 tests/test_benchmark_budgets.py - the benchmark-only budgets (Bidhan, 2026-10-21 ~17:58 UTC, answering Q1-Q3 of the baseline
-report): the harness passes 24 fetches, 10 pages and 30 plan steps per run; the app's own defaults stay 5 / 1 / 12.
+report): the harness passes 24 fetches, 10 pages and 30 plan steps per run; the app's own defaults stay 5 / 1 / 12. Pages may
+go to 20 since Bidhan's decision of 2026-10-23 (item 19), benchmark only.
 
 The fetch count was already a run setting (RunConfig.max_fetches). Pages per plot-record fetch and steps per plan were fixed
 numbers (one page; the plan contract's 12 steps), so they become run settings with the old values as defaults; the plan
@@ -58,7 +59,19 @@ def test_the_benchmark_passes_its_budgets_per_run_and_only_when_asked():
     assert app.live_config(question).max_fetches == 5 and app.live_config(question).max_http_attempts == 10
 
 
-@pytest.mark.parametrize("budget", [{"max_fetches": 25}, {"max_pages": 11}, {"max_plan_steps": 31}, {"max_fetches": 0},
+def test_twenty_pages_pass_the_harness_and_the_runs_own_check():
+    """Bidhan, 2026-10-23 (coach's DECISION entry 14:01 UTC, item 19): benchmark-only pages 10 -> 20, the app unchanged. The
+    run's own range (run.MAX_OBSERVATION_PAGES) follows: without it every 20-page run stopped at its configuration check."""
+    question = "How many plots does study S1 have?"
+    config = bench.budgeted(app.live_config, max_fetches=24, max_pages=20, max_plan_steps=30)(question)
+    assert (config.max_fetches, config.max_observation_pages, config.max_plan_steps) == (24, 20, 30)
+    assert config.max_http_attempts == 480                                        # 24 fetches x 20 pages
+    assert [p for p in config.validate() if "max_observation_pages" in p or "max_http_attempts" in p] == []
+    assert bench.parse_args(["--cache", "x", "--max-pages", "20"]).max_pages == 20
+    assert app.live_config(question).max_observation_pages == 1 and ctl.RunConfig(question="q").max_observation_pages == 1
+
+
+@pytest.mark.parametrize("budget", [{"max_fetches": 25}, {"max_pages": 21}, {"max_plan_steps": 31}, {"max_fetches": 0},
                                     {"max_pages": 0}, {"max_plan_steps": 0}])
 def test_the_benchmark_refuses_budgets_beyond_what_was_allowed(budget):
     with pytest.raises(ValueError):
@@ -75,7 +88,7 @@ def test_the_command_line_names_the_budgets_and_records_them():
     assert bench.budgets_record(plain, app.live_config) == {}
 
 
-@pytest.mark.parametrize("change", [{"max_observation_pages": 0}, {"max_observation_pages": 11}, {"max_plan_steps": 0},
+@pytest.mark.parametrize("change", [{"max_observation_pages": 0}, {"max_observation_pages": 21}, {"max_plan_steps": 0},
                                     {"max_plan_steps": c.MAX_PLAN_STEPS + 1}, {"max_plan_steps": 12.0}])
 def test_a_run_setting_outside_its_range_is_refused(change):
     import dataclasses
