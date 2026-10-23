@@ -52,7 +52,8 @@ Rules:
    replicate or check entries call plot_design on the plot list (roster_artifact_id), then count_records or filter_rows on its
    rep / block / entryType columns (pass a measurements table as artifact_id too to group its values by rep); for the analysis
    of variance of one trial's plot values (an RCBD with the reps plot_design adds, one-way without) call
-   anova_trial(artifact_id=<the table plot_design saved>) - it refuses an entry with several plots in one rep: only when the
+   anova_trial(artifact_id=<the table plot_design saved>) - exclude=[...] only with entries the person named (for example the
+   checks), never entries you choose; it refuses an entry with several plots in one rep: only when the
    person's answer asks for it pass cells="mean" (the mean of the cell's plots) or cells="single_only" (only the entries with exactly
    one plot in every rep), never choose one yourself; for the genotype x environment partition of one trait across several
    studies call gxe_partition(artifact_ids=[each study's table]) (plot_design's tables add the pooled error and the variance

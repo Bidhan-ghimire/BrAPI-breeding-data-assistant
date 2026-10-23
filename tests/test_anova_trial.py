@@ -2,7 +2,7 @@
 tests/test_anova_trial.py - T2 "anova_trial" (coach 2026-10-22 20:48 UTC, NEXT 5; research build order, tool 2): the analysis of
 variance of ONE trial's plot values for one trait - an RCBD (entries + replicates) when every plot states its rep (plot_design),
 one-way (entries only) when none does - with the grand mean, CV, SE, SED, LSD(5%), the variance components and the entry-mean
-heritability. Missing plots: the least-squares ("adjusted") analysis, replicates first. Descriptive numbers, never a decision.
+heritability. Missing plots: the sequential least-squares analysis, replicates first. Descriptive numbers, never a decision.
 
 Fixtures (literal numbers, research notes NOTES_plain_python_implementation.md Q1, Q2, Q11; values computed in
 Claude outputs/t2_anova_trial_20261022/fixture_values.py): agricolae `sweetpotato` (one-way, published MSerror 22.48917, CV
@@ -134,7 +134,7 @@ def test_complete_and_one_missing_plot_match_the_ndsu_missing_plot_example(regis
     gap = anova(registry, save(registry, plots(MISSING_PLOT, drop=(("C", 2),))))
     assert gap.ok, gap.error
     d, t = gap.data, table(gap)
-    assert d["design"] == "RCBD" and d["balanced"] is False and d["adjusted"] is True
+    assert d["design"] == "RCBD" and d["balanced"] is False and d["sequential_least_squares"] is True
     assert t["entry"]["ss"] == pytest.approx(54.04166667, rel=1e-9) and t["error"]["ss"] == pytest.approx(26.375, rel=1e-9)
     assert t["error"]["df"] == 5 and t["entry"]["f"] == pytest.approx(3.41495524, rel=1e-9)
     assert t["entry"]["p"] == pytest.approx(0.109709418, rel=1e-8)
@@ -339,7 +339,7 @@ def test_equal_plot_counts_with_empty_cells_are_labelled_approximate(registry):
     r = anova(registry, save(registry, plots(values, drop=(("A", 1), ("B", 2), ("C", 3), ("D", 4)))))
     assert r.ok, r.error
     d = r.data
-    assert d["adjusted"] is True and d["replication"] == 3 and "approximate" in d["replication_basis"]
+    assert d["sequential_least_squares"] is True and d["replication"] == 3 and "approximate" in d["replication_basis"]
     assert any("approximate" in w for w in r.warnings)
     lsd = next(k for k in claims(r) if k.transformation.startswith("LSD (5%)"))
     assert "approximate" in lsd.transformation
@@ -577,3 +577,109 @@ def test_cells_mean_counts_cells_and_keeps_the_plot_units(registry):
 def test_the_prompt_keeps_the_cells_rule_for_the_person():
     """Review: rule 4 told the analyst to name the aggregation rule a refusal asks for."""
     assert "anova_trial's cells rule is never yours to name" in an.ANALYST_SYSTEM_PROMPT
+
+
+# --- the person's exclude list and the key rename (coach 2026-10-23 02:55 UTC, NEXT 2) ----------------------------------------
+
+def test_exclude_leaves_the_named_entries_out_as_if_they_were_never_there(registry):
+    """exclude=[...] holds names the person gave (decision (6)): the analysis equals the one of a table without those entries; one
+    Exclusion per name, counted in plots; the names on every claim and in the lineage; claim IDs of their own."""
+    full = save(registry, plots(RICE))
+    without = save(registry, plots({k: v for k, v in RICE.items() if k not in ("50", "150")}))
+    r, plain = anova(registry, full, exclude=["clone 50", "150"]), anova(registry, without)
+    assert r.ok, r.error
+    for source in ("rep", "entry", "error"):
+        for q in ("df", "ss", "ms"):
+            assert table(r)[source][q] == pytest.approx(table(plain)[source][q], rel=1e-12)
+    reasons = {e.reason: e.count for e in claims(r)[0].exclusions}
+    assert reasons["plots left out: excluded entry clone 50"] == 4 and reasons["plots left out: excluded entry 150"] == 4
+    assert all("left out by name: clone 50, 150 (8 plots)" in k.transformation for k in claims(r))
+    assert all(k.n_independent_units == 16 for k in claims(r))
+    lineage = at._load(registry, r.data["result_artifact_id"]).manifest.quality_notes
+    assert any(note.startswith("left out by name: clone 50, 150") and "['150', '50']" in note for note in lineage)
+    assert r.data["excluded"] == [{"name": "clone 50", "entries": ["50"], "plots": 4}, {"name": "150", "entries": ["150"], "plots": 4}]
+    assert r.data["excluded_plots"] == 8
+    assert {k.claim_id for k in claims(r)}.isdisjoint({k.claim_id for k in claims(anova(registry, full))})
+
+
+def test_excluding_the_checks_lets_a_doubled_cell_table_through_without_a_cells_rule(registry):
+    """C28 (review): the doubled cells were the checks'; with the named entries left out the default rule has nothing to refuse."""
+    tid = save(registry, doubled_rice())
+    assert not anova(registry, tid).ok
+    r = anova(registry, tid, exclude=["50", "75"])
+    assert r.ok, r.error
+    assert r.data["cells_rule"] == "refuse" and r.data["cells_note"] is None and r.data["plots_used"] == 16
+
+
+def test_an_unknown_name_is_refused_and_a_name_without_plots_is_still_counted(registry):
+    tid = save(registry, plots(RICE))
+    r = anova(registry, tid, exclude=["clone 999"])
+    assert not r.ok and r.error.code == "invalid_argument" and "not an entry ID or name" in r.error.message
+    tid = save(registry, plots(RICE) + [("PX-1", "X", "1", "NA")])                  # entry X has a row but no valid value
+    plain, named = anova(registry, tid), anova(registry, tid, exclude=["X"])
+    assert named.ok, named.error
+    assert {e.reason: e.count for e in claims(named)[0].exclusions}["plots left out: excluded entry X"] == 0
+    assert table(named)["entry"]["ss"] == pytest.approx(table(plain)["entry"]["ss"], rel=1e-12)
+    assert {k.claim_id for k in claims(named)}.isdisjoint({k.claim_id for k in claims(plain)})       # its own claims, never the same IDs
+
+
+def test_a_name_given_twice_is_one_exclusion(registry):
+    """Deliberate bug X10 survived: a name given twice was counted twice."""
+    r = anova(registry, save(registry, plots(RICE)), exclude=["clone 50", "clone 50"])
+    assert [(e.reason, e.count) for e in claims(r)[0].exclusions if e.reason.startswith("plots left out")] == [
+        ("plots left out: excluded entry clone 50", 4)]
+
+
+def test_the_answer_names_the_left_out_entries(tmp_path):
+    ctx = synthetic_context(cache_dir=tmp_path / "cache", out_dir=tmp_path / "out", run_id="run_anova_exclude")
+    r = anova(ctx.registry, save(ctx.registry, plots(RICE)), exclude=["clone 50"])
+    assert "Left out by name: clone 50 \\(4 plots\\)." in answer(ctx, r)
+
+
+def test_the_least_squares_flag_is_named_for_what_it_is(registry):
+    """E16.3 (Luna 2026-10-23): the analyst read the data key "adjusted": true as the adjusted-yield variable and asked which yield
+    to use; the key is the sequential least-squares fit."""
+    r = anova(registry, save(registry, plots(MISSING_PLOT, drop=(("C", 2),))))
+    assert r.data["sequential_least_squares"] is True and "adjusted" not in r.data
+
+
+def test_the_prompt_and_the_recipe_keep_exclude_to_the_persons_names():
+    assert "exclude=[...] only with entries the person named" in an.ANALYST_SYSTEM_PROMPT
+    assert "exclude=[\"...\"] only with entries the question names" in co.COORDINATOR_SYSTEM_PROMPT
+    schema = next(s for s in at.analyst_tool_schemas() if s["name"] == "anova_trial")
+    assert "exclude" in schema["inputSchema"]["properties"] and "person" in schema["inputSchema"]["properties"]["exclude"]["description"]
+
+
+# --- exclude, the review's findings (round 2) ------------------------------------------------------------------------------
+
+def test_one_entry_named_by_its_id_and_its_name_is_one_exclusion(registry):
+    """Review F1: exclude=["50", "clone 50"] gave two exclusions of 4 plots (8) while 4 plots left."""
+    r = anova(registry, save(registry, plots(RICE)), exclude=["50", "clone 50"])
+    assert r.ok, r.error
+    assert [(e.reason, e.count) for e in claims(r)[0].exclusions if e.reason.startswith("plots left out")] == [
+        ("plots left out: excluded entry 50 / clone 50", 4)]
+    assert r.data["excluded"] == [{"name": "50 / clone 50", "entries": ["50"], "plots": 4}] and r.data["excluded_plots"] == 4
+
+
+def test_the_dates_note_counts_only_the_kept_plots(registry):
+    """Review F2: under mean_per_unit the note counted the excluded entry's plots ("4 values in 2 plots")."""
+    rows = plots(RICE) + [("P25-1", "25", "1", "5.3", "2026-01-02"), ("P50-1", "50", "1", "5.5", "2026-01-02")]
+    r = anova(registry, save(registry, rows), duplicate_policy="mean_per_unit", exclude=["50"])
+    assert r.ok, r.error
+    assert all("(2 values in 1 plots)" in k.transformation for k in claims(r))
+
+
+def test_an_excluded_entrys_repeated_dates_do_not_refuse_the_table(registry):
+    """Review F3: a second date on an excluded entry's plot refused the table; as if the entry were never there, it passes."""
+    r = anova(registry, save(registry, plots(RICE) + [("P50-1", "50", "1", "5.5", "2026-01-02")]), exclude=["50"])
+    assert r.ok, r.error
+    plain = anova(registry, save(registry, plots({k: v for k, v in RICE.items() if k != "50"})))
+    assert table(r)["entry"]["ss"] == pytest.approx(table(plain)["entry"]["ss"], rel=1e-12)
+    assert {e.reason: e.count for e in claims(r)[0].exclusions}["plots left out: excluded entry 50"] == 4    # 4 plots, 5 values
+
+
+def test_two_spellings_of_one_entry_get_claims_of_their_own(registry):
+    """Review (minor): exclude=["50"] and exclude=["clone 50"] shared claim IDs with different exclusion texts."""
+    tid = save(registry, plots(RICE))
+    by_id, by_name = anova(registry, tid, exclude=["50"]), anova(registry, tid, exclude=["clone 50"])
+    assert {k.claim_id for k in claims(by_id)}.isdisjoint({k.claim_id for k in claims(by_name)})

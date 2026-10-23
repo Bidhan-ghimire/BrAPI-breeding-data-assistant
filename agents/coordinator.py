@@ -497,7 +497,8 @@ Rules:
    - the analysis of variance of ONE trial's plot values for one trait (ANOVA table, CV, LSD, variance components, entry-mean
      heritability): get_observation_units and get_observations of that study, then plot_design(roster_artifact_id=...,
      artifact_id=<the observations>) so each plot carries its rep, then anova_trial(artifact_id="<the table plot_design saved>")
-     - an RCBD with the reps, one-way when no plot states a rep; statistic kind "anova"; descriptive numbers, never "best".
+     - an RCBD with the reps, one-way when no plot states a rep; exclude=["..."] only with entries the question names to leave out
+     (for example the checks); statistic kind "anova"; descriptive numbers, never "best".
    - the genotype x environment partition of ONE trait across several studies (the shares of environment, genotype and G x E, the
      F for genotypes, the across-environment heritability; with plot_design's tables also the pooled error and the variance
      components): get_observations of every study (get_observation_units plus plot_design per study only when the error or the

@@ -488,6 +488,8 @@ class AnovaTrialArgs(ToolArgs):
                                                             "(default), mean = the mean of the cell's plots, single_only = only the entries "
                                                             "with exactly one plot in every rep; a rule other than refuse only when the "
                                                             "person asked for it")
+    exclude: list[str] = Field(default_factory=list, max_length=50, description="entries (exact ID or exact name) the person named to leave "
+                                                                                "out, for example the checks; never entries chosen by the app")
 
 
 class GxePartitionArgs(ToolArgs):
@@ -2068,7 +2070,9 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
     with duplicate_policy='mean_per_unit'. Refused, never guessed: more than one study or variable, two plots of one entry in
     one rep (unless the person asked for cells='mean', the cell's plots averaged, or cells='single_only', only the entries with
     exactly one plot in every rep; either is labelled), a rep on only some plots, a design that is not connected, fewer than 2
-    entries, an RCBD with fewer than 2 reps, no error degrees of freedom. Descriptive numbers of recorded values, never a choice of entries."""
+    entries, an RCBD with fewer than 2 reps, no error degrees of freedom. Entries the person named can be left out (exclude, for
+    example the checks): one exclusion per name, counted in plots, and the names on every claim. Descriptive numbers of recorded
+    values, never a choice of entries."""
     table = _load(registry, a.artifact_id)
     variable = _single_variable(table)
     studies = set(table.manifest.study_ids)
@@ -2087,6 +2091,27 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
     if no_entry:
         exclusions.append(Exclusion(reason="rows without an entry", count=no_entry))
     used = [(row, value) for row, value in used if row.get(a.entry, "").strip()]
+    left_out: dict[str, tuple[list[str], int]] = {}           # the person's names (decision (6)): label -> (entries, plots left out)
+    dropped: set[str] = set()
+    excluded_plots = 0
+    if a.exclude:                                             # first: the dates, rep and cell checks see only the kept entries (review F3)
+        label_col = LABEL_FOR.get(a.entry)
+        label_col = label_col if label_col in table.manifest.columns else None
+        names_of: dict[str, list[str]] = {}                   # an entry named twice (its ID and its name) is one exclusion (review F1)
+        for name in dict.fromkeys(a.exclude):
+            names_of.setdefault(_entries(table, a.entry, label_col, [name], "exclude")[0], []).append(name)
+
+        def plots_of(entry_ids: set[str]) -> int:             # plots, not values: a plot measured on two dates is one plot
+            return len({row.get(UNIT_COL, "").strip() or f"(row {i})" for i, (row, _) in enumerate(used) if row[a.entry].strip() in entry_ids})
+
+        for entry_id, names in names_of.items():
+            label = " / ".join(names)
+            left_out[label] = ([entry_id], plots_of({entry_id}))
+            exclusions.append(Exclusion(reason=f"plots left out: excluded entry {label}", count=left_out[label][1]))
+        dropped = set(names_of)
+        excluded_plots = plots_of(dropped)
+        used = [(row, value) for row, value in used if row[a.entry].strip() not in dropped]
+    excluded_note = f"left out by name: {', '.join(left_out)} ({excluded_plots} plots)" if left_out else None
     by_plot: dict[str, list[tuple[dict[str, str], float]]] = {}
     for i, (row, value) in enumerate(used):
         by_plot.setdefault(row.get(UNIT_COL, "").strip() or f"(row {i} without a plot ID)", []).append((row, value))
@@ -2215,7 +2240,7 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
     trait = getattr(measurement, "trait", None) or variable
     study = next(iter(studies))
     variant = hashlib.sha256(json.dumps([a.value, a.entry, a.rep, a.duplicate_policy, a.allow_incomplete]
-                                        + ([a.cells] if cells_note else [])).encode()).hexdigest()[:8]
+                                        + ([a.cells] if cells_note else []) + ([sorted(left_out)] if left_out else [])).encode()).hexdigest()[:8]
     namespace = f"anova-{variant}"
     units_word = "entry x rep cells" if averaged_cells else "plots"
     shape = f"{res.n} {units_word}: {res.entries} entries x {res.reps} reps" if rcbd else f"{res.n} plots: {res.entries} entries, no reps"
@@ -2233,6 +2258,8 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
                        "blocks are the reps, pass rep='block')")
     if cells_note:
         context.append(cells_note)
+    if excluded_note:
+        context.append(excluded_note)
     context += [transformation, ANOVA_NOTE] + ([gate] if gate else [])
     tail = " | " + " | ".join(context)
     n_units = len({row[UNIT_COL] for row, _ in used}) if classified.units_known else None
@@ -2276,6 +2303,7 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
                     **{q: "" if row[q] is None else repr(row[q]) for q in ("ss", "ms", "f", "p")}} for row in res.rows]
     lineage = [f"lineage: anova_trial of {aid} sha256={table.manifest.sha256}", f"design: {res.design}" + (", sequential least squares, reps first (the OLS fit)" if res.adjusted else "")
                + (f"; {cells_note}" if cells_note else ""),
+               *([f"{excluded_note[:-1]}; entries {sorted(dropped)})"] if excluded_note else []),
                f"analysis target: {ANALYSIS_TARGET}"]
     manifest = registry.save_table(result_rows, kind="analysis_result", columns=ANOVA_RESULT_COLUMNS, complete=table.manifest.complete,
                                    source_request_ids=list(table.manifest.source_request_ids), study_ids=[study], variable_ids=[variable],
@@ -2287,6 +2315,8 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
         warnings.append(f"no plot states a rep in column {a.rep!r}: one-way analysis (entries only)")
     if cells_note:
         warnings.append(cells_note)
+    if excluded_note:
+        warnings.append(excluded_note)
     if res.adjusted:
         warnings.append(f"{res.empty_cells} entry x rep cell(s) have no plot: sequential least squares, reps first (the OLS fit)")
     if approximate:
@@ -2305,7 +2335,9 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
         warnings.append("independence unknown: some valid rows name no observation unit")
     warnings.extend(_timing_warnings(table, a.value))
     data = {"artifact_id": aid, "result_artifact_id": manifest.artifact_id, "design": res.design, "balanced": res.balanced,
-            "adjusted": res.adjusted, "anova": res.rows, "plots_used": res.n, "cells_rule": a.cells, "cells_note": cells_note,
+            "sequential_least_squares": res.adjusted, "anova": res.rows, "plots_used": res.n, "cells_rule": a.cells, "cells_note": cells_note,
+            "excluded": [{"name": name, "entries": ids, "plots": n} for name, (ids, n) in left_out.items()],
+            "excluded_plots": excluded_plots,
             "grand_mean": res.grand_mean, "cv_percent": cv, "se": se,
             "sed": sed, "lsd_5pct": lsd, "t_0975": pvalues.t_quantile(0.975, res.df_error), "sigma2_g": s2g, "sigma2_e": ms_e,
             "sigma2_g_estimate": s2g_raw, "h2": h2, "h2_set_to_zero": set_to_zero, "replication": r_eff, "replication_basis": basis,
