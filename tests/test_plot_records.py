@@ -226,6 +226,15 @@ def test_the_plot_records_name_the_entries_without_a_value_of_the_variable(tmp_p
     assert "31.5" not in json.dumps(result.entries_without_value) and [r["germplasmDbId"] for r in result.records] == ["G1", "G2"]
 
 
+def test_a_partial_read_of_the_plot_records_records_nothing(tmp_path):
+    """Review of coach 11:50 NEXT 1, finding 3: with more plots on the server than were read, the entries without a value are not
+    known; the result records nothing (None), never the read part as the study's list."""
+    page = [unit(1, [obs(1, "V1", "12.5")]), unit(3, [])]
+    transport = FakeTransport().add("/observationunits", PAGE, ok(page_body(page, total_count=600, page=0, page_size=250)))
+    result = make_client(tmp_path, transport).plot_records("S1", "V1", approval=plot_approval())
+    assert result.status == "incomplete" and not result.complete and result.entries_without_value is None
+
+
 def test_get_observations_records_them_on_the_tables_manifest(tmp_path, monkeypatch):
     monkeypatch.setattr(bc, "PLOT_RECORD_HOSTS", ("synthetic.invalid",))
     ctx = synthetic_context(cache_dir=tmp_path / "cache", out_dir=tmp_path / "out", run_id="run_pr_nv")

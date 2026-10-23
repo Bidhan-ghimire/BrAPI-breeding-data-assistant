@@ -52,12 +52,13 @@ from contracts import (
     Statistic,
     StudyFilters,
 )
+from brapi_client import reads_plot_records
 from llm import Budget, ModelClient, run_agent_loop
 from plan_permissions import fetch_manifest
 
 __all__ = [
     "KnownStudy", "KnownVariable", "KnownMetadata", "Candidates", "find_candidates", "PlanDraft", "CoordinatorResult",
-    "COORDINATOR_SYSTEM_PROMPT", "NoTools", "draft_plan", "assemble_plan", "render_numeric_table", "sanitize_prose",
+    "COORDINATOR_SYSTEM_PROMPT", "NoTools", "draft_plan", "assemble_plan", "render_numeric_table", "sanitize_prose", "PLOT_RECORDS_PLANNER_NOTE",
     "RETRIEVER_ACTIONS", "ANALYST_ACTIONS", "DECISION_WORDS", "WHOLE_SET_WORDS", "WHOLE_SET_REJECTION", "ONE_OR_SEVERAL", "SCOPE_JUDGED_NOTE",
     "PERSON_REVIEWS_NOTE",
     "add_clarification", "clarifications_given", "person_words", "latest_words", "add_follow_up", "FOLLOW_UP_LABEL",
@@ -489,7 +490,8 @@ Rules:
      study's table>", percent="change" or "reduction" as the question words it, exclude=["..."] only with entries the question
      names (the app refuses any other)); when the question names entries to leave out, also get_observation_units of each study
      and pass the plot lists as roster_artifact_ids=["<each study's plot list>"] (a named entry with no value of the trait is then
-     named, not refused); a t-test asked as "A vs B"
+     named, not refused), unless the message says this server's plot records are read (they keep those entries already); a t-test
+     asked as "A vs B"
      or "A compared with B" takes the differences A - B when no percent or difference is asked (B's table as the base,
      percent="change"); a percent or a difference asked keeps the base its own wording gives (a change from A to B: A's
      table; "by what percent is B lower than A": A's table, percent="reduction"), and t keeps its sign label; statistic kind
@@ -852,8 +854,18 @@ FOLLOW_UP_NOTE = ("The question continues an earlier one: the lines before 'Foll
                   "what the follow-up leaves out (for example, 'and in 2025?' asks the same question for 2025 instead).")
 
 
+# coach 2026-10-23 11:50 UTC: where the measurements are read from the plot records, get_observations keeps the entries a study has
+# without a value of the trait (manifest.entries_without_value), so the plot lists for named exclusions are skipped (one fetch per
+# study saved); anywhere else the recipe line stands
+PLOT_RECORDS_PLANNER_NOTE = ("This server's plot records are read: get_observations already keeps the entries a study has without a "
+                             "value of the trait. So, for compare_trials_paired or stress_indices only, plan no get_observation_units "
+                             "for the entries the question names to leave out. Every other get_observation_units step stays exactly as "
+                             "its recipe says: plot_design for anova_trial or the reps, the plot or entry counts of a study, the check "
+                             "entries, plot_basis_h2's checks.")
+
+
 def _user_message(question: str, metadata: KnownMetadata | None, problems: list[str], earlier_questions: list[str] | None = None,
-                  person_reviews_scope: bool = False) -> str:
+                  person_reviews_scope: bool = False, base_url: str = "") -> str:
     """What the planner reads. Its own earlier questions are CONTEXT only: every rule in assemble_plan reads the question (the
     person's words), never these lines, so the planner's words cannot name a study or unlock a rule."""
     lines = [f"Question: {question}"]
@@ -865,6 +877,8 @@ def _user_message(question: str, metadata: KnownMetadata | None, problems: list[
         lines.extend(f"- your question {i}: {q}" for i, q in enumerate(earlier_questions, 1))
     if person_reviews_scope:
         lines.append(PERSON_REVIEWS_NOTE)
+    if reads_plot_records(base_url or (metadata.base_url if metadata is not None else "")):
+        lines.append(PLOT_RECORDS_PLANNER_NOTE)
     lines.append(metadata.summary_for_model(question) if metadata is not None else "No validated metadata is available yet; propose discovery.")
     if problems:
         lines.append("Your previous plan was rejected for these reasons; fix them and answer again:")
@@ -898,7 +912,8 @@ async def draft_plan(
     for attempt in range(1, max_replans + 2):
         result.attempts = attempt
         agent = await run_agent_loop(model, NoTools(), agent_name=f"coordinator_{attempt}", system_prompt=COORDINATOR_SYSTEM_PROMPT,
-                                     user_message=_user_message(question, metadata, problems, earlier_questions, person_reviews_scope) +
+                                     user_message=_user_message(question, metadata, problems, earlier_questions, person_reviews_scope,
+                                                                base_url=base_url) +
                                      ("\nCoordinator revision suggestion (not a user instruction or approval; keep the original question, "
                                       "validate all IDs and scope as usual): " + supervisor_instruction[:1200]
                                       if supervisor_instruction else ""),

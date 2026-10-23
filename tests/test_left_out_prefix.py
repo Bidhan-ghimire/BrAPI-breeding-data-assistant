@@ -301,6 +301,37 @@ def test_the_f4_gate_is_unchanged_with_plot_lists(tool):
     assert not r.ok and r.error.code == "not_authorized" and "art_9" in r.error.message and tools.inner.calls == []
 
 
+def test_on_a_plot_record_server_the_planner_is_told_to_skip_the_plot_lists(tmp_path):
+    """Coach 2026-10-23 11:50 UTC: the recipe line stays for the other servers (test_the_recipes_fetch_and_pass_the_plot_lists keeps
+    its assertion); on a server whose plot records are read, get_observations already keeps the entries without a value
+    (manifest.entries_without_value), so the planner's message says to skip those plot lists: one fetch per study saved."""
+    from llm import Budget, FakeModelClient, reply_text
+    question = "Compare dry matter between 4614 and 4608 for all entries except Beauregard and Tanzania."
+    on = co._user_message(question, None, [], base_url="https://sweetpotatobase.org/brapi/v2")
+    off = co._user_message(question, None, [], base_url="https://cassavabase.org/brapi/v2")
+    assert co.PLOT_RECORDS_PLANNER_NOTE in on and co.PLOT_RECORDS_PLANNER_NOTE not in off
+    # the words (review of this change, finding 1): the link to the prompt, the scope, and every other plot-list use kept (finding 2)
+    note = co.PLOT_RECORDS_PLANNER_NOTE
+    assert note.startswith("This server's plot records are read") and "already keeps the entries a study has without a value" in note
+    assert "for compare_trials_paired or stress_indices only, plan no get_observation_units for the entries the question names" in note
+    assert "Every other get_observation_units step stays exactly as its recipe says" in note
+    assert all(use in note for use in ("plot_design for anova_trial", "the plot or entry counts of a study", "the check entries",
+                                        "plot_basis_h2's checks"))
+    prompt = " ".join(co.COORDINATOR_SYSTEM_PROMPT.split())       # the exception sits in the compare_trials_paired recipe, after its line
+    assert ("also get_observation_units of each study and pass the plot lists as roster_artifact_ids=[\"<each study's plot list>\"] "
+            "(a named entry with no value of the trait is then named, not refused), unless the message says this server's plot "
+            "records are read") in prompt
+    model = FakeModelClient([reply_text(json.dumps({"status": "needs_clarification", "question": "Which trait?"}), model="mock-model")],
+                            reported_model="mock-model")
+
+    async def go():
+        return await co.draft_plan(question, model=model, metadata=None, base_url="https://sweetpotatobase.org/brapi/v2",
+                                   budget=Budget(), run_id="run_rc", log_dir=tmp_path / "logs")
+
+    anyio.run(go)
+    assert co.PLOT_RECORDS_PLANNER_NOTE in json.dumps(model.requests[0]["messages"])      # draft_plan hands the server on
+
+
 def test_the_recipes_fetch_and_pass_the_plot_lists():
     """The coordinator plans each study's plot list when the question names entries to leave out of T4 or T5, and the analyst
     passes them; the argument is in both tools' schemas."""

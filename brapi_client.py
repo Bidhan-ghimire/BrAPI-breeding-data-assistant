@@ -313,7 +313,7 @@ class PlotRecordsResult(CollectionResult):
     value of it, by identity alone (germplasmDbId -> germplasmName, never a value): the trial's entries a person may name though no
     row of the table shows them. get_observations keeps them on the table's manifest (coach 2026-10-23 09:51 UTC, (5))."""
 
-    entries_without_value: dict[str, str] = Field(default_factory=dict)
+    entries_without_value: dict[str, str] | None = Field(default_factory=dict)   # None: the fetch is not complete, so no record
 
 
 def _plot_record_rows(units: CollectionResult, study_id: str, variable_id: str) -> CollectionResult:
@@ -383,6 +383,8 @@ def _plot_record_rows(units: CollectionResult, study_id: str, variable_id: str) 
     reduced = units.model_copy(update={"records": rows, "returned_count": len(rows), "reported_total": None, "status": status,
                                        "complete": complete, "warnings": warnings})
     in_rows = {str(row["germplasmDbId"]) for row in rows if row.get("germplasmDbId") not in (None, "")}
+    if not units.complete:                                   # the plot list itself was not read whole: no record of the study's entries
+        return PlotRecordsResult(**reduced.model_dump(), entries_without_value=None)
     return PlotRecordsResult(**reduced.model_dump(), entries_without_value={entry: name for entry, name in sorted(entries.items())
                                                                               if entry not in in_rows})
 
