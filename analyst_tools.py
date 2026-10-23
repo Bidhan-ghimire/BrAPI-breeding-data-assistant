@@ -2755,6 +2755,8 @@ class _Pairing:
     only_base: int
     only_other: int
     removed: int
+    excluded_labels: list[str]                      # the person's names per left-out entry with a mean, in their order ("E5 / clone E5")
+    named_no_mean: list[str]                        # the person's names for entries with no mean in either trial (review finding 1)
 
 
 def _pair_two_trials(registry: ArtifactRegistry, base_id: str, other_id: str, a: Any, sides: tuple[str, str] = ("base", "other"),
@@ -2787,7 +2789,11 @@ def _pair_two_trials(registry: ArtifactRegistry, base_id: str, other_id: str, a:
         raise AnalystError("unsupported", f"the {sides[0]} table is in {units[0]} and the {sides[1]} in {units[1]}; {needs} ONE unit "
                                           "in both studies")
     names = {entry: base.labels.get(entry, set()) | other.labels.get(entry, set()) for entry in set(base.labels) | set(other.labels)}
-    excluded = _entries_in_any([base_table, other_table], a.by, label_col, a.exclude, "exclude")
+    named: dict[str, list[str]] = {}                          # entry -> the names the person gave for it (left_out_names, 06:49 UTC)
+    for name in dict.fromkeys(a.exclude):
+        for entry in sorted(_entries_in_any([base_table, other_table], a.by, label_col, [name], "exclude")):
+            named.setdefault(entry, []).append(name)
+    excluded = set(named)
     candidates = sorted(set(base.means) | set(other.means))
     outside = {e for e in candidates if a.name_prefix is not None and e not in excluded and not any(n.startswith(a.name_prefix) for n in names.get(e, ()))}
     kept = [e for e in candidates if e not in excluded and e not in outside]
@@ -2800,7 +2806,24 @@ def _pair_two_trials(registry: ArtifactRegistry, base_id: str, other_id: str, a:
                                           f"{sides[0]}: {only_base}, only in {sides[1]}: {only_other}, excluded: {removed}, outside the name "
                                           f"prefix: {len(outside)})")
     return _Pairing(base_table, other_table, base, other, label_col, names, excluded, outside, candidates, paired, only_base, only_other,
-                    removed)
+                    removed, [_names_label(given) for entry, given in named.items() if entry in base.means or entry in other.means],
+                    [_names_label(given) for entry, given in named.items() if not (entry in base.means or entry in other.means)])
+
+
+def _names_label(given: list[str]) -> str:
+    """One left-out entry as the person named it ("E5 / clone E5"); " | " would split the claim's parts (review finding 3)."""
+    return " / ".join(name.replace(" | ", " / ") for name in given)
+
+
+def _left_out_by_name(p: _Pairing) -> list[str]:
+    """anova_trial's words for the entries the person left out, with the count (Luna C27.1, 2026-10-23: the coordinator saw
+    "excluded 3" and could not verify the restriction the question asked for, so it stopped a right answer)."""
+    if not p.excluded_labels and not p.named_no_mean:
+        return []
+    count = len(p.excluded_labels)                        # the entries that had a mean: p.removed, listed one by one
+    left = (f"{', '.join(p.excluded_labels)} ({count} {'entry' if count == 1 else 'entries'})" if count else "no entry with a mean")
+    # an entry the person named that has no mean in either trial is named apart, never dropped (review of this set, finding 1)
+    return [f"left out by name: {left}" + (f"; named, no mean in either trial: {', '.join(p.named_no_mean)}" if p.named_no_mean else "")]
 
 
 def tool_compare_trials_paired(registry: ArtifactRegistry, a: CompareTrialsPairedArgs) -> ToolResult:
@@ -2819,6 +2842,7 @@ def tool_compare_trials_paired(registry: ArtifactRegistry, a: CompareTrialsPaire
     base_table, other_table, base, other, label_col = p.base_table, p.other_table, p.base, p.other, p.label_col
     names, excluded, outside, candidates, paired = p.names, p.excluded, p.outside, p.candidates, p.paired
     only_base, only_other, removed = p.only_base, p.only_other, p.removed
+    left_out_named = _left_out_by_name(p)                     # before p is reused for the paired t's p-value
 
     g = len(paired)
     sign = -1.0 if a.percent == "reduction" else 1.0
@@ -2885,7 +2909,7 @@ def tool_compare_trials_paired(registry: ArtifactRegistry, a: CompareTrialsPaire
     tail = " | " + " | ".join([f"base: {trait}{f' ({unit})' if unit else ''} in study {base.studies[0]}; other: study {other.studies[0]}",
                                f"{g} entries with a mean in both trials",
                                f"entry mean = the mean of the entry's valid values in the trial; base: {base.transformation}; other: "
-                               f"{other.transformation}", PAIR_NOTE])
+                               f"{other.transformation}", *left_out_named, PAIR_NOTE])
     variant = hashlib.sha256(json.dumps([base_table.manifest.sha256, other_table.manifest.sha256, a.by, a.value, a.percent, sorted(excluded),
                                          a.name_prefix, a.duplicate_policy, a.allow_incomplete]).encode("utf-8")).hexdigest()[:8]
     namespace = f"pair-{variant}"
@@ -2988,11 +3012,11 @@ def tool_compare_trials_paired(registry: ArtifactRegistry, a: CompareTrialsPaire
 STRESS_INDICES = ("STI", "GMP", "MP", "HM", "YI", "YSI", "TOL", "SSI", "RDI")
 STRESS_FORMULAS = {
     "STI": "STI = Yp x Ys / (mean Yp)^2 (Fernandez 1992)", "GMP": "GMP = sqrt(Yp x Ys) (Fernandez 1992)",
-    "MP": "MP = (Yp + Ys) / 2 (Rosielle and Hamblin 1981)", "HM": "HM = 2 x Yp x Ys / (Yp + Ys)",
+    "MP": "MP = (Yp + Ys) / 2 (Rosielle and Hamblin 1981)", "HM": "HM = 2 x Yp x Ys / (Yp + Ys) (Bidinger et al. 1987)",
     "YI": "YI = Ys / mean Ys (Gavuzzi et al. 1997)", "YSI": "YSI = Ys / Yp (Bouslama and Schapaugh 1984)",
     "TOL": "TOL = Yp - Ys (Rosielle and Hamblin 1981)",
     "SSI": "SSI = (1 - Ys / Yp) / SI, SI = 1 - mean Ys / mean Yp (Fischer and Maurer 1978)",
-    "RDI": "RDI = (Ys / Yp) / (mean Ys / mean Yp)",
+    "RDI": "RDI = (Ys / Yp) / (mean Ys / mean Yp) (Fischer and Wood 1979)",
 }
 STRESS_IN_UNITS = ("GMP", "MP", "HM", "TOL")                # in the trait's unit; the other indices are ratios
 STRESS_NOTE = "descriptive stress indices of recorded entry means, not a recommendation"
@@ -3087,7 +3111,7 @@ def tool_stress_indices(registry: ArtifactRegistry, a: StressIndicesArgs) -> Too
     tail = " | " + " | ".join([f"non-stress (Yp): {trait}{f' ({unit})' if unit else ''} in study {p.base.studies[0]}; stress (Ys): study "
                                f"{p.other.studies[0]}", f"{g} entries with a mean in both trials",
                                f"entry mean = the mean of the entry's valid values in the trial; non-stress: {p.base.transformation}; "
-                               f"stress: {p.other.transformation}", STRESS_NOTE])
+                               f"stress: {p.other.transformation}", *_left_out_by_name(p), STRESS_NOTE])
     variant = hashlib.sha256(json.dumps([p.base_table.manifest.sha256, p.other_table.manifest.sha256, a.by, a.value, a.rank_by, a.order,
                                          sorted(p.excluded), a.name_prefix, a.duplicate_policy, a.allow_incomplete]).encode("utf-8")).hexdigest()[:8]
     namespace = f"stress-{variant}"

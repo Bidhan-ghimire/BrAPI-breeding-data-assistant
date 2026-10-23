@@ -486,7 +486,8 @@ Rules:
    - the change of ONE trait between two studies on the entries in both (the two trial means, the difference, the percent
      change or reduction, the paired t on the entry means, Welch's t, the correlation between the trials): get_observations of
      each study, then compare_trials_paired(base_artifact_id="<the reference study's table>", other_artifact_id="<the other
-     study's table>", percent="change" or "reduction" as the question words it, exclude=["..."]); a t-test asked as "A vs B"
+     study's table>", percent="change" or "reduction" as the question words it, exclude=["..."] only with entries the question
+     names (the app refuses any other)); a t-test asked as "A vs B"
      or "A compared with B" takes the differences A - B when no percent or difference is asked (B's table as the base,
      percent="change"); a percent or a difference asked keeps the base its own wording gives (a change from A to B: A's
      table; "by what percent is B lower than A": A's table, percent="reduction"), and t keeps its sign label; statistic kind
