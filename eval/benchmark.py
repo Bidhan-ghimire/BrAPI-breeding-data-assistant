@@ -35,6 +35,7 @@ from typing import Any, Callable, Iterable
 sys.path.insert(0, str(Path(__file__).resolve().parent))           # the harness beside this file
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))    # the app
 import harness  # noqa: E402
+from console import say  # noqa: E402
 
 SUBQUESTIONS = Path(__file__).resolve().parent / "benchmark" / "spb_subquestions.json"
 RESULTS = harness.RESULTS
@@ -343,7 +344,7 @@ def run_subquestions(subs: list[dict[str, Any]], *, cache_copy: Path, out_dir: P
                          "refused_requests": 0 if allow_live else harness.RefusingTransport.refused,
                          "run_ids": [r.run_id for r in outcome.results], "tokens": tokens, "seconds": round(seconds, 2),
                          "caveat": s.get("caveat")})
-            print(f"{s['sub_id']:8} {s['tier']} {graded['bucket']:9} {seconds:6.1f}s  {graded['why'][:80]}", flush=True)
+            say(f"{s['sub_id']:8} {s['tier']} {graded['bucket']:9} {seconds:6.1f}s  {graded['why'][:80]}", flush=True)
     finally:
         harness.app.Job = saved_job
         if allow_live or not [th for th in threads if th.is_alive()]:

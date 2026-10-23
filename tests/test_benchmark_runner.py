@@ -67,3 +67,25 @@ def test_without_confirm_nothing_runs(place, capsys):
     path.write_text(json.dumps({"subquestions": SUBS}), encoding="utf-8")
     assert bench.main(["--cache", str(place.source), "--subquestions", str(path), "--results", str(place.root / "results")]) == 2
     assert "Add --confirm to run" in capsys.readouterr().out and not (place.root / "results").exists()
+
+
+def test_a_grade_the_console_cannot_hold_does_not_end_the_run(place, monkeypatch):
+    """Review of the console fix: the row line printed a grade's text bare, outside the row's error handling, so a character the
+    console's code page cannot hold (cp1252 on a redirected Windows console) would end the whole benchmark (deliberate bug J3)."""
+    import io
+    counts = bench.harness.reply_tokens
+    monkeypatch.setattr(bench.harness, "reply_tokens", lambda model, usage, detail: counts(model, usage, detail) or
+                        {"model": model, "input": 0, "cache_write": 0, "cache_read": 0, "output": 0})
+    grade = bench.grade
+    monkeypatch.setattr(bench, "grade", lambda *args, **kwargs: {**grade(*args, **kwargs), "why": "yield \u2265 20 t/ha"})
+    buffer = io.BytesIO()
+    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(buffer, encoding="cp1252", errors="strict", newline="\n", write_through=True))
+    place.seed(*FIXTURES)
+    path = place.root / "subs.json"
+    path.write_text(json.dumps({"subquestions": SUBS}), encoding="utf-8")
+    _model, front_door = scripted_front_door("data_question", "catalog_question")
+    status = bench.main(["--cache", str(place.source), "--subquestions", str(path), "--results", str(place.root / "results"),
+                         "--tiers", "T1", "--confirm"],
+                        base_config=place.base_config, make_models=synthetic_models, triage_model=front_door,
+                        preflight=lambda q: place.base_config(q).validate())
+    assert status == 0 and "yield ? 20 t/ha" in buffer.getvalue().decode("cp1252")

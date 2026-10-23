@@ -62,6 +62,7 @@ from metadata_answers import metadata_only_plan, materialize_metadata, analyze_m
 from catalog_answers import catalog_count_plan, capture_catalog_sources, run_catalog_plan_async
 import catalog_lists
 from breeding_mcp_server import BreedingMcpService
+from console import say as _say      # every console message (Luna 2026-10-23)
 from coordination_runtime import run_agent_led, SUPERVISOR_PROMPT
 
 __all__ = [
@@ -514,6 +515,7 @@ def scope_mismatches(manifest: FetchManifest, approval: FetchApproval) -> list[s
 # The controller
 # --------------------------------------------------------------------------
 
+
 @dataclass
 class Controller:
     config: RunConfig
@@ -846,7 +848,7 @@ class Controller:
             self.notes.append("catalog setup approved by the operator's standing approval (APP_CATALOG_STANDING_APPROVAL): "
                               "no catalog screen was shown; the catalogs only, never measurements")
         else:
-            print(self.catalog_approval_screen())
+            _say(self.catalog_approval_screen())
             answer = self._ask(CATALOG_PROMPT)
             if answer is None or answer.lower() != "approve catalog":
                 self.catalog_setup["status"] = "canceled"
@@ -989,7 +991,7 @@ class Controller:
                 self.notes.append("clarification needed but --auto never asks: " + (" | ".join(questions) or "the plan is not ready"))
                 return False
             for q in questions:
-                print(f"\nCLARIFICATION NEEDED: {q}")
+                _say(f"\nCLARIFICATION NEEDED: {q}")
             answer = self._ask(CLARIFY_PROMPT)
             if not answer:
                 self.execution_status = "canceled"
@@ -1068,7 +1070,7 @@ class Controller:
             self.notes.append("automatic approval is not supported; live requests need a human at the approval screen")
             return False
         for _edit in range(4):
-            print(self.approval_screen())
+            _say(self.approval_screen())
             answer = self._ask("approve / edit / cancel: ")
             if answer is None or answer.lower() == "cancel":
                 self.execution_status = "canceled"
@@ -1085,14 +1087,14 @@ class Controller:
                     known = {s.study_id for s in (self.metadata.studies if self.metadata else [])}
                     unknown = [x for x in ids if x not in known]
                     if unknown:
-                        print(f"unknown study IDs {unknown}; the metadata knows {sorted(known)}")
+                        _say(f"unknown study IDs {unknown}; the metadata knows {sorted(known)}")
                         continue
                     assert self.plan is not None
                     self.approval = None
                     try:
                         self.plan = narrowed_plan(self.plan, list(dict.fromkeys(ids)))
                     except ValueError as exc:
-                        print(str(exc))
+                        _say(str(exc))
                         self.notes.append(f"scope edit refused: {exc}")
                         continue
                     self.config = replace(self.config, question=self.plan.question)
@@ -1175,7 +1177,7 @@ class Controller:
             self.notes.append(f"data review blocked before analysis: {exc}")
             return False
         self.data_review.update(status="pending", artifacts=fingerprints)
-        print(self._data_review_markdown)
+        _say(self._data_review_markdown)
         answer = self._ask(DATA_REVIEW_PROMPT)
         if answer is None or answer.lower() in ("", "cancel", "reject"):
             self.data_review["status"] = "canceled"
@@ -1241,7 +1243,7 @@ class Controller:
                     if self.config.auto or self.retriever_answers >= self.config.max_clarification_rounds:
                         self.notes.append("retriever clarification stopped: no interactive reply or clarification limit reached")
                         break
-                    print("\nTHE RETRIEVER ASKS: " + self.retriever_questions[0])
+                    _say("\nTHE RETRIEVER ASKS: " + self.retriever_questions[0])
                     answer = self._ask(RETRIEVER_PROMPT)
                     if not answer or answer.lower() == "cancel" or answer.lower().startswith("change scope:"):
                         self.retrieval_canceled = True
@@ -1343,7 +1345,7 @@ class Controller:
                     or self.analyst_answers >= self.config.max_clarification_rounds):
                 return
             for q in asked:
-                print(f"\nTHE ANALYST ASKS: {q}")
+                _say(f"\nTHE ANALYST ASKS: {q}")
             answer = self._ask(ANALYST_PROMPT)
             if not answer:
                 self.analysis_canceled = True
@@ -1370,7 +1372,7 @@ class Controller:
             self.acceptance = "pending"
             self.notes.append("human_acceptance left pending: --auto never records acceptance")
             return
-        print(self.answer_markdown())
+        _say(self.answer_markdown())
         answer = self._ask("accept / reject (anything else = leave pending): ")
         if answer is not None and answer.lower() == "accept":
             self.acceptance = "accepted"

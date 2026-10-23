@@ -13,6 +13,7 @@ from typing import Any
 from agents.coordinator import add_clarification
 from agents.supervisor import choose_next
 from artifacts import ArtifactError
+from console import say
 from llm import FakeModelClient, reply_text
 from retrieval_review import verify_reviewed_tables
 
@@ -229,7 +230,7 @@ async def run_agent_led(c: Any) -> bool:
                 if c.config.auto:
                     c.execution_status = "needs_clarification"
                     return False
-                print("\nTHE COORDINATOR ASKS: " + choice.question)
+                say("\nTHE COORDINATOR ASKS: " + choice.question)
                 answer = c._ask(SUPERVISOR_PROMPT)
                 if not answer or answer.lower() == "cancel":
                     c.execution_status = "canceled"

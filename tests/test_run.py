@@ -434,3 +434,76 @@ def test_failed_runs_are_saved_with_evidence(tmp_path):
     assert reloaded.execution_status == "failed" and "provider_connection" in " ".join(result.retrieval.warnings)
     assert manifest["state_trace"][-1] == "record" and "Retrieval ended with status failed" in markdown
 
+
+# --- the console's code page (Luna 2026-10-23, the T4 pass) -------------------------------------------------------------
+
+def cp1252_console(monkeypatch):
+    """stdout as a Windows console redirected to a file: cp1252, strict."""
+    import io
+    buffer = io.BytesIO()
+    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(buffer, encoding="cp1252", errors="strict", newline="\n", write_through=True))
+    return buffer
+
+
+def test_an_answer_with_a_character_the_console_cannot_hold_still_completes(tmp_path, monkeypatch):
+    """6 of 15 Luna runs had a right analysis and failed at accept: the model's prose held U+2212 and print() raised on cp1252."""
+    original = ctl.Controller.answer_markdown
+    monkeypatch.setattr(ctl.Controller, "answer_markdown", lambda self: original(self) + "\nt = \u22124.1145")
+    buffer = cp1252_console(monkeypatch)
+    controller, result = go(cfg(tmp_path, auto=False), answers=["approve", "accept"])
+    assert result.execution_status == "completed" and result.human_acceptance == "accepted"
+    assert "t = ?4.1145" in buffer.getvalue().decode("cp1252")
+    assert "t = \u22124.1145" in controller.output_paths()["answer_md"].read_text(encoding="utf-8")    # the saved answer keeps it
+
+
+def test_every_console_message_survives_the_code_page(monkeypatch):
+    buffer = cp1252_console(monkeypatch)
+    ctl._say("THE ANALYST ASKS: is \u2212 or \u2264 the sign?")
+    assert buffer.getvalue().decode("cp1252") == "THE ANALYST ASKS: is ? or ? the sign?\n"
+
+
+def test_the_run_prints_only_through_console_say():
+    """Every console message of a run goes through console.say; a bare print() of model or person text could bring the crash back.
+    Review of the fix: the coordinator's question (coordination_runtime.py) was still printed bare."""
+    import coordination_runtime
+    import console
+    for module in (ctl, coordination_runtime):
+        assert "print(" not in Path(module.__file__).read_text(encoding="utf-8"), module.__name__
+    assert Path(console.__file__).read_text(encoding="utf-8").count("print(") == 1
+
+
+def test_the_coordinators_question_with_a_character_the_console_cannot_hold(tmp_path, monkeypatch):
+    """Review of the fix: an agent-led run without --auto (the app, the CLI, the harness) whose coordinator asks a question holding
+    U+2265 failed in state supervise, the same crash one file over. The question now reaches the console with a "?"."""
+    from dataclasses import replace
+    from llm import FakeModelClient, reply_text
+    from synthetic_support import hosted_config
+    for key, value in (("BRAPI_MODE", "live"), ("BRAPI_BASE_URL", "https://synthetic.invalid/brapi/v2"), ("LLM_ALLOW_REMOTE", "true"),
+                       ("LLM_API_KEY", "synthetic-regression-placeholder"), ("PART2_IGNORE_DOTENV", "true")):
+        monkeypatch.setenv(key, value)
+    buffer = cp1252_console(monkeypatch)
+    question = "Do you mean yield \u2265 20 t/ha, or every plot?"
+    decisions = [{"action": "clarify", "reason": "Two readings.", "question": question}, "retrieve", "analyze", "finish"]
+    supervisor = FakeModelClient([reply_text(json.dumps({"status": "completed", "payload": item if isinstance(item, dict) else
+                                                         {"action": item, "reason": "Synthetic next-stage decision."}})) for item in decisions])
+    config = hosted_config(tmp_path, Q, auto=False)
+    assert config.agent_led and not config.auto
+    controller = ctl.Controller(config, models=replace(synthetic_models(), supervisor=supervisor),
+                                answer_fn=scripted(["every plot", "approve", "continue", "accept"]))
+    result = asyncio.run(controller.run())
+    assert not any("UnicodeEncodeError" in note for note in result.notes) and result.execution_status != "failed"
+    assert "THE COORDINATOR ASKS: Do you mean yield ? 20 t/ha" in buffer.getvalue().decode("cp1252")
+
+
+def test_the_answer_files_are_the_runs_texts_in_utf_8_whatever_the_console(tmp_path, monkeypatch):
+    """Coach 2026-10-23 04:49 UTC: the console fix must not change answer.md or answer.json. Under a cp1252 console they are byte
+    for byte the run's own texts in UTF-8 (each "\\n" written as the platform's line end), the U+2212 included."""
+    import os
+    original = ctl.Controller.answer_markdown
+    monkeypatch.setattr(ctl.Controller, "answer_markdown", lambda self: original(self) + "\nt = \u22124.1145")
+    cp1252_console(monkeypatch)
+    controller, result = go(cfg(tmp_path, auto=False), answers=["approve", "accept"])
+    paths = controller.output_paths()
+    assert paths["answer_md"].read_bytes() == controller.answer_markdown().replace("\n", os.linesep).encode("utf-8")
+    assert paths["answer_json"].read_bytes() == ctl.dump_json(result).replace("\n", os.linesep).encode("utf-8")
+    assert "\u2212".encode("utf-8") in paths["answer_md"].read_bytes()
