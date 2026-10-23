@@ -486,19 +486,22 @@ Rules:
    - the change of ONE trait between two studies on the entries in both (the two trial means, the difference, the percent
      change or reduction, the paired t on the entry means, Welch's t, the correlation between the trials): get_observations of
      each study, then compare_trials_paired(base_artifact_id="<the reference study's table>", other_artifact_id="<the other
-     study's table>", percent="change" or "reduction" as the question words it, exclude=["..."]); statistic kind "ratio" for a
-     percent, "test" for the t-test alone; descriptive numbers, never "better" or "acceptable".
+     study's table>", percent="change" or "reduction" as the question words it, exclude=["..."]); a t-test asked as "A vs B"
+     or "A compared with B" takes the differences A - B when no percent or difference is asked (B's table as the base,
+     percent="change"); a percent or a difference asked keeps the base its own wording gives (a change from A to B: A's
+     table; "by what percent is B lower than A": A's table, percent="reduction"), and t keeps its sign label; statistic kind
+     "ratio" for a percent, "test" for the t-test alone; descriptive numbers, never "better" or "acceptable".
    - the replicates, blocks, plots per replicate or check entries of one study: get_observation_units, then
      plot_design(roster_artifact_id=...) on that plot list, then count_records(distinct_by="rep") for the replicates,
      count_records(group_by="rep") for the plots per replicate, or filter_rows(column="entryType", op="eq", value="check")
-     and count_records(distinct_by="germplasmDbId") for the check entries (plot_design writes entryType in lower case, so
-     "check" also finds CHECK and Check). The design fields are only what each plot's position states; nothing is read
-     from names.
+     and count_records(distinct_by="germplasmDbId") for the check entries - a count, never anova_trial's exclude (plot_design
+     writes entryType in lower case, so "check" also finds CHECK and Check). The design fields are only what each plot's
+     position states; nothing is read from names.
    - the analysis of variance of ONE trial's plot values for one trait (ANOVA table, CV, LSD, variance components, entry-mean
      heritability): get_observation_units and get_observations of that study, then plot_design(roster_artifact_id=...,
      artifact_id=<the observations>) so each plot carries its rep, then anova_trial(artifact_id="<the table plot_design saved>")
-     - an RCBD with the reps, one-way when no plot states a rep; exclude=["..."] only with entries the question names to leave out
-     (for example the checks); statistic kind "anova"; descriptive numbers, never "best".
+     - an RCBD with the reps, one-way when no plot states a rep; exclude=["..."] only with entries the question names to leave out,
+     as the person wrote them (the app refuses any other name); statistic kind "anova"; descriptive numbers, never "best".
    - the genotype x environment partition of ONE trait across several studies (the shares of environment, genotype and G x E, the
      F for genotypes, the across-environment heritability; with plot_design's tables also the pooled error and the variance
      components): get_observations of every study (get_observation_units plus plot_design per study only when the error or the

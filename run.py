@@ -1328,13 +1328,16 @@ class Controller:
         assert self.plan is not None and self.ctx is not None
         prefix = registry_prefix(artifacts[0])
         notes = self.analysis_notes()
+        # Each answer to the analyst is added to its question, as the planner's answers are: the guard reads the person's words
+        # there (exclude names, the cells rule; coach 2026-10-23 04:49 UTC). The note says which question it answers.
+        question = self.plan.question
         tool_options = {"raw_tools": raw_tools} if raw_tools is not None else {}
         while True:
             if self.models.analyst_factory is not None:
                 model = self.models.analyst_factory(prefix)
             else:
                 model = await self._real_model()
-            inputs = AnalysisInput(question=self.plan.question, artifact_ids=artifacts, requested_variable_ids=list(self.plan.scope.variable_ids),
+            inputs = AnalysisInput(question=question, artifact_ids=artifacts, requested_variable_ids=list(self.plan.scope.variable_ids),
                                    notes=notes)
             self.analysis, agent, self.narrative = await run_analyst(inputs, model=model, ctx=self.ctx, budget=self.budget, run_id=self.run_id,
                                                                      log_dir=self.run_dir.parent, model_requested=self.models.requested, **tool_options)
@@ -1356,6 +1359,7 @@ class Controller:
             self.notes.append(f"analyst clarification {self.analyst_answers}: the analyst asked: {shown} - "
                               f"answer{' (simulated)' if self.answers_simulated else ''}: {answer}")
             notes = [*notes, f"the person answered your earlier question ({shown}): {answer}"]
+            question = add_clarification(question, answer)
 
     def render_phase(self) -> None:
         assert self.analysis is not None
