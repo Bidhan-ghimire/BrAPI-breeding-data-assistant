@@ -447,7 +447,7 @@ def _anova_block(claims: list[Claim], source_labels: dict[tuple[str, ...], str])
         for part in parts:
             if part.startswith("r = "):
                 lines.append(_text("Replication: " + part + "."))
-            elif part.startswith(("adjusted:", "incomplete blocks not modelled:", "blocks not modelled:")):
+            elif part.startswith(("sequential least squares", "incomplete blocks not modelled:", "blocks not modelled:")):
                 lines.append(_text(part[0].upper() + part[1:] + "."))
         lines += ["", ANOVA_SENTENCE, ""]
         shown |= {claim.claim_id for claim in group}

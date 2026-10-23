@@ -811,7 +811,10 @@ def compact_tool_result(result: ToolResult, *, max_items: int = 5, max_string: i
     """A bounded JSON object for the model. Lists are cut with explicit omitted counts; long strings are
     replaced by a marker; handles (artifact_ids, request_ids) are always kept. Never a sliced JSON string."""
 
+    bounds = {"items": max_items, "string": max_string}
+
     def shrink(value: Any, depth: int) -> Any:
+        max_items, max_string = bounds["items"], bounds["string"]
         if isinstance(value, str):
             return value if len(value) <= max_string else {"omitted_string_chars": len(value), "starts_with": value[:80]}
         if isinstance(value, (int, float, bool)) or value is None:
@@ -865,7 +868,17 @@ def compact_tool_result(result: ToolResult, *, max_items: int = 5, max_string: i
         page_limit -= 1
         summary["data"] = model_data()
         text = json.dumps(summary, ensure_ascii=True, allow_nan=False)
+    # A long result (an analysis of variance) can pass the cap by a few characters: shorter lists and text come before dropping
+    # all data, which hid every number from the analyst on Luna (2026-10-23, E16.1: 6005 characters). The cap stays.
+    for items, string_cap in ((3, 200), (1, 120)):
+        if len(text) <= max_chars or "data" not in summary or page_key is not None:
+            break
+        bounds.update(items=items, string=string_cap)
+        summary["data"] = model_data()
+        summary["data_note"] = f"to fit a message, lists cut to {items} item(s) and text to {string_cap} characters"
+        text = json.dumps(summary, ensure_ascii=True, allow_nan=False)
     if len(text) > max_chars and "data" in summary:
+        summary.pop("data_note", None)
         keys = sorted(result.data.keys()) if isinstance(result.data, dict) else []
         summary["data"] = {"omitted_data": True, "keys": keys[:max_items], "keys_omitted": max(0, len(keys) - max_items)}
         summary["note"] = "data too large for a message; read the artifact by handle"

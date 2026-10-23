@@ -21,11 +21,34 @@ MAX_ANALYSIS_PASSES = 2
 SUPERVISOR_PROMPT = "Answer the coordinator's question before delegation (empty = cancel): "
 
 
+def _call_of(claim: Any) -> tuple[str, ...]:
+    """The tool call a claim came from, read from its ID: clm_v2_<artifact>_<namespace>_..., or clm_<artifact>_... for the tools
+    without a namespace."""
+    parts = claim.claim_id.split("_")
+    return tuple(parts[:5]) if parts[:2] == ["clm", "v2"] else tuple(parts[:3])
+
+
 def _overall_first(claims: list[Any]) -> list[Any]:
     """The claims with overall totals before per-item counts: the fewest filters first, otherwise in their own order. The
     view below keeps 20 claims; run_20261016T150253_016a3c counted 22 trait names, one count per name and the total last,
-    so the coordinator never saw the total and stopped the run."""
-    return sorted(claims, key=lambda claim: len(claim.filters))
+    so the coordinator never saw the total and stopped the run. Among claims with as many filters the calls take turns, each in
+    its own order: the analysis tools put their headline numbers first, and on Luna (2026-10-23, E16.1-E16.5) two or more
+    anova_trial calls left only the first call's claims in view, so the coordinator stopped. One call keeps its order. Claims
+    without a namespace (numeric_summary, count_records, group_stats: their "call" is only the table) keep their old place, before
+    the calls that take turns (review: C27.1's distinct-entry totals left the view)."""
+    by_filters = sorted(claims, key=lambda claim: len(claim.filters))
+    turn: dict[int, int] = {}
+    seen: dict[tuple[Any, ...], int] = {}
+    order: dict[tuple[str, ...], int] = {}
+    for claim in by_filters:
+        call = _call_of(claim)
+        order.setdefault(call, len(order))
+        key = (len(claim.filters), call)
+        turn[id(claim)] = seen.get(key, 0) if call[:2] == ("clm", "v2") else 0
+        seen[key] = seen.get(key, 0) + 1
+    # claims without a namespace first, in their original order; then the calls take turns
+    return sorted(by_filters, key=lambda claim: (len(claim.filters), 1, turn[id(claim)], order[_call_of(claim)])
+                  if _call_of(claim)[:2] == ("clm", "v2") else (len(claim.filters), 0, 0, 0))
 
 
 # Names for the Coordinator's view of the claims. Benchmark 2026-10-21: it saw entry IDs only and stopped A41.3 ("does not

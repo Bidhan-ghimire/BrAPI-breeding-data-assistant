@@ -250,3 +250,43 @@ def test_the_view_always_holds_the_old_view_and_lists_named_claims_first_in_the_
     assert len({id(c) for c in shown}) == len(shown) <= 2 * cr.VIEW_CLAIMS
     about = [c for c in cr._overall_first(claims) if any(item in named for item in c.filters.items())][:cr.VIEW_CLAIMS]
     assert shown[:len(about)] == about
+
+
+
+def test_the_view_lets_every_call_put_its_first_claims_in():
+    """Luna 2026-10-23 (coach 00:49 UTC, fix 3): claims with as many filters take turns by call, each call in its own order;
+    one call's order is unchanged; claims with more filters still come after."""
+    from contracts import Claim, Denominator
+
+    def made(artifact, namespace, i, filters=None):
+        head = f"clm_v2_{artifact}_{namespace}" if namespace else f"clm_{artifact}"
+        return Claim(claim_id=f"{head}_mean_x{i:02d}", kind="mean", value=float(i), denominator=Denominator(name="values", n=3),
+                     filters=filters or {}, source_artifact_hashes=["a" * 64], transformation=f"claim {i} of {artifact}")
+    one = [made("aaaaaa_0001", "anova-11111111", i) for i in range(25)]
+    assert cr._overall_first(one) == one                                       # one call: the order it came in
+    two = [made("bbbbbb_0002", "anova-22222222", i) for i in range(25)]
+    view = cr._view_claims(one + two, set())
+    assert [c.transformation for c in view[:4]] == ["claim 0 of aaaaaa_0001", "claim 0 of bbbbbb_0002", "claim 1 of aaaaaa_0001",
+                                                     "claim 1 of bbbbbb_0002"]
+    same_table = [made("aaaaaa_0001", "gxe-33333333", i) for i in range(25)]      # another call on the same table
+    assert [c.transformation for c in cr._view_claims(one + same_table, set())[:2]] == ["claim 0 of aaaaaa_0001"] * 2
+    assert cr._view_claims(one + same_table, set())[1] is same_table[0]
+    legacy = [made("cccccc_0003", None, i, filters={"germplasmDbId": f"G{i}"}) for i in range(3)]
+    ordered = cr._overall_first(legacy + one)
+    assert ordered[:25] == one and ordered[25:] == legacy                     # more filters still after
+
+
+
+def test_claims_without_a_namespace_keep_their_old_place():
+    """Review of fixes (1)-(4): numeric_summary, count_records and group_stats claims carry no namespace, so their "call" is the
+    table; taking turns pushed C27.1's distinct-entry totals out of view. They keep the old order, before the calls that take turns."""
+    from contracts import Claim, Denominator
+
+    def made(artifact, namespace, i):
+        head = f"clm_v2_{artifact}_{namespace}" if namespace else f"clm_{artifact}"
+        return Claim(claim_id=f"{head}_count_x{i:02d}", kind="count", value=i, denominator=Denominator(name="rows", n=30),
+                     source_artifact_hashes=["a" * 64], transformation=f"claim {i} of {artifact}")
+    legacy = [made("cccccc_0003", None, i) for i in range(9)]
+    calls = [made("aaaaaa_0001", "anova-11111111", i) for i in range(25)] + [made("bbbbbb_0002", "anova-22222222", i) for i in range(25)]
+    view = cr._view_claims(calls + legacy, set())
+    assert view[:9] == legacy and [c.transformation for c in view[9:11]] == ["claim 0 of aaaaaa_0001", "claim 0 of bbbbbb_0002"]

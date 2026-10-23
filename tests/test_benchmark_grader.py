@@ -547,3 +547,15 @@ def test_numbers_in_a_claims_missing_reason_are_backed():
                "n_independent_units": None, "exclusions": [], "filters": {}, "grouping": [], "transformation": "genotype variance sigma2 g"}]
     g = bench.grade(sub(expected=[]), shown=f"Variance components not available ({reason}).", status="run ended", claims=claims)
     assert g["invented"] == []
+
+
+
+def test_a_tiny_number_is_backed_only_by_a_claim_near_it():
+    """Review of fixes (1)-(4): the 1e-9 slack backed any shown number below 1e-9 by any claim below 1e-9, so a wrong tiny p
+    passed once fix (1) showed p's with their digits."""
+    claims = [{"kind": "anova", "value": 5.69e-25, "denominator": {"name": "plots", "n": 40}, "n_independent_units": None,
+               "exclusions": [], "filters": {}, "grouping": [], "transformation": "RCBD ANOVA: p of entry"}]
+    wrong = bench.grade(sub(), shown="| Entry | 3.2e-12 |", status="run ended", claims=claims)
+    assert [item["value"] for item in wrong["invented"]] == [3.2e-12]
+    right = bench.grade(sub(), shown="| Entry | 5.69e-25 |", status="run ended", claims=claims)
+    assert right["invented"] == []

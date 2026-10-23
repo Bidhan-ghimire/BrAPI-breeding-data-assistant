@@ -586,3 +586,16 @@ def test_a_cut_off_empty_reply_is_still_incomplete(tmp_path):
     model = FakeModelClient([reply_text("", finish_reason="length"), reply_text(FINAL)])
     result = run_loop(model, RecordingTools(), tmp_path)
     assert result.status == "incomplete" and result.model_calls == 1
+
+
+
+def test_compact_summary_cuts_lists_and_text_before_dropping_all_data():
+    """Review of fixes (1)-(4), 2026-10-23: an anova_trial preview of 6005 characters lost ALL its data, so the analyst saw no
+    number (E16.1 on Luna). Shorter lists and text come first; the cap itself stays."""
+    rows = [{"name": f"row {i}", "text": "w" * 390, "more": "x" * 390, "other": "y" * 390} for i in range(5)]
+    big = ToolResult(ok=True, data={"h2": 0.75, "rows": rows}, artifact_ids=["art_abcdef_0003"], complete=True)
+    first = json.dumps({"data": {"h2": 0.75, "rows": rows}})
+    assert len(first) > 6000                                                  # the first pass is over the cap
+    summary = llm.compact_tool_result(big)
+    assert "omitted_data" not in summary["data"] and summary["data"]["h2"] == 0.75 and len(json.dumps(summary)) <= 6000
+    assert summary["data"]["rows"][-1] == {"omitted_items": 2} and "cut to 3 item(s)" in summary["data_note"]

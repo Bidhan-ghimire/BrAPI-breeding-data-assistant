@@ -157,7 +157,8 @@ def _backed(value: float, decimals: int, sources: list[float]) -> bool:
     """A shown number is backed when some source rounds to it at the shown precision ("2.38" backs 2.37857). An endless source
     backs nothing: an all-digit ID of 309 digits or more reads as inf, and abs(inf - x) <= inf (review 2026-10-22, round 2)."""
     half = 0.5 * 10 ** -decimals
-    return any(math.isfinite(s) and abs(s - value) <= half + 1e-9 * max(1.0, abs(s)) for s in sources)
+    # float noise is relative: a fixed 1e-9 floor let any tiny claim back any tiny shown number (review of fixes (1)-(4))
+    return any(math.isfinite(s) and abs(s - value) <= half + 1e-9 * abs(s) for s in sources)
 
 
 def _match(expected: dict[str, Any], tolerance: dict[str, Any], shown: list[tuple[float, int, int, int]]) -> tuple[float, int, int, int] | None:

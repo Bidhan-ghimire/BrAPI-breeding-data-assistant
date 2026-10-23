@@ -438,3 +438,64 @@ def test_a_p_below_what_a_double_holds_is_shown_as_a_bound(tmp_path):
     r = anova(ctx.registry, save(ctx.registry, plots(values, reps=False), rep_column=False))
     p = next(k for k in claims(r) if k.transformation.startswith("one-way ANOVA: p of entry"))
     assert p.value == 0.0 and "p below 1e-300" in p.transformation and "| &lt; 1e-300 |" in answer(ctx, r)
+
+
+
+# --- 7. Luna 2026-10-23 (A40.5, E16.1-E16.5): headline claims first, the coordinator's view, the label ---------------
+
+HEADLINE = ("entry-mean heritability H2", "genotype variance sigma2 g", "error variance sigma2 e", "RCBD ANOVA: f of entry",
+            "RCBD ANOVA: p of entry", "RCBD ANOVA: ms of entry", "RCBD ANOVA: ms of error")
+
+
+def test_the_coordinators_view_holds_the_headline_numbers_of_one_trial(registry):
+    """A40.5: the coordinator sees 20 claims; H2 was claim 23 of 23 and never reached it, so the run stopped."""
+    import coordination_runtime as cr
+    r = anova(registry, save(registry, plots(RICE, drop=(("50", 2),))))
+    assert len(claims(r)) > cr.VIEW_CLAIMS
+    seen = {k.transformation.split(" | ")[0] for k in cr._view_claims(claims(r), set())}
+    assert set(HEADLINE) <= seen, set(HEADLINE) - seen
+
+
+def test_the_coordinators_view_holds_every_trials_headline_numbers(registry):
+    """E16.1-E16.5: two or more anova_trial calls; the view held only the first study's claims, so the run stopped."""
+    import coordination_runtime as cr
+    first = anova(registry, save(registry, plots(RICE, drop=(("50", 2),)), study="S1"))
+    second = anova(registry, save(registry, plots(RICE, drop=(("75", 3),)), study="S2"))
+    third = anova(registry, save(registry, plots(RICE), study="S3"))
+    view = cr._view_claims(claims(first) + claims(second) + claims(third), set())
+    for r in (first, second, third):
+        ids = {k.claim_id for k in claims(r) if k.transformation.split(" | ")[0] in ("entry-mean heritability H2", "error variance sigma2 e")}
+        assert ids <= {k.claim_id for k in view}
+
+
+def test_missing_plots_are_labelled_as_the_sequential_ols_fit(tmp_path):
+    """E16.1/E16.2: "adjusted" was read as not the requested sequential OLS fit; it is that fit, reps first."""
+    ctx = synthetic_context(cache_dir=tmp_path / "cache", out_dir=tmp_path / "out", run_id="run_anova_label")
+    r = anova(ctx.registry, save(ctx.registry, plots(RICE, drop=(("50", 2),))))
+    shown = answer(ctx, r)
+    assert "Sequential least squares, reps first \\(the OLS fit\\): 1 entry x rep cell\\(s\\) without a plot." in shown and "Adjusted:" not in shown
+    assert any("sequential least squares, reps first (the OLS fit)" in w for w in r.warnings)
+    assert all("sequential least squares, reps first (the OLS fit)" in k.transformation for k in claims(r))
+
+
+
+# --- 9. the fresh review of fixes (1)-(4), 2026-10-23 ----------------------------------------------------------------
+
+def test_mixed_calls_keep_each_trials_mean_squares_in_view(registry):
+    """Review: E16.2 (2 anova_trial + 2 numeric_summary calls) lost MS of entry from the coordinator's view."""
+    import coordination_runtime as cr
+    all_claims = []
+    for study, drop in (("S1", (("50", 2),)), ("S2", (("75", 3),))):
+        tid = save(registry, plots(RICE, drop=drop), study=study)
+        all_claims += claims(anova(registry, tid))
+        all_claims += [Claim.model_validate(k) for k in at.dispatch_analyst(registry, "numeric_summary", {"artifact_id": tid}).data["claims"]]
+    seen = [(k.source_artifact_hashes[0], k.transformation.split(" | ")[0]) for k in cr._view_claims(all_claims, set())]
+    for name in ("entry-mean heritability H2", "RCBD ANOVA: ms of entry", "RCBD ANOVA: ms of error", "genotype variance sigma2 g"):
+        assert sum(1 for _, n in seen if n == name) == 2, name
+
+
+def test_missing_plots_speak_of_least_squares_means(registry):
+    """Review: "adjusted entry means" in the precision note kept the word the coordinator misread."""
+    drop = tuple(zip(RICE, (1, 2, 3, 4, 1, 2)))                           # every entry 3 plots, 6 cells empty: the equal-count note
+    r = anova(registry, save(registry, plots(RICE, drop=drop)))
+    assert all("least-squares entry means" in k.transformation and "adjusted entry means" not in k.transformation for k in claims(r))

@@ -1884,7 +1884,7 @@ def tool_plot_design(registry: ArtifactRegistry, a: PlotDesignArgs) -> ToolResul
 # with missing plots the least-squares (fitting-constants) analysis with reps first, from a small reps x reps system.
 ANOVA_NOTE = "descriptive analysis of variance of recorded plot values within one trial, not a recommendation"
 ANOVA_RESULT_COLUMNS = {
-    "source": "rep, entry, error or total (an RCBD with missing plots: entries adjusted for reps, reps first)",
+    "source": "rep, entry, error or total (an RCBD with missing plots: sequential least squares, reps first (the OLS fit))",
     "df": "degrees of freedom",
     "ss": "sum of squares",
     "ms": "mean square = SS / df ('' for total)",
@@ -2033,7 +2033,7 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
     CV % = 100 x sqrt(MS error) / grand mean, the SE of an entry mean sqrt(MS error / r), the SED sqrt(2 MS error / r), the LSD
     (5%) = t(0.975, df error) x SED, the variance components sigma2 e = MS error and sigma2 g = (MS entry - MS error) / r (set to
     0 and flagged when negative) and the entry-mean heritability sigma2 g / (sigma2 g + sigma2 e / r), within this trial. An RCBD
-    with missing plots gets the least-squares analysis with reps first (entries adjusted for reps), labelled adjusted; with
+    with missing plots gets the least-squares analysis with reps first, labelled "sequential least squares, reps first (the OLS fit)"; with
     unequal plot counts r is the harmonic mean of the entries' plot counts, flagged. Values are averaged per plot first only
     with duplicate_policy='mean_per_unit'. Refused, never guessed: more than one study or variable, two plots of one entry in
     one rep, a rep on only some plots, a design that is not connected, fewer than 2 entries, an RCBD with fewer than 2 reps, no
@@ -2123,8 +2123,8 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
     if not approximate:
         basis = f"every entry has {counts[0]} plot(s)"
     elif equal:
-        basis = (f"r = {r_eff:.6g} plots per entry, but {res.empty_cells} entry x rep cell(s) have no plot, so the adjusted entry means "
-                 "are correlated: SE, SED and LSD are approximate (the SED of adjusted means differs per pair: larger on average, and "
+        basis = (f"r = {r_eff:.6g} plots per entry, but {res.empty_cells} entry x rep cell(s) have no plot, so the least-squares entry "
+                 "means are correlated: SE, SED and LSD are approximate (the SED of least-squares means differs per pair: larger on average, and "
                  "for some pairs much larger)")
     else:
         basis = (f"r = {r_eff:.6g}, the harmonic mean of the entries' plot counts ({min(counts)} to {max(counts)}): SE, SED, LSD and H2 "
@@ -2152,7 +2152,7 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
     shape = f"{res.n} plots: {res.entries} entries x {res.reps} reps" if rcbd else f"{res.n} plots: {res.entries} entries, no reps"
     context = [f"{trait} in study {study}", shape]
     if res.adjusted:
-        context.append(f"adjusted: least squares (fitting constants), reps first, {res.empty_cells} entry x rep cell(s) without a plot")
+        context.append(f"sequential least squares, reps first (the OLS fit): {res.empty_cells} entry x rep cell(s) without a plot")     # Luna E16.1: "adjusted" read as not OLS
     if approximate:
         context.append(basis)
     if blocks_in_reps:
@@ -2190,10 +2190,17 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
     claims.append(Claim(claim_id=_claim_id(aid, "heritability", "entry-mean", namespace=namespace), kind="heritability", value=h2,
                         missing_reason=None if h2 is not None else "no variance between or within entries",
                         transformation=f"entry-mean heritability H2{tail} | {H2_TEXT}{flag}", **common))
+    # the headline numbers first: the coordinator's view keeps 20 claims (coordination_runtime VIEW_CLAIMS), and on Luna
+    # (2026-10-23, A40.5) H2 was claim 23 of 23 and never reached it
+    headline = {name: i for i, name in enumerate((
+        "entry-mean heritability H2", f"{res.design} ANOVA: ms of entry", f"{res.design} ANOVA: ms of error", "genotype variance sigma2 g",
+        "error variance sigma2 e", f"{res.design} ANOVA: f of entry", f"{res.design} ANOVA: p of entry", "CV", "SED", "LSD (5%)",
+        "SE of an entry mean", "grand mean"))}                        # the mean squares right after H2: 4 calls share 20 claims (review)
+    claims.sort(key=lambda claim: headline.get(claim.transformation.split(" | ")[0], len(headline)))
 
     result_rows = [{"source": row["source"], "df": str(row["df"]),
                     **{q: "" if row[q] is None else repr(row[q]) for q in ("ss", "ms", "f", "p")}} for row in res.rows]
-    lineage = [f"lineage: anova_trial of {aid} sha256={table.manifest.sha256}", f"design: {res.design}" + (", adjusted" if res.adjusted else ""),
+    lineage = [f"lineage: anova_trial of {aid} sha256={table.manifest.sha256}", f"design: {res.design}" + (", sequential least squares, reps first (the OLS fit)" if res.adjusted else ""),
                f"analysis target: {ANALYSIS_TARGET}"]
     manifest = registry.save_table(result_rows, kind="analysis_result", columns=ANOVA_RESULT_COLUMNS, complete=table.manifest.complete,
                                    source_request_ids=list(table.manifest.source_request_ids), study_ids=[study], variable_ids=[variable],
@@ -2204,7 +2211,7 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
     elif not rcbd:
         warnings.append(f"no plot states a rep in column {a.rep!r}: one-way analysis (entries only)")
     if res.adjusted:
-        warnings.append(f"{res.empty_cells} entry x rep cell(s) have no plot: entries adjusted for reps (least squares, reps first)")
+        warnings.append(f"{res.empty_cells} entry x rep cell(s) have no plot: sequential least squares, reps first (the OLS fit)")
     if approximate:
         warnings.append(f"approximate precision: {basis}")
     if zero_error:
