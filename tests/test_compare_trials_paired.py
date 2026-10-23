@@ -372,9 +372,9 @@ def test_every_number_the_answer_shows_is_backed_by_a_claim(tmp_path):
 
 
 def test_every_menu_and_prompt_names_the_tool():
-    assert "compare_trials_paired" in at.ANALYST_TOOL_NAMES and len(at.ANALYST_TOOL_NAMES) == 15
+    assert "compare_trials_paired" in at.ANALYST_TOOL_NAMES and len(at.ANALYST_TOOL_NAMES) == 16
     assert "compare_trials_paired" in an.NUMERIC_TOOLS and "compare_trials_paired" in an.DERIVING_TOOLS
-    assert "fifteen fixed tools" in an.ANALYST_SYSTEM_PROMPT and "compare_trials_paired(base_artifact_id=" in an.ANALYST_SYSTEM_PROMPT
+    assert "sixteen fixed tools" in an.ANALYST_SYSTEM_PROMPT and "compare_trials_paired(base_artifact_id=" in an.ANALYST_SYSTEM_PROMPT
     assert "compare_trials_paired" in co.ANALYST_ACTIONS and "compare_trials_paired(base_artifact_id=" in co.COORDINATOR_SYSTEM_PROMPT
     schema = next(s for s in at.analyst_tool_schemas() if s["name"] == "compare_trials_paired")
     assert schema["inputSchema"]["required"] == ["base_artifact_id", "other_artifact_id"] and "paired t" in schema["description"]

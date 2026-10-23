@@ -68,7 +68,7 @@ RETRIEVER_ACTIONS = frozenset({"server_info", "search_studies", "study_types", "
                                "list_locations", "list_programs", "list_seasons", "get_observation_units", "export_metadata"})
 ANALYST_ACTIONS = frozenset({"table_info", "numeric_summary", "group_stats", "filter_rows", "concat_tables", "missing_report", "count_records",
                              "rank_entries", "threshold_count", "correlate_entry_means", "plot_design", "anova_trial",
-                             "gxe_partition", "compare_trials_paired"})
+                             "gxe_partition", "compare_trials_paired", "stress_indices"})
 DISCOVERY_FAMILIES: frozenset[str] = frozenset({"serverinfo", "commoncropnames", "studies", "observationvariables", "locations", "programs", "seasons"})
 # Wording that makes a question about SEVERAL studies (so "all known studies" may be its scope). A question that names one study
 # by an unknown name has none of these, and then no study may be chosen for the user. Seen 2026-09-28: a strong model answered
@@ -491,6 +491,10 @@ Rules:
      percent="change"); a percent or a difference asked keeps the base its own wording gives (a change from A to B: A's
      table; "by what percent is B lower than A": A's table, percent="reduction"), and t keeps its sign label; statistic kind
      "ratio" for a percent, "test" for the t-test alone; descriptive numbers, never "better" or "acceptable".
+   - stress indices of ONE trait between a non-stress and a stress study (STI, GMP, MP, HM, YI, YSI, TOL, SSI, RDI; which entries
+     have the highest STI): get_observations of each study, then stress_indices(nonstress_artifact_id="<the non-stress study's
+     table>", stress_artifact_id="<the stress study's table>", rank_by="STI"; exclude=["..."] only with entries the question
+     names); statistic kind "ratio"; descriptive numbers, never "tolerant", "susceptible" or "best".
    - the replicates, blocks, plots per replicate or check entries of one study: get_observation_units, then
      plot_design(roster_artifact_id=...) on that plot list, then count_records(distinct_by="rep") for the replicates,
      count_records(group_by="rep") for the plots per replicate, or filter_rows(column="entryType", op="eq", value="check")

@@ -248,7 +248,7 @@ def _ranking_block(claims: list[Claim], sources: _Sources, source_labels: dict[t
     by_id = {claim.claim_id: claim for claim in claims}
     rankings: dict[tuple[Any, ...], list[tuple[Claim, Claim | None]]] = defaultdict(list)
     for claim in claims:
-        if claim.kind == "rank":
+        if claim.kind == "rank" and not _STRESS_CALL.match(claim.claim_id):        # stress_indices' ranks are in its own table (T5)
             head, _, tail = claim.claim_id.partition("_rank_")
             rankings[(tuple(sorted(claim.source_artifact_hashes)), claim.denominator.name, claim.denominator.n, head)].append(
                 (claim, by_id.get(f"{head}_mean_{tail}")))
@@ -585,6 +585,67 @@ def _pair_block(claims: list[Claim], source_labels: dict[tuple[str, ...], str]) 
     return lines, shown
 
 
+STRESS_SENTENCE = "Descriptive numbers only: stress indices of recorded entry means of two trials, not a recommendation."
+_STRESS_CALL = re.compile(r"^(clm_v2_[0-9a-f]{6}_[0-9]{4,}_stress-[0-9a-f]{8})_")
+_STRESS_STUDIES = re.compile(r" in study (.+); stress \(Ys\): study (.+)$")
+
+
+def _stress_block(claims: list[Claim], sources: _Sources, source_labels: dict[tuple[str, ...], str]) -> tuple[list[str], set[str]]:
+    """T5 (2026-10-23): the claims of one stress_indices call as the ranked entries (Rank, Entry, the index, Yp, Ys; names from the
+    fetched tables), the two population means and SI, the index's formula and what was left out, then the descriptive sentence.
+    Returns the lines and the IDs of the claims shown."""
+    calls: dict[str, list[Claim]] = defaultdict(list)
+    for claim in claims:
+        match = _STRESS_CALL.match(claim.claim_id)
+        if match:
+            calls[match[1]].append(claim)
+    lines: list[str] = []
+    shown: set[str] = set()
+    for group in calls.values():
+        named = {claim.transformation.split(" | ")[0]: claim for claim in group if not claim.filters}
+        mean_p, mean_s = named.get("mean of the non-stress entry means"), named.get("mean of the stress entry means")
+        ranks = sorted((claim for claim in group if claim.kind == "rank"), key=lambda claim: (claim.value, sorted(claim.filters.items())))
+        if mean_p is None or mean_s is None or not ranks:
+            continue
+        per_entry: dict[tuple[tuple[str, str], ...], dict[str, Claim]] = defaultdict(dict)
+        for claim in group:
+            if claim.filters:
+                per_entry[tuple(sorted(claim.filters.items()))][claim.transformation.split(" | ")[0]] = claim
+        head = ranks[0].transformation.split(" | ")[0]                        # "rank by STI, highest first"
+        index, order = head[len("rank by "):].split(", ", 1)
+        rows = [row for fingerprint in ranks[0].source_artifact_hashes for row in (sources.rows((fingerprint,)) or [])]
+        table = []
+        for rank in ranks:
+            cells = per_entry[tuple(sorted(rank.filters.items()))]
+            entry = [" · ".join([value, *[found for found in (_names(rows, column, value, name_column)
+                                                              for name_column, _ in NAMES.get(column, (column, ()))[1]) if found]])
+                     for column, value in rank.filters.items()]
+            shown_value = cells.get(f"{index} of the entry")
+            yp, ys = cells.get("the entry's non-stress mean Yp"), cells.get("the entry's stress mean Ys")
+            table.append([_number(rank.value), "; ".join(entry),
+                          *("n/a" if claim is None or claim.value is None else _anova_number(claim.value) for claim in (shown_value, yp, ys))])
+        studies = _STRESS_STUDIES.search(mean_p.transformation.split(" | ")[1])
+        unit = f" {_text(mean_p.unit)}" if mean_p.unit else ""
+        si = named.get("stress intensity SI")
+        formula = next((claim.transformation.split(" | ")[-1] for claim in group if claim.transformation.startswith(f"{index} of the entry")), "")
+        label = source_labels.get(tuple(sorted(mean_p.source_artifact_hashes)), "")
+        lines += [f"**Stress indices of entry means, {mean_p.denominator.n} entries in both trials{label}**", "",
+                  *_table(["Rank", "Entry", index, "Yp", "Ys"], table), "", f"Ranked by {index}, {order}; tied entries share a rank."]
+        lines.append(f"Non-stress (Yp): study {studies[1] if studies else ''}, mean of the entry means {_anova_number(mean_p.value)}{unit}; "
+                     f"stress (Ys): study {studies[2] if studies else ''}, {_anova_number(mean_s.value)}{unit}; "
+                     + (f"stress intensity SI {_anova_number(si.value)}." if si is not None and si.value is not None else
+                        f"stress intensity SI not available ({_text(si.missing_reason if si is not None and si.missing_reason else 'reason not provided')})."))
+        if formula:
+            lines.append(f"{formula}.")
+        left = "; ".join(f"{item.reason[len('entries '):].replace('left out: ', '')} {item.count}" for item in mean_p.exclusions
+                         if item.reason.startswith("entries "))
+        if left:
+            lines.append(_text(f"Left out: {left}."))
+        lines += ["", STRESS_SENTENCE, ""]
+        shown |= {claim.claim_id for claim in group}
+    return lines, shown
+
+
 def _numeric_blocks(claims: list[Claim], sources: _Sources, source_labels: dict[tuple[str, ...], str], *, focus_mean: bool = False) -> list[str]:
     groups: dict[tuple[Any, ...], list[Claim]] = defaultdict(list)
     for claim in claims:
@@ -895,7 +956,8 @@ def answer_summary(controller: Any) -> str:
     anova_lines, in_anova = _anova_block(claims, source_labels)
     gxe_lines, in_gxe = _gxe_block(claims, source_labels)
     pair_lines, in_pair = _pair_block(claims, source_labels)
-    in_ranking |= in_threshold | in_correlation | in_anova | in_gxe | in_pair
+    stress_lines, in_stress = _stress_block(claims, sources, source_labels)
+    in_ranking |= in_threshold | in_correlation | in_anova | in_gxe | in_pair | in_stress
     # a mean the ranking table shows is not shown again (group_stats on the same table states the same entry mean; review)
     ranked_means = {(tuple(sorted(c.source_artifact_hashes)), tuple(sorted(c.filters.items())), c.value)
                     for c in claims if c.claim_id in in_ranking and c.kind == "mean" and c.claim_id not in in_threshold}
@@ -911,7 +973,7 @@ def answer_summary(controller: Any) -> str:
             buckets[(tuple(sorted(claim.source_artifact_hashes)), claim.grouping[0], claim.denominator.name, claim.denominator.n)].append(claim)
         else:
             other.append(claim)
-    lines: list[str] = [*ranking, *thresholds, *correlations, *anova_lines, *gxe_lines, *pair_lines]
+    lines: list[str] = [*ranking, *thresholds, *correlations, *anova_lines, *gxe_lines, *pair_lines, *stress_lines]
     in_catalog_titles: set[str] = set()              # distinct counts a catalog block's title already leads with
     for key, group in buckets.items():
         block = _catalog_block(group, sources, source_labels.get(key[0], ""), focus_count=focus_count)

@@ -31,15 +31,15 @@ __all__ = [
 
 FIXTURE_DIR = PART2_DIR / "tests" / "fixtures" / "model_analyst"
 NUMERIC_TOOLS = frozenset({"numeric_summary", "group_stats", "count_records", "rank_entries", "threshold_count", "correlate_entry_means", "anova_trial",
-                           "gxe_partition", "compare_trials_paired"})   # return claims
+                           "gxe_partition", "compare_trials_paired", "stress_indices"})   # return claims
 DERIVING_TOOLS = frozenset({"group_stats", "filter_rows", "concat_tables", "rank_entries", "threshold_count", "correlate_entry_means", "plot_design", "anova_trial",
-                            "gxe_partition", "compare_trials_paired"})       # save new artifacts
+                            "gxe_partition", "compare_trials_paired", "stress_indices"})       # save new artifacts
 # Review 2 of R1 (2026-10-21): without "highest-yielding" this filter let "the highest-yielding clone, so it should be advanced"
 # through, so it stays until Bidhan decides how advice that rides on an ordering is caught (asked, not changed).
 _SUPERIORITY = re.compile(r"\b(best|superior|outperform\w*|top[- ]performing|winner|genetically (better|superior)|highest[- ]yielding)\b", re.IGNORECASE)
 
 ANALYST_SYSTEM_PROMPT = """You are the Analyst for a read-only plant-breeding database. You compute NOTHING yourself.
-You have fifteen fixed tools that read registered artifacts (handles like art_3f9a2c_0001) and return typed claims.
+You have sixteen fixed tools that read registered artifacts (handles like art_3f9a2c_0001) and return typed claims.
 Rules:
 1. Start with table_info for EVERY supplied artifact. Check that it is complete, that it measures the variable the
    question is about (trait, unit, timepoint), and whether duplicates or unknown independence are reported.
@@ -64,8 +64,10 @@ Rules:
    percent="change" (other - base) or "reduction" (base - other) as the question words it; a t-test asked as "A vs B" or "A
    compared with B" takes the differences A - B when no percent or difference is asked (B's table as the base,
    percent="change"); a percent or a difference asked keeps the base its own wording gives (a change from A to B: A's table;
-   "by what percent is B lower than A": A's table, percent="reduction"), and t keeps its sign label);
-   to rank entries by the mean of
+   "by what percent is B lower than A": A's table, percent="reduction"), and t keeps its sign label); for stress indices of
+   one trait between a non-stress and a stress study (STI, GMP, MP, HM, YI, YSI, TOL, SSI, RDI; the entries ranked by one of
+   them) call stress_indices(nonstress_artifact_id=<the non-stress study's table>, stress_artifact_id=<the stress study's
+   table>, rank_by="STI"); to rank entries by the mean of
    their per-study means (each study weighted equally) call
    rank_entries(basis="study_means") on a table of every study (concat_tables); for catalog questions call count_records. Use exact column names from table_info. Never pass a file path, never invent a handle, never
    ask for a tool you do not have.

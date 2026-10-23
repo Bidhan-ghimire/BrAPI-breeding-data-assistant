@@ -177,9 +177,9 @@ def test_correlation_is_a_claim_kind_and_a_plan_statistic_kind():
 
 
 def test_every_menu_and_prompt_names_the_tool():
-    assert "correlate_entry_means" in at.ANALYST_TOOL_NAMES and len(at.ANALYST_TOOL_NAMES) == 15
+    assert "correlate_entry_means" in at.ANALYST_TOOL_NAMES and len(at.ANALYST_TOOL_NAMES) == 16
     assert "correlate_entry_means" in an.NUMERIC_TOOLS and "correlate_entry_means" in an.DERIVING_TOOLS
-    assert "fifteen fixed tools" in an.ANALYST_SYSTEM_PROMPT and "correlate_entry_means" in an.ANALYST_SYSTEM_PROMPT
+    assert "sixteen fixed tools" in an.ANALYST_SYSTEM_PROMPT and "correlate_entry_means" in an.ANALYST_SYSTEM_PROMPT
     assert "correlate_entry_means" in co.ANALYST_ACTIONS and "correlate_entry_means(artifact_ids=[" in co.COORDINATOR_SYSTEM_PROMPT
     schema = next(s for s in at.analyst_tool_schemas() if s["name"] == "correlate_entry_means")
     assert schema["inputSchema"]["required"] == ["artifact_ids"] and "Spearman" in schema["description"]

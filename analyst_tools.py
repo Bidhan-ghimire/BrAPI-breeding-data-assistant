@@ -522,6 +522,24 @@ class CompareTrialsPairedArgs(ToolArgs):
     allow_incomplete: bool = Field(default=False)
 
 
+class StressIndicesArgs(ToolArgs):
+    nonstress_artifact_id: ArtifactId = Field(description="the measurements of the non-stress trial (Yp): ONE study (a registered handle "
+                                                          "such as art_3f9a2c_0001)")
+    stress_artifact_id: ArtifactId = Field(description="the measurements of the stress trial (Ys): ONE other study, the same variable")
+    by: str = Field(default="germplasmDbId", description="the entry ID column both tables share (names are carried as labels)")
+    value: str = Field(default=VALUE_COL)
+    rank_by: Literal["STI", "GMP", "MP", "HM", "YI", "YSI", "TOL", "SSI", "RDI"] = Field(default="STI", description="the index the "
+                                                                                          "entries are ranked by")
+    order: Literal["highest", "lowest"] = Field(default="highest", description="which end of the order comes first")
+    top_k: int = Field(default=3, ge=1, le=50, description="how many entries to state from the top of the order; entries tied with the "
+                                                           "last one are stated too")
+    exclude: list[str] = Field(default_factory=list, max_length=50, description="entries (exact ID or exact name) the person named to leave "
+                                                                                "out, for example the checks")
+    name_prefix: str | None = Field(default=None, min_length=1, description="keep only the entries whose name starts with this exact text, for example PH17.")
+    duplicate_policy: DuplicatePolicy = Field(default="reject", description="what to do with repeated measurements of one plot")
+    allow_incomplete: bool = Field(default=False)
+
+
 # --------------------------------------------------------------------------
 # The thirteen tools
 # --------------------------------------------------------------------------
@@ -2721,6 +2739,70 @@ def _scaled_sd(values: list[float]) -> float:
     return scale * math.sqrt(math.fsum((v - mean) ** 2 for v in scaled) / (len(scaled) - 1))
 
 
+@dataclass
+class _Pairing:
+    """Two one-study tables of one trait and the entries with a mean in both (compare_trials_paired, T4; stress_indices, T5)."""
+    base_table: Table
+    other_table: Table
+    base: _EntryMeans
+    other: _EntryMeans
+    label_col: str | None
+    names: dict[str, set[str]]
+    excluded: set[str]
+    outside: set[str]
+    candidates: list[str]
+    paired: list[str]
+    only_base: int
+    only_other: int
+    removed: int
+
+
+def _pair_two_trials(registry: ArtifactRegistry, base_id: str, other_id: str, a: Any, sides: tuple[str, str] = ("base", "other"),
+                     needs: str = "a paired comparison needs") -> _Pairing:
+    """Two measurement tables of ONE study each and one variable, their entry means and the entries with a mean in both; named
+    entries left out (exclude) and one family kept (name_prefix). Refused, never guessed: the same table, rows or study twice, a
+    table of other than one study, two variables, name_prefix without a name column, fewer than 3 shared entries."""
+    base_table, other_table = _load(registry, base_id), _load(registry, other_id)
+    if base_table.manifest.artifact_id == other_table.manifest.artifact_id or base_table.manifest.sha256 == other_table.manifest.sha256:
+        raise AnalystError("invalid_argument", f"{base_table.manifest.artifact_id} and {other_table.manifest.artifact_id} hold the same rows; "
+                                               "compare two different studies")
+    if a.by.endswith("Name"):
+        raise AnalystError("invalid_argument", f"pair by the ID column, not {a.by!r}; names are carried as labels")
+    label_col = LABEL_FOR.get(a.by)
+    label_col = label_col if label_col in base_table.manifest.columns and label_col in other_table.manifest.columns else None
+    if a.name_prefix is not None and label_col is None:
+        raise AnalystError("invalid_argument", f"name_prefix needs a name column beside {a.by!r} in both tables")
+    base, other = _entry_means(base_table, a, label_col), _entry_means(other_table, a, label_col)
+    for side, e in ((sides[0], base), (sides[1], other)):
+        if len(e.studies) != 1:
+            raise AnalystError("unsupported", f"the {side} table {e.table.manifest.artifact_id} holds {len(e.studies)} studies "
+                                              f"({', '.join(e.studies) or 'none'}); each side is ONE study: split it with filter_rows on studyDbId")
+    if base.studies == other.studies:
+        raise AnalystError("unsupported", f"both tables hold the same study ({base.studies[0]}); compare two different studies")
+    if base.variable != other.variable:
+        raise AnalystError("unsupported", f"the {sides[0]} table measures {base.variable} and the {sides[1]} {other.variable}; {needs} "
+                                          "ONE variable (one trait) in both studies")
+    units = [((t.manifest.measurement.unit if t.manifest.measurement else None) or "").strip() for t in (base_table, other_table)]
+    if all(units) and "".join(units[0].lower().split()) != "".join(units[1].lower().split()):   # review of T5: t/ha beside kg/ha
+        raise AnalystError("unsupported", f"the {sides[0]} table is in {units[0]} and the {sides[1]} in {units[1]}; {needs} ONE unit "
+                                          "in both studies")
+    names = {entry: base.labels.get(entry, set()) | other.labels.get(entry, set()) for entry in set(base.labels) | set(other.labels)}
+    excluded = _entries_in_any([base_table, other_table], a.by, label_col, a.exclude, "exclude")
+    candidates = sorted(set(base.means) | set(other.means))
+    outside = {e for e in candidates if a.name_prefix is not None and e not in excluded and not any(n.startswith(a.name_prefix) for n in names.get(e, ()))}
+    kept = [e for e in candidates if e not in excluded and e not in outside]
+    paired = [e for e in kept if e in base.means and e in other.means]
+    only_base = sum(1 for e in kept if e in base.means and e not in other.means)
+    only_other = sum(1 for e in kept if e in other.means and e not in base.means)
+    removed = sum(1 for e in excluded if e in base.means or e in other.means)              # named entries that had a mean to lose
+    if len(paired) < 3:
+        raise AnalystError("unsupported", f"{len(paired)} entries have a mean in both trials; {needs} at least 3 (only in "
+                                          f"{sides[0]}: {only_base}, only in {sides[1]}: {only_other}, excluded: {removed}, outside the name "
+                                          f"prefix: {len(outside)})")
+    return _Pairing(base_table, other_table, base, other, label_col, names, excluded, outside, candidates, paired, only_base, only_other,
+                    removed)
+
+
 def tool_compare_trials_paired(registry: ArtifactRegistry, a: CompareTrialsPairedArgs) -> ToolResult:
     """The change of ONE trait between two studies (trials), on the entries with a mean in both (research build order T4): the
     mean of the entry means in each trial, the mean difference and the percent of the base mean (percent="change": other - base;
@@ -2733,39 +2815,10 @@ def tool_compare_trials_paired(registry: ArtifactRegistry, a: CompareTrialsPaire
     or rows twice; two variables; a value of 1e200 or more; several values of one plot unless duplicate_policy='mean_per_unit'.
     Every entry and why it was or was not compared is saved as an analysis_result artifact. Descriptive numbers of recorded
     values, never a choice of entries or a judgement such as an acceptable harvest date."""
-    base_table, other_table = _load(registry, a.base_artifact_id), _load(registry, a.other_artifact_id)
-    if base_table.manifest.artifact_id == other_table.manifest.artifact_id or base_table.manifest.sha256 == other_table.manifest.sha256:
-        raise AnalystError("invalid_argument", f"{base_table.manifest.artifact_id} and {other_table.manifest.artifact_id} hold the same rows; "
-                                               "compare two different studies")
-    if a.by.endswith("Name"):
-        raise AnalystError("invalid_argument", f"pair by the ID column, not {a.by!r}; names are carried as labels")
-    label_col = LABEL_FOR.get(a.by)
-    label_col = label_col if label_col in base_table.manifest.columns and label_col in other_table.manifest.columns else None
-    if a.name_prefix is not None and label_col is None:
-        raise AnalystError("invalid_argument", f"name_prefix needs a name column beside {a.by!r} in both tables")
-    base, other = _entry_means(base_table, a, label_col), _entry_means(other_table, a, label_col)
-    for side, e in (("base", base), ("other", other)):
-        if len(e.studies) != 1:
-            raise AnalystError("unsupported", f"the {side} table {e.table.manifest.artifact_id} holds {len(e.studies)} studies "
-                                              f"({', '.join(e.studies) or 'none'}); each side is ONE study: split it with filter_rows on studyDbId")
-    if base.studies == other.studies:
-        raise AnalystError("unsupported", f"both tables hold the same study ({base.studies[0]}); compare two different studies")
-    if base.variable != other.variable:
-        raise AnalystError("unsupported", f"the base table measures {base.variable} and the other {other.variable}; a paired comparison needs "
-                                          "ONE variable (one trait) in both studies")
-    names = {entry: base.labels.get(entry, set()) | other.labels.get(entry, set()) for entry in set(base.labels) | set(other.labels)}
-    excluded = _entries_in_any([base_table, other_table], a.by, label_col, a.exclude, "exclude")
-    candidates = sorted(set(base.means) | set(other.means))
-    outside = {e for e in candidates if a.name_prefix is not None and e not in excluded and not any(n.startswith(a.name_prefix) for n in names.get(e, ()))}
-    kept = [e for e in candidates if e not in excluded and e not in outside]
-    paired = [e for e in kept if e in base.means and e in other.means]
-    only_base = sum(1 for e in kept if e in base.means and e not in other.means)
-    only_other = sum(1 for e in kept if e in other.means and e not in base.means)
-    removed = sum(1 for e in excluded if e in base.means or e in other.means)              # named entries that had a mean to lose
-    if len(paired) < 3:
-        raise AnalystError("unsupported", f"{len(paired)} entries have a mean in both trials; a paired comparison needs at least 3 (only in "
-                                          f"base: {only_base}, only in other: {only_other}, excluded: {removed}, outside the name prefix: "
-                                          f"{len(outside)})")
+    p = _pair_two_trials(registry, a.base_artifact_id, a.other_artifact_id, a)
+    base_table, other_table, base, other, label_col = p.base_table, p.other_table, p.base, p.other, p.label_col
+    names, excluded, outside, candidates, paired = p.names, p.excluded, p.outside, p.candidates, p.paired
+    only_base, only_other, removed = p.only_base, p.only_other, p.removed
 
     g = len(paired)
     sign = -1.0 if a.percent == "reduction" else 1.0
@@ -2930,8 +2983,196 @@ def tool_compare_trials_paired(registry: ArtifactRegistry, a: CompareTrialsPaire
                       complete=complete, warnings=warnings)
 
 
+# T5 (coach 2026-10-23 03:48 UTC, NEXT 3; research build order T5): stress indices of ONE trait between a non-stress and a stress
+# study, on the entries in both. Measured first (t5_stress_indices_20261023/UNLOCKS.md): C33.4 and C34.4 ask for the highest STI.
+STRESS_INDICES = ("STI", "GMP", "MP", "HM", "YI", "YSI", "TOL", "SSI", "RDI")
+STRESS_FORMULAS = {
+    "STI": "STI = Yp x Ys / (mean Yp)^2 (Fernandez 1992)", "GMP": "GMP = sqrt(Yp x Ys) (Fernandez 1992)",
+    "MP": "MP = (Yp + Ys) / 2 (Rosielle and Hamblin 1981)", "HM": "HM = 2 x Yp x Ys / (Yp + Ys)",
+    "YI": "YI = Ys / mean Ys (Gavuzzi et al. 1997)", "YSI": "YSI = Ys / Yp (Bouslama and Schapaugh 1984)",
+    "TOL": "TOL = Yp - Ys (Rosielle and Hamblin 1981)",
+    "SSI": "SSI = (1 - Ys / Yp) / SI, SI = 1 - mean Ys / mean Yp (Fischer and Maurer 1978)",
+    "RDI": "RDI = (Ys / Yp) / (mean Ys / mean Yp)",
+}
+STRESS_IN_UNITS = ("GMP", "MP", "HM", "TOL")                # in the trait's unit; the other indices are ratios
+STRESS_NOTE = "descriptive stress indices of recorded entry means, not a recommendation"
+STRESS_RESULT_COLUMNS = {
+    "entry": "exact entry ID", "label": "name carried from the label column, if any",
+    "paired": "true when the entry has a mean in both trials",
+    "left_out": "why an entry has no indices ('' when paired): only in non-stress, only in stress, excluded, outside the name prefix",
+    "yp": "the entry's mean in the non-stress trial (Yp), full precision ('' = none)",
+    "ys": "the entry's mean in the stress trial (Ys), full precision ('' = none)",
+    **{index: f"{STRESS_FORMULAS[index]}; '' = undefined, the reason in note" for index in STRESS_INDICES},
+    "rank": "rank by the requested index ('' when not ranked)", "note": "why an index is undefined for the entry ('' otherwise)",
+}
+
+
+def tool_stress_indices(registry: ArtifactRegistry, a: StressIndicesArgs) -> ToolResult:
+    """Stress indices of ONE trait between a non-stress study (Yp) and a stress study (Ys), on the entries with a mean in both
+    (research build order T5): per entry STI = Yp x Ys / (mean Yp)^2, GMP = sqrt(Yp x Ys), MP = (Yp + Ys) / 2, HM = 2 x Yp x Ys /
+    (Yp + Ys), YI = Ys / mean Ys, YSI = Ys / Yp, TOL = Yp - Ys, SSI = (1 - Ys / Yp) / SI with SI = 1 - mean Ys / mean Yp, and RDI =
+    (Ys / Yp) / (mean Ys / mean Yp); the population means and SI; and the entries ranked by one index (rank_by, highest or
+    lowest first; top_k stated with their Yp and Ys; ties share a rank). An entry's mean in a trial is the mean of its valid
+    values there; the pairing, exclude and name_prefix are compare_trials_paired's. An index that is undefined for an entry (Yp
+    0, Yp + Ys 0, SI 0, a population mean 0) is left empty with the reason; 0 is judged against the largest plot value.
+    Refused, never guessed: negative entry means (no ratio scale), no entry with a defined rank_by, fewer than 3 shared
+    entries, a table of other than one study, the same study, table or rows twice, two variables. Every entry's indices are
+    saved as an analysis_result artifact. Descriptive numbers of recorded values, never a choice of entries or a label."""
+    p = _pair_two_trials(registry, a.nonstress_artifact_id, a.stress_artifact_id, a, sides=("non-stress", "stress"), needs="stress indices need")
+    paired, g = p.paired, len(p.paired)
+    peak_p, peak_s = max(p.base.peaks[e] for e in paired), max(p.other.peaks[e] for e in paired)
+    yp, ys = {e: p.base.means[e][0] for e in paired}, {e: p.other.means[e][0] for e in paired}
+    negative = (sum(1 for v in yp.values() if v < -PAIR_ZERO * peak_p), sum(1 for v in ys.values() if v < -PAIR_ZERO * peak_s))
+    if any(negative):
+        raise AnalystError("unsupported", f"stress indices need values on a ratio scale; the entry means include negative values "
+                                          f"({negative[0]} under non-stress, {negative[1]} under stress)")
+    # a mean of float residue is 0 (T4's residue rule): plot values that cancel (0.1 + 0.2 - 0.3) leave 1e-17, not a tiny Yp
+    yp = {e: 0.0 if v <= PAIR_ZERO * p.base.peaks[e] else v for e, v in yp.items()}
+    ys = {e: 0.0 if v <= PAIR_ZERO * p.other.peaks[e] else v for e, v in ys.items()}
+    mean_p, mean_s = math.fsum(yp.values()) / g, math.fsum(ys.values()) / g
+    zero_p, zero_s = mean_p <= PAIR_ZERO * peak_p, mean_s <= PAIR_ZERO * peak_s
+    si = None if zero_p else 1 - mean_s / mean_p
+    si_reason = "the non-stress mean is 0: SI is undefined" if zero_p else None
+    si_zero = si is not None and abs(si) <= PAIR_ZERO        # the two means equal at the data's precision
+    if si_zero:
+        si = 0.0
+    values: dict[str, dict[str, float | None]] = {}
+    why: dict[str, dict[str, str]] = {}
+    for e in paired:
+        yp_e, ys_e = yp[e], ys[e]
+        v: dict[str, float | None] = {"TOL": yp_e - ys_e, "MP": (yp_e + ys_e) / 2, "GMP": math.sqrt(yp_e) * math.sqrt(ys_e)}
+        reasons: dict[str, str] = {}
+        # without the product Yp x Ys, which overflows for values of 1e180 and underflows for 1e-160
+        v["HM"] = None if yp_e == 0 and ys_e == 0 else 0.0 if yp_e == 0 or ys_e == 0 else 2 / (1 / yp_e + 1 / ys_e)
+        v["STI"] = None if zero_p else (yp_e / mean_p) * (ys_e / mean_p)
+        v["YI"] = None if zero_s else ys_e / mean_s
+        v["YSI"] = None if yp_e == 0 else ys_e / yp_e
+        v["SSI"] = None if yp_e == 0 or si is None or si_zero else (1 - ys_e / yp_e) / si
+        v["RDI"] = None if yp_e == 0 or zero_p or zero_s else (ys_e / yp_e) / (mean_s / mean_p)
+        for index, reason in (("HM", "Yp + Ys is 0"), ("STI", "mean Yp is 0"), ("YI", "mean Ys is 0"), ("YSI", "Yp is 0"),
+                              ("SSI", "Yp is 0" if yp_e == 0 else "SI is 0" if si_zero else "mean Yp is 0"),
+                              ("RDI", "Yp is 0" if yp_e == 0 else "mean Yp is 0" if zero_p else "mean Ys is 0")):
+            if v[index] is None:
+                reasons[index] = reason
+        for index, value in v.items():            # review of T5: Ys / Yp of 1e199 / 1e-199 is no number (it wrote 'inf')
+            if value is not None and not math.isfinite(value):
+                v[index], reasons[index] = None, "beyond the float range"
+        values[e], why[e] = v, reasons
+    ranked = [e for e in paired if values[e][a.rank_by] is not None]
+    not_ranked = [e for e in paired if values[e][a.rank_by] is None]
+    if not ranked:
+        raise AnalystError("unsupported", f"no entry has a defined {a.rank_by}: {why[paired[0]][a.rank_by]}")
+    tie = {e: float(format(values[e][a.rank_by], ".12g")) for e in ranked}          # the project's tie rule (rank_entries)
+    ranked.sort(key=lambda e: ((-tie[e] if a.order == "highest" else tie[e]), e))
+    rank = {e: 1 + sum(1 for o in ranked if (tie[o] > tie[e] if a.order == "highest" else tie[o] < tie[e])) for e in ranked}
+    cut = rank[ranked[min(a.top_k, len(ranked)) - 1]]
+    stated = [e for e in ranked if rank[e] <= cut]
+
+    label = {entry: "; ".join(sorted(found)) for entry, found in p.names.items()}
+    exclusions: list[Exclusion] = []
+    for side, e in (("non-stress", p.base), ("stress", p.other)):
+        exclusions += [Exclusion(reason=f"{side}: {item.reason}", count=item.count) for item in _exclusions(e.classified)]
+        if e.no_study_rows:
+            exclusions.append(Exclusion(reason=f"{side}: rows with an empty studyDbId", count=e.no_study_rows))
+        if e.no_entry_values:
+            exclusions.append(Exclusion(reason=f"{side}: rows with an empty {a.by}", count=e.no_entry_values))
+    for reason, n in (("entries only in the non-stress trial", p.only_base), ("entries only in the stress trial", p.only_other),
+                      ("entries left out: excluded", p.removed), ("entries left out: outside the name prefix", len(p.outside)),
+                      (f"entries not ranked: {a.rank_by} undefined", len(not_ranked))):
+        if n:
+            exclusions.append(Exclusion(reason=reason, count=n))
+    unit = p.base_table.manifest.measurement.unit
+    trait = p.base_table.manifest.measurement.trait or p.base.variable
+    first = "highest first" if a.order == "highest" else "lowest first"
+    tail = " | " + " | ".join([f"non-stress (Yp): {trait}{f' ({unit})' if unit else ''} in study {p.base.studies[0]}; stress (Ys): study "
+                               f"{p.other.studies[0]}", f"{g} entries with a mean in both trials",
+                               f"entry mean = the mean of the entry's valid values in the trial; non-stress: {p.base.transformation}; "
+                               f"stress: {p.other.transformation}", STRESS_NOTE])
+    variant = hashlib.sha256(json.dumps([p.base_table.manifest.sha256, p.other_table.manifest.sha256, a.by, a.value, a.rank_by, a.order,
+                                         sorted(p.excluded), a.name_prefix, a.duplicate_policy, a.allow_incomplete]).encode("utf-8")).hexdigest()[:8]
+    namespace = f"stress-{variant}"
+    aid = p.base_table.manifest.artifact_id
+    pairs = Denominator(name="entries with a mean in both trials (pairs)", n=g)
+    common = {"n_independent_units": None, "source_artifact_hashes": [p.base_table.manifest.sha256, p.other_table.manifest.sha256],
+              "grouping": [a.by], "exclusions": exclusions}
+    index_kind = "mean" if a.rank_by in STRESS_IN_UNITS else "ratio"
+    claims: list[Claim] = []
+    for e in stated:                                          # the top entries first: the coordinator's view keeps 20 claims
+        f = {a.by: e}
+        claims += [
+            Claim(claim_id=_claim_id(aid, index_kind, a.rank_by.lower(), e, namespace=namespace), kind=index_kind, value=values[e][a.rank_by],
+                  unit=unit if a.rank_by in STRESS_IN_UNITS else None, denominator=pairs, filters=f,
+                  transformation=f"{a.rank_by} of the entry{tail} | {STRESS_FORMULAS[a.rank_by]}", **common),
+            Claim(claim_id=_claim_id(aid, "rank", a.rank_by.lower(), e, namespace=namespace), kind="rank", value=rank[e], filters=f,
+                  denominator=Denominator(name=f"entries ranked by {a.rank_by}, {first}", n=len(ranked)),
+                  transformation=f"rank by {a.rank_by}, {first}{tail} | ties share a rank (12 significant digits)", **common),
+            Claim(claim_id=_claim_id(aid, "mean", "yp", e, namespace=namespace), kind="mean", value=yp[e], unit=unit, filters=f,
+                  denominator=Denominator(name=f"valid values of entry {e} in the non-stress trial", n=p.base.means[e][1]),
+                  transformation=f"the entry's non-stress mean Yp{tail}", **common),
+            Claim(claim_id=_claim_id(aid, "mean", "ys", e, namespace=namespace), kind="mean", value=ys[e], unit=unit, filters=f,
+                  denominator=Denominator(name=f"valid values of entry {e} in the stress trial", n=p.other.means[e][1]),
+                  transformation=f"the entry's stress mean Ys{tail}", **common),
+        ]
+    claims += [
+        Claim(claim_id=_claim_id(aid, "mean", "nonstress", namespace=namespace), kind="mean", value=mean_p, unit=unit, denominator=pairs,
+              transformation=f"mean of the non-stress entry means{tail}", **common),
+        Claim(claim_id=_claim_id(aid, "mean", "stress", namespace=namespace), kind="mean", value=mean_s, unit=unit, denominator=pairs,
+              transformation=f"mean of the stress entry means{tail}", **common),
+        Claim(claim_id=_claim_id(aid, "ratio", "si", namespace=namespace), kind="ratio", value=si, missing_reason=si_reason, denominator=pairs,
+              transformation=f"stress intensity SI{tail} | SI = 1 - mean Ys / mean Yp", **common),
+        Claim(claim_id=_claim_id(aid, "count", "pairs", namespace=namespace), kind="count", value=g, denominator=pairs,
+              transformation=f"entries in both trials{tail}", **common),
+    ]
+
+    result_rows = []
+    for e in sorted(set(p.candidates) | p.excluded):
+        bm, om = p.base.means.get(e), p.other.means.get(e)
+        left = ("excluded" if e in p.excluded else "outside the name prefix" if e in p.outside else "" if e in values
+                else "only in non-stress" if bm is not None else "only in stress")
+        result_rows.append({"entry": e, "label": label.get(e, ""), "paired": "true" if e in values else "false", "left_out": left,
+                            "yp": "" if bm is None else repr(yp.get(e, bm[0])), "ys": "" if om is None else repr(ys.get(e, om[0])),
+                            **{index: "" if e not in values or values[e][index] is None else repr(values[e][index]) for index in STRESS_INDICES},
+                            "rank": str(rank[e]) if e in rank else "",
+                            "note": "; ".join(f"{index}: {reason}" for index, reason in why.get(e, {}).items())})
+    lineage = [f"lineage: stress_indices of {p.base_table.manifest.artifact_id} sha256={p.base_table.manifest.sha256} (non-stress) and "
+               f"{p.other_table.manifest.artifact_id} sha256={p.other_table.manifest.sha256} (stress)", f"ranked by {a.rank_by}, {first}",
+               f"left out: excluded {sorted(p.excluded)}, name_prefix {a.name_prefix!r}", f"analysis target: {ANALYSIS_TARGET}"]
+    complete = bool(p.base_table.manifest.complete and p.other_table.manifest.complete)
+    manifest = registry.save_table(result_rows, kind="analysis_result", columns=STRESS_RESULT_COLUMNS, complete=complete,
+                                   source_request_ids=list(dict.fromkeys([*p.base_table.manifest.source_request_ids,
+                                                                          *p.other_table.manifest.source_request_ids])),
+                                   study_ids=[p.base.studies[0], p.other.studies[0]], variable_ids=[p.base.variable],
+                                   measurement=p.base_table.manifest.measurement, quality_notes=lineage)
+    data = {"nonstress_artifact_id": p.base_table.manifest.artifact_id, "stress_artifact_id": p.other_table.manifest.artifact_id,
+            "result_artifact_id": manifest.artifact_id, "nonstress_study": p.base.studies[0], "stress_study": p.other.studies[0],
+            "variable_id": p.base.variable, "unit": unit, "n_pairs": g, "mean_yp": mean_p, "mean_ys": mean_s, "si": si,
+            "si_missing_reason": si_reason, "rank_by": a.rank_by, "order": first, "formula": STRESS_FORMULAS[a.rank_by],
+            "stated": [{"entry": e, "label": label.get(e, ""), "rank": rank[e], "value": values[e][a.rank_by], "yp": yp[e], "ys": ys[e]}
+                       for e in stated],
+            "not_ranked": [{"entry": e, "label": label.get(e, ""), "reason": f"{a.rank_by} is undefined: {why[e][a.rank_by]}"} for e in not_ranked],
+            "unpaired": {"only in non-stress": p.only_base, "only in stress": p.only_other},
+            "left_out": {"excluded": p.removed, "outside the name prefix": len(p.outside)}, "excluded_named": sorted(p.excluded),
+            "claims": _claims_json(claims), "note": STRESS_NOTE, "formulas": STRESS_FORMULAS, "analysis_target": ANALYSIS_TARGET,
+            "value_policy": VALUE_POLICY}
+    warnings = [w for e in (p.base, p.other) for w in (e.caveat, e.classified.duplicate_note if a.duplicate_policy != "reject" else None) if w]
+    if p.only_base or p.only_other or p.removed or p.outside:
+        warnings.append(f"{p.only_base + p.only_other + p.removed + len(p.outside)} entries have no indices (only in one trial, excluded or "
+                        f"outside the name prefix); {g} paired")
+    if not_ranked:
+        warnings.append(f"{len(not_ranked)} entries not ranked: their {a.rank_by} is undefined")
+    for side, e in (("non-stress", p.base), ("stress", p.other)):
+        if not e.classified.units_known:
+            warnings.append(f"{side}: independence unknown: some valid rows name no observation unit")
+        if e.manifest_only:
+            warnings.append(f"{side}: the table's manifest lists {'a study' if len(e.manifest_only) == 1 else 'studies'} with no row: "
+                            f"{', '.join(e.manifest_only)}")
+        warnings.extend(f"{side}: {w}" for w in _timing_warnings(e.table, a.value))
+    return ToolResult(ok=True, data=data, artifact_ids=[p.base_table.manifest.artifact_id, p.other_table.manifest.artifact_id, manifest.artifact_id],
+                      complete=complete, warnings=warnings)
+
+
 # --------------------------------------------------------------------------
-# ONE registry of the fifteen tools, schemas and dispatch
+# ONE registry of the sixteen tools, schemas and dispatch
 # --------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -2964,9 +3205,10 @@ ANALYST_TOOLS: dict[str, AnalystToolSpec] = {spec.name: spec for spec in [
     AnalystToolSpec("anova_trial", AnovaTrialArgs, tool_anova_trial),
     AnalystToolSpec("gxe_partition", GxePartitionArgs, tool_gxe_partition),
     AnalystToolSpec("compare_trials_paired", CompareTrialsPairedArgs, tool_compare_trials_paired),
+    AnalystToolSpec("stress_indices", StressIndicesArgs, tool_stress_indices),
 ]}
 ANALYST_TOOL_NAMES = list(ANALYST_TOOLS)
-assert len(ANALYST_TOOL_NAMES) == 15
+assert len(ANALYST_TOOL_NAMES) == 16
 
 
 def analyst_tool_schemas() -> list[dict[str, Any]]:
