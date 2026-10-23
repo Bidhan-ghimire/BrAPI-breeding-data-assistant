@@ -542,6 +542,83 @@ def test_tenth_study_is_blocked_by_the_distinct_study_limit(tmp_path):
     assert "not in the approval" in tenth.warnings[0]
 
 
+# --- 7b. a saved reply is served only within the approval (item 20, Bidhan 2026-10-23) -----------------------------
+
+ONE_PAGE = {"page": 0, "pageSize": 1000}
+
+
+def _seed(client, endpoint: str, params: dict, body: bytes) -> None:
+    identity = CacheIdentity(base_url=BASE, endpoint=endpoint, params=params)
+    client.cache.put(identity, body, http_status=200, fetched_at_utc=T0 - timedelta(days=2), source_url_redacted=f"{BASE}{endpoint}")
+
+
+def test_a_saved_reply_outside_the_approval_is_refused_like_a_live_request(tmp_path):
+    """Item (20): live, with an approval, a saved reply is checked against it as a live request is (study, variable, family,
+    server, time); before, a cache hit was returned before _authorize ran. Nothing is sent either way."""
+    transport = FakeTransport()
+    client = make_client(tmp_path, transport)
+    for study, variable in (("S1", "V1"), ("S2", "V1"), ("S1", "V9")):
+        _seed(client, "/observations", {"studyDbId": study, "observationVariableDbId": variable, **ONE_PAGE},
+              page_body([{"observationDbId": f"O{study}{variable}", "value": "1"}], total_count=1))
+    appr = approval(studies=["S1"], variables=["V1"])
+    assert client.observations("S1", "V1", approval=appr).complete                 # within the approval: served as before
+    for study, variable in (("S2", "V1"), ("S1", "V9")):                            # the study, then the variable, not approved
+        refused = client.observations(study, variable, approval=appr)
+        assert refused.status == "failed" and "not_authorized" in refused.warnings[0]
+    _seed(client, "/locations", ONE_PAGE, page_body([{"locationDbId": "L1"}], total_count=1))
+    with pytest.raises(NotAuthorized, match="family"):
+        client.get("/locations", ONE_PAGE, approval=approval(families=("studies",)))
+    _seed(client, "/studies", ONE_PAGE, studies_page(1, 1, total_count=1, page_size=1000))
+    with pytest.raises(NotAuthorized, match="different server"):
+        client.get("/studies", ONE_PAGE, approval=approval(base="https://test-server.brapi.org/brapi/v2"))
+    expired = FetchApproval(**{**approval().model_dump(), "issued_at_utc": T0 - timedelta(hours=3),
+                               "expires_at_utc": T0 - timedelta(hours=1)})
+    with pytest.raises(NotAuthorized, match="expired"):
+        client.get("/studies", ONE_PAGE, approval=expired)
+    assert transport.calls == []
+    assert [r.origin for r in client.request_log] == ["cache"]                      # a refused saved reply is not logged as used
+    assert client._counter == 1                                                     # nor does it use up a request number (review)
+
+
+def test_a_saved_reply_within_the_approval_is_served_after_the_attempt_budget_is_used_up(tmp_path):
+    """Item (20): the HTTP attempt budget counts live attempts; a saved reply sends nothing, so a used-up budget does not stop
+    it (hit=True). The distinct-study limit counts live fetches too (next test)."""
+    transport = FakeTransport().add("/observations", {"studyDbId": "S1", "observationVariableDbId": "V1", **ONE_PAGE},
+                                    ok(page_body([{"observationDbId": "O1", "value": "1"}], total_count=1)))
+    client = make_client(tmp_path, transport, max_attempts=1)
+    _seed(client, "/observations", {"studyDbId": "S2", "observationVariableDbId": "V1", **ONE_PAGE},
+          page_body([{"observationDbId": "O2", "value": "2"}], total_count=1))
+    appr = approval(studies=["S1", "S2"], variables=["V1"], max_attempts=1)
+    assert client.observations("S1", "V1", approval=appr).complete                 # the one live attempt
+    saved = client.observations("S2", "V1", approval=appr)                          # the budget is used up; S2 is saved
+    assert saved.complete and len(transport.calls) == 1
+    assert [r.origin for r in client.request_log] == ["live", "cache"]
+
+
+def test_a_saved_reply_of_an_approved_study_is_served_when_another_approval_filled_the_study_limit(tmp_path):
+    """Review of item (20): the distinct-study limit counts the client's live fetches, whoever approved them (_studies_fetched is
+    per client, not per approval): a saved reply of a study the CURRENT approval lists is still served (hit=True)."""
+    transport = FakeTransport().add("/observations", {"studyDbId": "S1", "observationVariableDbId": "V1", **ONE_PAGE},
+                                    ok(page_body([{"observationDbId": "O1", "value": "1"}], total_count=1)))
+    client = make_client(tmp_path, transport)
+    _seed(client, "/observations", {"studyDbId": "S2", "observationVariableDbId": "V1", **ONE_PAGE},
+          page_body([{"observationDbId": "O2", "value": "2"}], total_count=1))
+    first = approval(studies=["S1"], variables=["V1"], max_studies=1, max_attempts=50)
+    second = approval(studies=["S2"], variables=["V1"], max_studies=1, max_attempts=50)
+    assert client.observations("S1", "V1", approval=first).complete                 # the one study of the limit is now used
+    assert client.observations("S2", "V1", approval=second).complete                # saved, in the second approval: served
+    assert len(transport.calls) == 1
+
+
+def test_offline_and_approval_less_saved_replies_are_served_as_before(tmp_path):
+    """Item (20) changes only a live read WITH an approval: offline (with any approval or none) and live without one, a saved
+    reply is served as before (the catalogs, the front door's summary and the eval read so)."""
+    for n, (mode, appr) in enumerate((("offline", None), ("offline", approval(families=("locations",))), ("live", None))):
+        client = make_client(tmp_path / str(n), FakeTransport(), mode=mode)
+        _seed(client, "/studies", ONE_PAGE, studies_page(1, 2, total_count=2, page_size=1000))
+        assert client.studies(approval=appr).complete, (mode, appr)
+
+
 # --- 8. named endpoints and typed returns --------------------------------------------------------
 
 def test_studies_filters_map_to_server_params_and_name_contains_is_client_side(tmp_path):

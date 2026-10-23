@@ -371,3 +371,24 @@ def test_the_warning_says_where_the_other_traits_go(tmp_path):
     r = plot_result(tmp_path, [unit(1, [obs(1, "V1", "5"), obs(2, "V2", "31.5")])])
     note = next(w for w in r.warnings if w.startswith(bc.PLOT_RECORDS_NOTE))
     assert "before any table, preview or answer" in note and "local request cache" in note and "before anything was saved" not in note
+
+
+def test_a_saved_plot_record_page_is_served_under_the_measurement_approval_and_refused_otherwise(tmp_path):
+    """Review of item (20): the plot-record read (authorize_as="observations") is checked as measurements on a hit too - the
+    observations family, the study and the variable; a plot-list-only approval does not open it, and the measurement approval
+    does not open a plain plot list."""
+    transport = FakeTransport()
+    client = make_client(tmp_path, transport)
+    for params, body in ((PAGE, page_body([unit(1, [obs(1, "V1", "0"), obs(2, "V2", "31.5")])], total_count=1, page=0, page_size=250)),
+                         ({"studyDbId": "S1", "page": 0, "pageSize": 1000}, page_body([unit(1, [])], total_count=1))):
+        client.cache.put(CacheIdentity(base_url=BASE, endpoint="/observationunits", params=params), body, http_status=200,
+                         fetched_at_utc=T0 - timedelta(days=2), source_url_redacted=f"{BASE}/observationunits")
+    assert client.plot_records("S1", "V1", approval=plot_approval()).complete
+    assert client.plot_records("S1", "V9", approval=plot_approval()).status == "failed"
+    lists_only = FetchApproval(approval_id="appr_lists", run_id="run_t", base_url=BASE, endpoint_families=["observationunits"],
+                               observation_study_ids=["S1"], observation_variable_ids=[], max_http_attempts=5, max_observation_studies=1,
+                               issued_at_utc=T0 - timedelta(minutes=1), expires_at_utc=T0 + timedelta(hours=1))
+    assert client.plot_records("S1", "V1", approval=lists_only).status == "failed"
+    assert client.observation_units("S1", approval=plot_approval()).status == "failed"
+    assert client.observation_units("S1", approval=lists_only).complete
+    assert transport.calls == []

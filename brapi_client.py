@@ -480,10 +480,10 @@ class BrapiClient:
         self._counter += 1
         return f"req_{self.run_id}_{self._counter:04d}"
 
-    # -- authorization: checked before EVERY live attempt --------------------
+    # -- authorization: checked before EVERY live attempt, and before a saved reply is served live under an approval --
 
     def _authorize(self, approval: FetchApproval | None, family: str,
-                   study_id: str | None = None, variable_id: str | None = None) -> FetchApproval:
+                   study_id: str | None = None, variable_id: str | None = None, *, hit: bool = False) -> FetchApproval:
         if self.settings.mode != "live":
             raise NotAuthorized("live access is off (BRAPI_MODE=offline)")
         if approval is None:
@@ -494,14 +494,14 @@ class BrapiClient:
             raise NotAuthorized("approval has expired or is not yet valid")
         if not approval.allows_family(family):
             raise NotAuthorized(f"approval does not cover endpoint family {family!r}")
-        if self._live_attempts >= approval.max_http_attempts:
+        if not hit and self._live_attempts >= approval.max_http_attempts:     # the counters count live fetches; a hit sends nothing
             raise NotAuthorized(f"HTTP attempt budget {approval.max_http_attempts} is used up")
         if family in ("observations", "observationunits"):
             if study_id is None or not approval.allows_study(study_id):
                 raise NotAuthorized(f"study {study_id!r} is not in the approval")
             if family == "observations" and (variable_id is None or not approval.allows_variable(variable_id)):
                 raise NotAuthorized(f"variable {variable_id!r} is not in the approval")
-            if study_id not in self._studies_fetched and len(self._studies_fetched) >= approval.max_observation_studies:
+            if not hit and study_id not in self._studies_fetched and len(self._studies_fetched) >= approval.max_observation_studies:
                 raise NotAuthorized(f"distinct observation studies limit {approval.max_observation_studies} reached")
         return approval
 
@@ -519,7 +519,8 @@ class BrapiClient:
         variable_id: str | None = None,
         authorize_as: str | None = None,
     ) -> tuple[dict[str, Any], RequestRecord]:
-        """Cache first; then, only in live mode with a valid approval, bounded HTTP attempts.
+        """Cache first; then, only in live mode with a valid approval, bounded HTTP attempts. Live with an approval, a saved reply
+        is served only within it (item 20, Bidhan 2026-10-23: the same checks, not the counters of live fetches).
 
         expensive=True (observations) means: never retry a timeout automatically.
         Returns the parsed JSON envelope and the RequestRecord of the successful attempt.
@@ -533,6 +534,8 @@ class BrapiClient:
         # 1. cache (a reply older than refresh_cached_before is set aside in live mode: an approved refresh sends it again)
         hit = self.cache.get(identity)
         if hit is not None and not self._set_aside(hit[0]):
+            if self.settings.mode == "live" and approval is not None:
+                self._authorize(approval, family, study_id, variable_id, hit=True)
             entry, body = hit
             record = entry.request_record(request_id=self._new_request_id(), run_id=self.run_id,
                                           requested_at_utc=self._now_utc())
