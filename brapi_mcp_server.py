@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import re
 import uuid
 from collections import Counter
@@ -165,6 +166,7 @@ class ExportMetadataArgs(ToolArgs):
 # --------------------------------------------------------------------------
 
 _PAGE_ERROR = re.compile(r"page \d+: ([a-z_]+): ")
+log = logging.getLogger(__name__)         # where _map_exception sends an unexpected failure's traceback ("details in the server log")
 
 
 def _collection_error(result: CollectionResult) -> ToolError:
