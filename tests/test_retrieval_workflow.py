@@ -198,6 +198,25 @@ def test_repeated_requests_are_not_sent_and_the_run_reaches_the_data_review_with
     assert result.execution_status == "canceled" and chat.analysis_entries == []
 
 
+def test_a_server_call_after_every_planned_fetch_ends_the_fetching_step(chat):
+    """Coach 2026-10-23 09:51 UTC, (b); Luna C27.3 (benchmark_20261023T085633Z): with every planned table complete, the Retriever
+    spent its 30 model calls on list_seasons, get_study and others. Now the first server call the plan does not name ends the
+    fetching step: the run goes on to the data review with each table once, the call is never sent, and a run note says why
+    (deliberate bug S6: the controller hands its plan to the retriever)."""
+    observations, units = tool("get_observations", study_db_id="S1", variable_db_id="V1"), tool("get_observation_units", study_db_id="S1")
+    chat.retriever = FakeModelClient([observations, units, tool("list_seasons"), tool("list_seasons"), completed(["S9"])],
+                                     reported_model="mock-model")
+    history, state, job = start_approved(chat)
+    assert_review_wait(chat, history, state, job)
+    controller = job.controller
+    assert controller.retrieval.status == "completed" and len(chat.retriever.requests) == 3
+    assert sorted(a.kind for a in controller.retrieval.artifacts) == ["observation_units", "observations"]
+    assert any(note.startswith("retriever: every planned fetch was complete") for note in controller.notes)
+    assert "/seasons" not in [endpoint for endpoint, _ in chat.server.calls]
+    history, state = turn(chat, "cancel", history, state)
+    assert "every planned fetch" not in history[-1]["content"]          # a run note, never a reason shown in the chat
+
+
 def test_after_repeats_the_retrieval_is_accepted_only_if_every_planned_fetch_is_complete(chat):
     observations = tool("get_observations", study_db_id="S1", variable_db_id="V1")
     chat.retriever = FakeModelClient([observations, observations, observations], reported_model="mock-model")

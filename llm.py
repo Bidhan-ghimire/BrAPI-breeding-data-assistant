@@ -107,7 +107,7 @@ __all__ = [
     "ToolCallRequest", "ModelReply", "ModelProviderError", "ModelClient", "OpenAICompatibleClient", "FakeModelClient",
     "reply_text", "reply_tools", "normalize_openai_response",
     "Budget", "compact_tool_result", "run_agent_loop", "FETCH_TOOLS", "DEFAULT_MAX_TOKENS", "SmokeTools", "mock_smoke_model", "smoke", "main",
-    "RepeatGuard", "MAX_REPEATS", "REPEAT_ENDED",
+    "RepeatGuard", "MAX_REPEATS", "REPEAT_ENDED", "PLAN_DONE_ENDED",
     "ProviderConfigError", "PROVIDERS", "AnthropicClient", "normalize_anthropic_response", "to_anthropic_request",
     "make_model_client", "for_role", "agent_role", "ANTHROPIC_BASE_URL", "ANTHROPIC_EFFORTS", "BUDGET_MESSAGE",
 ]
@@ -115,6 +115,7 @@ __all__ = [
 FETCH_TOOLS = frozenset({"get_observations", "get_observation_units"})   # the expensive, approval-guarded tools
 MAX_REPEATS = 2                  # exact repeats for one saved table: the first is answered "already saved", the second ends the loop
 REPEAT_ENDED = "repeated_request"    # the error code recorded when the second repeat ends the loop
+PLAN_DONE_ENDED = "plan_fetches_complete"   # recorded when a call the plan does not name follows a complete plan (coach 09:51 UTC)
 # The most tokens ONE reply may use, thinking included. A reasoning model writes its thinking as tokens that count here although
 # nobody sees them: on 2026-09-28, at 2048, a planner reply was cut off before its first visible word. This is a limit on what the
 # model may WRITE; how much it can READ is the context window, a setting of the model server (16384 for the evaluation model).
@@ -898,7 +899,9 @@ class RepeatGuard(Protocol):
     """Knows which calls already saved a complete table in this run (agents.retriever.ApprovedTools).
 
     saved_result: for an exact repeat of such a call, the result the model is shown instead of sending it again; None
-    for anything else. payload_from_evidence: the final answer code writes when the second repeat ends the loop."""
+    for anything else. payload_from_evidence: the final answer code writes when the second repeat ends the loop. An optional
+    plan_complete(name): True when every planned fetch is complete and the plan does not name this call, which then ends the loop
+    unsent (coach 2026-10-23 09:51 UTC, (b)); a guard without it never ends the loop that way."""
 
     def saved_result(self, name: str, args: Mapping[str, Any]) -> ToolResult | None: ...
     def payload_from_evidence(self) -> dict[str, Any]: ...
@@ -1096,6 +1099,12 @@ async def run_agent_loop(
                              artifact_ids=list(saved.artifact_ids))
                         _append_tool_message(state, call, saved, tcorr, emit)
                         continue
+                    plan_complete = getattr(repeat_guard, "plan_complete", None)
+                    if plan_complete is not None and plan_complete(call.name):   # every planned fetch complete, and the plan does
+                        emit("plan_complete_not_sent", correlation_id=tcorr, name=call.name)   # not name this call: code ends the step
+                        add_error(PLAN_DONE_ENDED, f"every planned fetch was complete when {call.name!r} was asked for (not sent); "
+                                                   "the fetching step was ended by code")
+                        return finish("completed", repeat_guard.payload_from_evidence())   # the caller's checks decide
                     if call.name in FETCH_TOOLS:
                         if budget.fetches >= budget.max_fetches:
                             add_error("budget_exhausted", f"fetch budget ({budget.max_fetches}) reached at {call.name!r}")

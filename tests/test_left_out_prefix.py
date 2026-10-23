@@ -1,7 +1,8 @@
 """
 tests/test_left_out_prefix.py - the change-set (4)+(5) (coach 2026-10-23 07:48 UTC, NEXT 2) for compare_trials_paired (T4) and
 stress_indices (T5):
-(4) every claim names the prefix the person kept, as the tool applied it: "left out by prefix: outside PH17.* (N entries)", N = the
+(4) every claim names the prefix the person kept, as the tool applied it: "left out by prefix: M entries outside PH17.* (N kept)" (the
+    coach's form of 09:51 UTC; before: "outside PH17.* (N entries)"), M = the
     entries with a mean the prefix left out; the answer prints it;
 (5) a name the person gave that is an entry of the trial (its plot list, from get_observation_units) but has no value of the trait
     goes in "named, no <trait> value in either trial: ..." - it is not an unknown name. A name absent from the trial is still
@@ -97,9 +98,9 @@ def test_every_claim_names_the_prefix_the_person_kept(tmp_path, tool):
     ctx = synthetic_context(cache_dir=tmp_path / "cache", out_dir=tmp_path / "out", run_id=f"run_prefix_{tool}")
     r = at.dispatch_analyst(ctx.registry, tool, {**tables(ctx.registry, tool), "name_prefix": "PH17."})
     assert r.ok, r.error
-    assert all("left out by prefix: outside PH17.* (2 entries)" in k.transformation for k in claims(r))
+    assert all("left out by prefix: 2 entries outside PH17.* (6 kept)" in k.transformation for k in claims(r))
     assert not any("left out by name" in k.transformation for k in claims(r))
-    assert cp._text("Left out by prefix: outside PH17.* (2 entries).") in answer(ctx, claims(r))
+    assert cp._text("Left out by prefix: 2 entries outside PH17.* (6 kept).") in answer(ctx, claims(r))
     plain = at.dispatch_analyst(ctx.registry, tool, tables(ctx.registry, tool))
     assert plain.ok and not any("left out by prefix" in k.transformation for k in claims(plain))
     assert "Left out by prefix" not in answer(ctx, claims(plain))
@@ -111,11 +112,11 @@ def test_the_prefix_count_leaves_the_named_entries_to_the_names_and_says_zero(re
     every entry still says so, with 0: the restriction was applied."""
     r = at.dispatch_analyst(registry, tool, {**tables(registry, tool), "name_prefix": "PH17.", "exclude": ["Tanzania"]})
     assert r.ok, r.error
-    assert all("left out by name: Tanzania (1 entry)" in k.transformation and "left out by prefix: outside PH17.* (1 entry)" in k.transformation
+    assert all("left out by name: Tanzania (1 entry)" in k.transformation and "left out by prefix: 1 entry outside PH17.* (6 kept)" in k.transformation
                for k in claims(r))
     every = at.dispatch_analyst(registry, tool, {**tables(registry, tool, entries=ENTRIES[:6]), "name_prefix": "PH17."})
     assert every.ok, every.error
-    assert all("left out by prefix: outside PH17.* (0 entries)" in k.transformation for k in claims(every))
+    assert all("left out by prefix: 0 entries outside PH17.* (6 kept)" in k.transformation for k in claims(every))
 
 
 @pytest.mark.parametrize("tool", sorted(TOOLS))
@@ -125,7 +126,7 @@ def test_a_bar_in_the_prefix_keeps_the_part_whole(registry, tool):
     names = {**{f"E{i}": f"fam | {i}" for i in range(6)}, "E6": "Beauregard", "E7": "Tanzania"}
     r = at.dispatch_analyst(registry, tool, {**tables(registry, tool, names=names), "name_prefix": "fam | "})
     assert r.ok, r.error
-    assert all("left out by prefix: outside fam / * (2 entries)" in k.transformation.split(" | ") for k in claims(r))
+    assert all("left out by prefix: 2 entries outside fam / * (6 kept)" in k.transformation.split(" | ") for k in claims(r))
 
 
 # --- (5) a named entry of the trial without a value of the trait --------------------------------------------------------------
@@ -260,7 +261,7 @@ def test_the_answer_prints_the_names_then_the_prefix(tmp_path, tool):
     r = at.dispatch_analyst(ctx.registry, tool, {**tables(ctx.registry, tool), "name_prefix": "PH17.", "exclude": ["Tanzania"]})
     assert r.ok, r.error
     shown = answer(ctx, claims(r))
-    by_name, by_prefix = cp._text("Left out by name: Tanzania (1 entry)."), cp._text("Left out by prefix: outside PH17.* (1 entry).")
+    by_name, by_prefix = cp._text("Left out by name: Tanzania (1 entry)."), cp._text("Left out by prefix: 1 entry outside PH17.* (6 kept).")
     assert by_name in shown and by_prefix in shown and shown.index(by_name) < shown.index(by_prefix)
 
 

@@ -451,6 +451,10 @@ class ArtifactManifest(StrictRecord):
     measurement: MeasurementMeta = Field(default_factory=MeasurementMeta)
     columns: dict[str, str] = Field(default_factory=dict)   # column name -> meaning
     quality_notes: list[str] = Field(default_factory=list)
+    # plot-record hosts only (brapi_client.PlotRecordsResult): the study's entries whose plots hold no value of this variable,
+    # germplasmDbId -> germplasmName, identity alone (coach 2026-10-23 09:51 UTC, (5)). None = not recorded: a table not read from
+    # plot records, or one derived by a tool that can drop rows; plot_design, which keeps every row, carries it
+    entries_without_value: dict[str, str] | None = None
     created_at_utc: UtcDatetime
 
     @field_validator("study_ids", "variable_ids", "source_request_ids")

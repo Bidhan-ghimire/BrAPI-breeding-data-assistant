@@ -336,12 +336,17 @@ def _correlation(value: float | int | None) -> str:
     return "Not available" if value is None else f"{value:.4f}".rstrip("0").rstrip(".")
 
 
+# the claims of correlate_entry_means, the only tool this table shows: an allow-list (coach 2026-10-23 09:51 UTC; the T8 review,
+# finding 1: any other tool's "correlation" claim, an R2, was printed as a Pearson r under a false heading)
+_COR_CALL = re.compile(r"^clm_v2_[0-9a-f]{6}_[0-9]{4,}_cor-[0-9a-f]{10}_")
+
+
 def _correlation_block(claims: list[Claim], source_labels: dict[tuple[str, ...], str]) -> tuple[list[str], set[str]]:
     """R2 (2026-10-22): the correlation claims of one correlate_entry_means call as one table (Method, Correlation, n), the two
     tables it correlated and what was left out, then the descriptive sentence. Returns the lines and the IDs of the claims shown."""
     calls: dict[str, list[Claim]] = defaultdict(list)
     for claim in claims:
-        if claim.kind == "correlation" and not _PAIR_CALL.match(claim.claim_id):     # compare_trials_paired's r is in its own table (T4)
+        if claim.kind == "correlation" and _COR_CALL.match(claim.claim_id):         # correlate_entry_means alone (T4's r: its own table)
             calls[claim.claim_id.rsplit("_correlation_", 1)[0]].append(claim)
     lines: list[str] = []
     shown: set[str] = set()

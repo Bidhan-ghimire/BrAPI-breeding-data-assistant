@@ -1962,7 +1962,8 @@ def tool_plot_design(registry: ArtifactRegistry, a: PlotDesignArgs) -> ToolResul
     manifest = registry.save_table(rows, kind=out.manifest.kind, columns={**out.manifest.columns, **DESIGN_COLUMNS}, complete=complete,
                                    source_request_ids=list(dict.fromkeys(r for t in tables for r in t.manifest.source_request_ids)),
                                    study_ids=list(out.manifest.study_ids), variable_ids=list(out.manifest.variable_ids),
-                                   measurement=out.manifest.measurement, quality_notes=lineage)
+                                   measurement=out.manifest.measurement, quality_notes=lineage,
+                                   entries_without_value=out.manifest.entries_without_value)   # every row kept (coach 09:51 UTC, (iv))
     preview = registry.preview(manifest.artifact_id, 5)
     data = {"roster_artifact_id": roster.manifest.artifact_id, "source_artifact_id": out.manifest.artifact_id,
             "artifact_id": manifest.artifact_id, "rows": len(rows),
@@ -2161,6 +2162,7 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
         exclusions.append(Exclusion(reason="rows without an entry", count=no_entry))
     used = [(row, value) for row, value in used if row.get(a.entry, "").strip()]
     left_out: dict[str, tuple[list[str], int]] = {}           # the person's names (decision (6)): label -> (entries, plots left out)
+    no_value: list[str] = []                                  # the person's names for entries with no valid value in the trial (iv)
     dropped: set[str] = set()
     excluded_plots = 0
     if a.exclude:                                             # first: the dates, rep and cell checks see only the kept entries (review F3)
@@ -2168,7 +2170,7 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
         label_col = label_col if label_col in table.manifest.columns else None
         names_of: dict[str, list[str]] = {}                   # an entry named twice (its ID and its name) is one exclusion (review F1)
         for name in dict.fromkeys(a.exclude):
-            names_of.setdefault(_entries(table, a.entry, label_col, [name], "exclude")[0], []).append(name)
+            names_of.setdefault(_named_in_trial(table, a.entry, label_col, name), []).append(name)
 
         def plots_of(entry_ids: set[str]) -> int:             # plots, not values: a plot measured on two dates is one plot
             return len({row.get(UNIT_COL, "").strip() or f"(row {i})" for i, (row, _) in enumerate(used) if row[a.entry].strip() in entry_ids})
@@ -2177,10 +2179,20 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
             label = " / ".join(names)
             left_out[label] = ([entry_id], plots_of({entry_id}))
             exclusions.append(Exclusion(reason=f"plots left out: excluded entry {label}", count=left_out[label][1]))
+            if not left_out[label][1]:                        # named, no value in the trial: still counted with 0 plots, and named
+                no_value.append(label)                        # apart in the words (coach 2026-10-23 09:51 UTC, (iv); T4's and T5's)
         dropped = set(names_of)
         excluded_plots = plots_of(dropped)
         used = [(row, value) for row, value in used if row[a.entry].strip() not in dropped]
-    excluded_note = f"left out by name: {', '.join(left_out)} ({excluded_plots} plots)" if left_out else None
+    named_trait = (getattr(table.manifest.measurement, "trait", None) or variable).replace(" | ", " / ")
+    named_apart = f"; named, no {named_trait} value in the trial: {', '.join(no_value)}" if no_value else ""
+    with_plots = [label for label, (_, n) in left_out.items() if n]
+    excluded_note = lineage_note = None
+    if left_out:
+        excluded_note = (f"left out by name: {', '.join(with_plots)} ({excluded_plots} plots)" if with_plots
+                         else "left out by name: no entry with a value") + named_apart
+        lineage_note = (f"left out by name: {', '.join(with_plots)} ({excluded_plots} plots; entries {sorted(dropped)})" if with_plots
+                        else f"left out by name: no entry with a value (entries {sorted(dropped)})") + named_apart
     by_plot: dict[str, list[tuple[dict[str, str], float]]] = {}
     for i, (row, value) in enumerate(used):
         by_plot.setdefault(row.get(UNIT_COL, "").strip() or f"(row {i} without a plot ID)", []).append((row, value))
@@ -2372,7 +2384,7 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
                     **{q: "" if row[q] is None else repr(row[q]) for q in ("ss", "ms", "f", "p")}} for row in res.rows]
     lineage = [f"lineage: anova_trial of {aid} sha256={table.manifest.sha256}", f"design: {res.design}" + (", sequential least squares, reps first (the OLS fit)" if res.adjusted else "")
                + (f"; {cells_note}" if cells_note else ""),
-               *([f"{excluded_note[:-1]}; entries {sorted(dropped)})"] if excluded_note else []),
+               *([lineage_note] if lineage_note else []),
                f"analysis target: {ANALYSIS_TARGET}"]
     manifest = registry.save_table(result_rows, kind="analysis_result", columns=ANOVA_RESULT_COLUMNS, complete=table.manifest.complete,
                                    source_request_ids=list(table.manifest.source_request_ids), study_ids=[study], variable_ids=[variable],
@@ -2405,7 +2417,7 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
     warnings.extend(_timing_warnings(table, a.value))
     data = {"artifact_id": aid, "result_artifact_id": manifest.artifact_id, "design": res.design, "balanced": res.balanced,
             "sequential_least_squares": res.adjusted, "anova": res.rows, "plots_used": res.n, "cells_rule": a.cells, "cells_note": cells_note,
-            "excluded": [{"name": name, "entries": ids, "plots": n} for name, (ids, n) in left_out.items()],
+            "excluded": [{"name": name, "entries": ids, "plots": n} for name, (ids, n) in left_out.items()], "named_no_value": no_value,
             "excluded_plots": excluded_plots,
             "grand_mean": res.grand_mean, "cv_percent": cv, "se": se,
             "sed": sed, "lsd_5pct": lsd, "t_0975": pvalues.t_quantile(0.975, res.df_error), "sigma2_g": s2g, "sigma2_e": ms_e,
@@ -2898,8 +2910,9 @@ def _knows(table: Table, by: str, label_col: str | None, name: str) -> bool:
 
 
 def _named_entries(tables: list[Table], plot_lists: list[Table], by: str, label_col: str | None, name: str) -> set[str]:
-    """The entries one exclude name gives: from the measurement tables, as before. A name no table holds at all is looked up in
-    the studies' plot lists (coach 07:48 UTC, (5): in C27.3 Beauregard and Tanzania have no dry-matter plot, so no table holds
+    """The entries one exclude name gives: from the measurement tables, as before. A name no table holds at all is looked up among
+    the entries the plot records already read hold without a value (the tables' manifests; coach 09:51 UTC), then in the studies'
+    plot lists (coach 07:48 UTC, (5): in C27.3 Beauregard and Tanzania have no dry-matter plot, so no table holds
     them). A name a table holds never goes on (named twice there, or the ID of another: refused as before); a name in no plot
     list stays unknown and is refused: "unknown" = absent from the trial's entries. The plot lists name only entries no table holds:
     one a table holds under another name is refused (review of this set, finding 1), and an incomplete plot list is searched as the
@@ -2907,7 +2920,12 @@ def _named_entries(tables: list[Table], plot_lists: list[Table], by: str, label_
     try:
         return _entries_in_any(tables, by, label_col, [name], "exclude")
     except AnalystError as error:
-        if not plot_lists or any(_knows(t, by, label_col, name) for t in tables):
+        if any(_knows(t, by, label_col, name) for t in tables):
+            raise
+        recorded = _recorded_without_value(tables, by, name)  # the plot records already read: no new request (coach 09:51 UTC, (5))
+        if recorded:
+            return recorded
+        if not plot_lists:
             raise
         label = LABEL_FOR.get(by)
         if not any(_knows(t, by, label, name) for t in plot_lists):
@@ -2927,6 +2945,44 @@ def _named_entries(tables: list[Table], plot_lists: list[Table], by: str, label_
                                                    + "; refused, never guessed: use the tables' name if the person wrote it, or ask which "
                                                    "entry is meant") from None
         return found
+
+
+def _recorded_without_value(tables: list[Table], by: str, name: str) -> set[str]:
+    """The entry a name gives among the entries the studies' plot records hold without a value of the trait (the tables' manifests,
+    entries_without_value; plot-record hosts; coach 2026-10-23 09:51 UTC, (5)): by its exact ID or its exact name. Empty when no
+    table records them or the name is not among them; a name of two entries there, or an ID that is another's name, is refused.
+    Every table must record them (the review of this set, finding 3): a table derived by a tool that can drop rows records none, and
+    one trial's list never speaks for another trial's filtered rows."""
+    if by != "germplasmDbId" or any(table.manifest.entries_without_value is None for table in tables):
+        return set()
+    recorded: dict[str, str] = {}
+    for table in tables:
+        recorded.update(table.manifest.entries_without_value)
+    named = sorted(entry for entry, entry_name in recorded.items() if entry_name == name and entry != name)
+    if name in recorded:
+        if named:
+            raise AnalystError("invalid_argument", f"exclude {name!r} is the ID of one entry and the name of another ({named}) among the "
+                                                   "entries the plot records hold without a value; give an ID that is not also a name")
+        return {name}
+    if len(named) > 1:
+        raise AnalystError("invalid_argument", f"exclude {name!r} is the name of {len(named)} entries ({named}) the plot records hold "
+                                               "without a value; give the entry ID")
+    return set(named)
+
+
+def _named_in_trial(table: Table, by: str, label_col: str | None, name: str) -> str:
+    """One exclude name of anova_trial: resolved in the table as before; a name the table does not hold at all is looked up among
+    the entries the study's plot records hold without a value (coach 2026-10-23 09:51 UTC, (iv)); a name in neither is refused, as
+    before."""
+    try:
+        return _entries(table, by, label_col, [name], "exclude")[0]
+    except AnalystError:
+        if _knows(table, by, label_col, name):
+            raise
+        recorded = _recorded_without_value([table], by, name)
+        if not recorded:
+            raise
+        return next(iter(recorded))
 
 
 def _names_label(given: list[str]) -> str:
@@ -2950,13 +3006,14 @@ def _left_out_by_name(p: _Pairing) -> list[str]:
 
 
 def _left_out_by_prefix(p: _Pairing, prefix: str | None) -> list[str]:
-    """The family the person kept, as the tool applied it (coach 07:48 UTC, (4)): "left out by prefix: outside PH17.* (N entries)",
-    N = the entries with a mean outside it; an entry the person named is counted by name, never again here. "outside": the prefix
-    keeps the family, so "left out by prefix: PH17.*" alone would read as if the family were left out."""
+    """The family the person kept, as the tool applied it (coach 07:48 UTC, (4); the form of 09:51 UTC): "left out by prefix: M entries
+    outside PH17.* (N kept)", M = the entries with a mean outside the prefix, N = those it keeps, both by the tool's own startswith
+    test; an entry the person named is counted by name, never again here."""
     if prefix is None:
         return []
     n = len(p.outside)
-    return [f"left out by prefix: outside {prefix.replace(' | ', ' / ')}* ({n} {'entry' if n == 1 else 'entries'})"]
+    kept = sum(1 for e in p.candidates if e not in p.excluded and e not in p.outside)
+    return [f"left out by prefix: {n} {'entry' if n == 1 else 'entries'} outside {prefix.replace(' | ', ' / ')}* ({kept} kept)"]
 
 
 def tool_compare_trials_paired(registry: ArtifactRegistry, a: CompareTrialsPairedArgs) -> ToolResult:

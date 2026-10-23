@@ -34,7 +34,7 @@ from contracts import (
     ToolError,
     ToolResult,
 )
-from llm import FETCH_TOOLS, Budget, FakeModelClient, ModelClient, reply_text, reply_tools, run_agent_loop
+from llm import FETCH_TOOLS, PLAN_DONE_ENDED, Budget, FakeModelClient, ModelClient, reply_text, reply_tools, run_agent_loop
 from mcp_bridge import McpTools
 
 __all__ = [
@@ -46,6 +46,7 @@ FIXTURE_DIR = PART2_DIR / "tests" / "fixtures" / "model_retriever"
 
 # The tools that save a table: an exact repeat of one that saved a complete table is not sent again (ApprovedTools.saved_result).
 TABLE_TOOLS = FETCH_TOOLS | {"export_metadata"}
+LOCAL_TOOLS = frozenset({"request_log"})   # reads this run's own request records, sends nothing to the server: never ends the step
 REPEAT_NOTE = ("This exact request already returned a complete table in this run (its artifact_ids are above). It was not sent "
                "again and used no fetch. Do not ask for it again: use that table, fetch only what the approved plan still "
                "needs, then finish with your final JSON answer.")
@@ -118,15 +119,26 @@ _LABEL_KEYS = {"study": "studyName", "variable": "observationVariableName", "loc
 _INSTRUCTION_LIKE = re.compile(r"ignore (all |the )?(previous|prior|above) instructions|system prompt|you are now|disregard", re.IGNORECASE)
 
 
+@dataclass(frozen=True)
+class PlannedFetches:
+    """What the approved plan asks the Retriever to fetch (plan_permissions.required_fetches, its catalog exports, and the retriever
+    actions it names): the condition of the stop once every planned fetch is complete (coach 2026-10-23 09:51 UTC, (b))."""
+    observation_pairs: frozenset[tuple[str, str]] = frozenset()
+    unit_studies: frozenset[str] = frozenset()
+    catalog_exports: tuple[dict[str, Any], ...] = ()
+    actions: frozenset[str] = frozenset()
+
+
 class ApprovedTools:
     """Wraps a tool interface: checks the FetchApproval BEFORE any fetch tool runs, and records evidence."""
 
     def __init__(self, inner: Any, ctx: ToolContext, approval: FetchApproval | None,
-                 now_utc=lambda: datetime.now(timezone.utc)) -> None:
+                 now_utc=lambda: datetime.now(timezone.utc), planned: PlannedFetches | None = None) -> None:
         self.inner = inner
         self.ctx = ctx
         self.approval = approval
         self.now_utc = now_utc
+        self.planned = planned
         self.records: list[ToolRecord] = []
         self.fetched_studies: set[str] = set()
         self.seen: dict[str, dict[str, str | None]] = {kind: {} for kind in _ID_KEYS}   # kind -> id -> label
@@ -214,6 +226,20 @@ class ApprovedTools:
                                       data={"not_sent_again": True, "note": REPEAT_NOTE})
         return None
 
+    def plan_complete(self, name: str) -> bool:
+        """Whether a call of this name ends the fetching step (llm.PLAN_DONE_ENDED; coach 2026-10-23 09:51 UTC, (b)): only when the
+        plan names at least one fetch, every planned fetch and catalog export has complete evidence in this run, and the call is a
+        server call that is neither a table tool nor an action the plan names (request_log reads the run's own records). Anything
+        else is False, so fetching never ends early and no count changes; without a plan (planned=None) it is always False."""
+        p = self.planned
+        if (p is None or not (p.observation_pairs or p.unit_studies) or name in TABLE_TOOLS or name in LOCAL_TOOLS
+                or name in p.actions):
+            return False
+        if _missing_planned_fetches(self, self.ctx, expected_observation_pairs=set(p.observation_pairs),
+                                    expected_unit_studies=set(p.unit_studies)):
+            return False
+        return not _missing_catalog_exports(self, self.ctx, list(p.catalog_exports))
+
     def payload_from_evidence(self) -> dict[str, Any]:
         """The Retriever's final answer when code ends the fetching step (llm.MAX_REPEATS), written from the approved
         studies and variables that a complete fetch of this run confirms, never from the model's words: "studies" holds
@@ -267,16 +293,21 @@ async def run_retriever(
     log_dir: Path,
     model_requested: str = "mock-model",
     expects_observations: bool = True,
+    planned: PlannedFetches | None = None,
 ) -> tuple[RetrievalReport, AgentResult]:
-    """Run the agent loop with the approval gate and turn the outcome into an evidence-backed report."""
+    """Run the agent loop with the approval gate and turn the outcome into an evidence-backed report. planned: the plan's fetches,
+    for the stop once they are all complete (coach 2026-10-23 09:51 UTC, (b)) and for the report's checks."""
     async with McpTools.direct(ctx) as raw_tools:
-        tools = ApprovedTools(raw_tools, ctx, approval)
+        tools = ApprovedTools(raw_tools, ctx, approval, planned=planned)
         agent = await run_agent_loop(
             model, tools, agent_name="retriever", system_prompt=RETRIEVER_SYSTEM_PROMPT, user_message=request,
             budget=budget, allowed_tools=set(RETRIEVER_TOOLS), log_dir=log_dir, run_id=run_id,
             model_requested=model_requested, repeat_guard=tools,
         )
-    report = build_report(agent, tools, ctx, expects_observations=expects_observations)
+    report = build_report(agent, tools, ctx, expects_observations=expects_observations,
+                          **({} if planned is None else {"expected_observation_pairs": set(planned.observation_pairs),
+                                                         "expected_unit_studies": set(planned.unit_studies),
+                                                         "expected_catalog_exports": list(planned.catalog_exports)}))
     return report, agent
 
 

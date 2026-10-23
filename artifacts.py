@@ -136,6 +136,15 @@ def _write_atomic(path: Path, data: bytes) -> None:
     os.replace(tmp, path)
 
 
+def _recorded(given: dict[str, str] | None, collection: CollectionResult | None) -> dict[str, str] | None:
+    """The entries without a value of the variable a table records (coach 2026-10-23 09:51 UTC, (5)): the ones given (a tool that
+    keeps every row passes its source's), else the plot records' (brapi_client.PlotRecordsResult), else None: not recorded."""
+    if given is not None:
+        return dict(given)
+    recorded = getattr(collection, "entries_without_value", None)
+    return None if recorded is None else dict(recorded)
+
+
 class ArtifactRegistry:
     """One registry per run. Files live under <out_root>/<run_id>/artifacts/."""
 
@@ -173,6 +182,7 @@ class ArtifactRegistry:
         measurement: MeasurementMeta | None = None,
         quality_notes: list[str] | None = None,
         schema_version: str = "1",
+        entries_without_value: dict[str, str] | None = None,
     ) -> ArtifactManifest:
         """Write records as a text-only CSV with the given columns, register it, return the manifest.
 
@@ -234,6 +244,7 @@ class ArtifactRegistry:
             measurement=measurement or MeasurementMeta(),
             columns=dict(columns),
             quality_notes=notes,
+            entries_without_value=_recorded(entries_without_value, collection),   # plot records only (coach 09:51 UTC, (5))
             created_at_utc=datetime.now(timezone.utc),
         )
         _write_new_file(path.with_suffix(".manifest.json"), manifest.model_dump_json(indent=2).encode("utf-8"))

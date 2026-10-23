@@ -213,11 +213,35 @@ def test_get_observations_reads_the_plot_records_on_a_listed_server(tmp_path, mo
     assert "31.5" not in saved and "dry matter" not in saved                                  # the other trait was never saved
 
 
+def test_the_plot_records_name_the_entries_without_a_value_of_the_variable(tmp_path):
+    """Coach 2026-10-23 09:51 UTC, (5) from the plot records already read: an entry whose plots hold no observation of the variable
+    (G3: an empty list; G4: only another trait) is kept by identity alone - ID and name, never a value - so a name the person gave
+    can be found as an entry of the trial without a value. An entry with a value, or with an observation of the variable whose value
+    is empty (G2), is in the rows; a plot of another study is not the trial's."""
+    page = [unit(1, [obs(1, "V1", "12.5")]), unit(2, [obs(2, "V1", "")]), unit(3, []), unit(4, [obs(4, "V2", "31.5")]),
+            unit(5, [obs(5, "V1", "7")], studyDbId="S9")]
+    transport = FakeTransport().add("/observationunits", PAGE, ok(page_body(page, total_count=5, page=0, page_size=250)))
+    result = make_client(tmp_path, transport).plot_records("S1", "V1", approval=plot_approval())
+    assert result.entries_without_value == {"G3": "Clone 3", "G4": "Clone 4"} and len(transport.calls) == 1
+    assert "31.5" not in json.dumps(result.entries_without_value) and [r["germplasmDbId"] for r in result.records] == ["G1", "G2"]
+
+
+def test_get_observations_records_them_on_the_tables_manifest(tmp_path, monkeypatch):
+    monkeypatch.setattr(bc, "PLOT_RECORD_HOSTS", ("synthetic.invalid",))
+    ctx = synthetic_context(cache_dir=tmp_path / "cache", out_dir=tmp_path / "out", run_id="run_pr_nv")
+    seed_plot_records(tmp_path / "cache", [unit(1, [obs(1, "V1", "0")]), unit(2, [obs(2, "V2", "31.5")])])
+    r = srv.dispatch(ctx, "get_observations", {"study_db_id": "S1", "variable_db_id": "V1"})
+    manifest = ctx.registry.manifest(r.data["artifact_id"])
+    assert r.ok and r.data["row_count"] == 1 and manifest.entries_without_value == {"G2": "Clone 2"}
+    assert '"entries_without_value"' in next((tmp_path / "out").rglob("*.manifest.json")).read_text(encoding="utf-8")
+
+
 def test_get_observations_keeps_the_observations_service_on_other_servers(tmp_path):
     ctx = synthetic_context(cache_dir=tmp_path / "cache", out_dir=tmp_path / "out", run_id="run_obs")
     r = srv.dispatch(ctx, "get_observations", {"study_db_id": "S1", "variable_db_id": "V1"})
     manifest = ctx.registry.manifest(r.data["artifact_id"])
     assert r.ok and r.data["row_count"] == 6 and not any(note.startswith(bc.PLOT_RECORDS_NOTE) for note in manifest.quality_notes)
+    assert manifest.entries_without_value is None                                   # /observations: no plot records, none recorded
 
 
 def test_the_approval_of_a_listed_server_is_the_same_as_elsewhere():

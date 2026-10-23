@@ -42,6 +42,8 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from cache_store import CacheEntry, CacheIdentity, CacheStore, sha256_bytes
+from pydantic import Field
+
 from contracts import (
     CollectionResult,
     CollectionStatus,
@@ -306,6 +308,14 @@ _UNIT_FIELDS = ("observationUnitDbId", "observationUnitName", "germplasmDbId", "
 _OBSERVATION_FIELDS = ("observationDbId", "observationVariableDbId", "observationVariableName", "observationTimeStamp", "value")
 
 
+class PlotRecordsResult(CollectionResult):
+    """The plot records reduced to ONE variable (the rows, as any CollectionResult) and the study's entries whose plots hold no
+    value of it, by identity alone (germplasmDbId -> germplasmName, never a value): the trial's entries a person may name though no
+    row of the table shows them. get_observations keeps them on the table's manifest (coach 2026-10-23 09:51 UTC, (5))."""
+
+    entries_without_value: dict[str, str] = Field(default_factory=dict)
+
+
 def _plot_record_rows(units: CollectionResult, study_id: str, variable_id: str) -> CollectionResult:
     """The plot records' observations of ONE variable as /observations-shaped rows (the unit's identity fields plus the
     observation's), with the units collection's own proof of completeness. Every other variable's value is dropped here, before
@@ -315,6 +325,7 @@ def _plot_record_rows(units: CollectionResult, study_id: str, variable_id: str) 
     "unknown" (never complete); a failed or incomplete fetch keeps its own status."""
     rows: list[dict[str, Any]] = []
     readable = other_study = unreadable = 0
+    entries: dict[str, str] = {}                                 # every entry of the study's plots -> its name (coach 09:51 UTC, (5))
     for unit in units.records:
         observations = unit.get("observations")
         if not isinstance(observations, list):
@@ -323,6 +334,8 @@ def _plot_record_rows(units: CollectionResult, study_id: str, variable_id: str) 
         if unit.get("studyDbId") not in (None, "", study_id):
             other_study += 1                                     # a plot of another study: its values are not this study's
             continue
+        if unit.get("germplasmDbId") not in (None, ""):
+            entries.setdefault(str(unit["germplasmDbId"]), "" if unit.get("germplasmName") is None else str(unit["germplasmName"]))
         for observation in observations:
             if not isinstance(observation, dict) or observation.get("observationVariableDbId") in (None, ""):
                 unreadable += 1                                  # it could be a value of this variable: no proof of completeness
@@ -367,8 +380,11 @@ def _plot_record_rows(units: CollectionResult, study_id: str, variable_id: str) 
     warnings.append(f"{PLOT_RECORDS_NOTE}: {len(units.records)} units read, {len(rows)} values of variable {variable_id} kept; "
                     "values of other variables were dropped before any table, preview or answer (the raw pages stay in the local "
                     "request cache)")
-    return units.model_copy(update={"records": rows, "returned_count": len(rows), "reported_total": None, "status": status,
-                                    "complete": complete, "warnings": warnings})
+    reduced = units.model_copy(update={"records": rows, "returned_count": len(rows), "reported_total": None, "status": status,
+                                       "complete": complete, "warnings": warnings})
+    in_rows = {str(row["germplasmDbId"]) for row in rows if row.get("germplasmDbId") not in (None, "")}
+    return PlotRecordsResult(**reduced.model_dump(), entries_without_value={entry: name for entry, name in sorted(entries.items())
+                                                                              if entry not in in_rows})
 
 
 # --------------------------------------------------------------------------

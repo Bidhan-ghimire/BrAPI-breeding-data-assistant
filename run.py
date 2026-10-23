@@ -33,7 +33,7 @@ from agents.coordinator import (
     render_numeric_table,
     sanitize_prose,
 )
-from agents.retriever import RETRIEVER_SYSTEM_PROMPT, RETRIEVER_TOOLS, ApprovedTools, build_report, catalog_export_records
+from agents.retriever import RETRIEVER_SYSTEM_PROMPT, RETRIEVER_TOOLS, ApprovedTools, PlannedFetches, build_report, catalog_export_records
 from brapi_client import PART2_DIR, Settings, load_settings, reads_plot_records
 from brapi_mcp_server import ToolContext, build_context
 from contracts import (
@@ -53,7 +53,7 @@ from contracts import (
     dump_json,
 )
 from access_policy import ACCESS_NOTES_PATH, access_notes_review_date
-from llm import REPEAT_ENDED, Budget, ModelClient, compact_tool_result, run_agent_loop
+from llm import PLAN_DONE_ENDED, REPEAT_ENDED, Budget, ModelClient, compact_tool_result, run_agent_loop
 from mcp_bridge import BridgeError, McpTools
 from artifacts import ArtifactError
 from plan_permissions import fetch_manifest, required_fetches
@@ -1219,7 +1219,11 @@ class Controller:
                            if step.agent == "retriever" and step.action == "export_metadata"]
         try:
             async with raw_cm as raw:
-                tools = ApprovedTools(raw, self.ctx, self.approval, now_utc=self.now)
+                pairs, unit_studies = required_fetches(self.plan, self.manifest) if self.plan is not None else (set(), set())
+                planned = PlannedFetches(observation_pairs=frozenset(pairs), unit_studies=frozenset(unit_studies),
+                                         catalog_exports=tuple(catalog_exports),
+                                         actions=frozenset(s.action for s in (self.plan.steps if self.plan else []) if s.agent == "retriever"))
+                tools = ApprovedTools(raw, self.ctx, self.approval, now_utc=self.now, planned=planned)   # (b), coach 09:51 UTC
                 request = self._retriever_request()
                 replies: list[dict[str, str]] = []
                 while True:
@@ -1233,6 +1237,10 @@ class Controller:
                                           "from the saved table and ended the fetching step, writing the Retriever's answer "
                                           "from the approved plan as confirmed by tool results")   # no failure word: never
                                                                                                   # a reason in the chat
+                    if any(error.code == PLAN_DONE_ENDED for error in agent.errors):
+                        self.notes.append("retriever: every planned fetch was complete; code ended the fetching step at a further "
+                                          "call outside the plan, writing the Retriever's answer from the approved plan as "
+                                          "confirmed by tool results")   # no failure word: never a reason in the chat
                     if agent.status != "needs_clarification":
                         break
                     question = (agent.payload or {}).get("question")

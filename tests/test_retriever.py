@@ -440,6 +440,95 @@ def loop_events(tmp_path, event: str, run_id: str = "run_retr") -> list[dict]:
     return [record for record in map(json.loads, lines) if record["event"] == event]
 
 
+# --- coach 2026-10-23 09:51 UTC, (b): once every planned fetch is complete, a call the plan does not name ends the fetching step --
+# Luna C27.3 (benchmark_20261023T085633Z): the four dry-matter tables were complete, then the Retriever spent its 30 model calls on
+# list_seasons (28 records), request_log (10), get_study (8) ... and the run ended "A request limit was reached".
+
+LIST_SEASONS = ("list_seasons", "{}")
+
+
+def run_planned(tmp_path, model, planned, run_id="run_retr"):
+    ctx = make_ctx(tmp_path, run_id)
+
+    async def go():
+        return await rt.run_retriever(script_request("valid_request.json"), model=model, ctx=ctx, approval=synthetic_approval(run_id=run_id),
+                                      budget=Budget(), run_id=run_id, log_dir=tmp_path / "out", planned=planned)
+
+    report, agent = anyio.run(go)
+    return report, agent, ctx
+
+
+def planned(pairs=(("S1", "V1"),), units=(), actions=("get_observations",)):
+    return rt.PlannedFetches(observation_pairs=frozenset(pairs), unit_studies=frozenset(units), actions=frozenset(actions))
+
+
+def test_complete_then_wander_ends_the_fetching_step(tmp_path):
+    """The plan's only fetch is complete; the next call (list_seasons, which the plan does not name) ends the step: code writes the
+    answer from the tool results, as for the second repeat, and the remaining model calls are not spent."""
+    never_read = {"status": "completed", "payload": {"resolved": [{"kind": "study", "id": "S999"}], "studies": ["S999"], "notes": []}}
+    model = scripted_model(OBSERVATIONS, LIST_SEASONS, LIST_SEASONS, LIST_SEASONS, final=never_read)
+    report, agent, ctx = run_planned(tmp_path, model, planned())
+    assert len(model.requests) == 2 and agent.status == "completed" and [e.code for e in agent.errors] == [rt.PLAN_DONE_ENDED]
+    assert agent.payload == {"resolved": [{"kind": "study", "id": "S1"}, {"kind": "variable", "id": "V1"}], "studies": ["S1"],
+                             "notes": []}               # IDs from the approval as confirmed by tool results
+    assert report.status == "completed" and report.complete and [a.kind for a in report.artifacts] == ["observations"]
+    assert "/seasons" not in endpoints_requested(ctx)   # the wandering call was never sent
+
+
+def test_an_incomplete_plan_keeps_fetching(tmp_path):
+    """A tightening, never an early end: with a planned fetch still missing, the same call is sent and the loop goes on to the
+    model's own answer."""
+    model = scripted_model(OBSERVATIONS, LIST_SEASONS, final=FINISHED)
+    _, agent, _ = run_planned(tmp_path, model, planned(pairs=(("S1", "V1"), ("S2", "V1"))))
+    assert len(model.requests) == 3 and agent.errors == [] and agent.payload == FINISHED["payload"]
+    assert len(tool_messages(agent)) == 2                                            # both calls were sent and answered
+
+
+def test_a_planned_action_and_a_plan_without_a_fetch_are_never_ended(tmp_path):
+    """The stop never cuts the plan short: a call the plan names (list_seasons here) is sent after the fetches, and a plan without
+    any fetch (a catalog or metadata question) is never ended by it; without a plan (planned=None) nothing changes."""
+    model = scripted_model(OBSERVATIONS, LIST_SEASONS, final=FINISHED)
+    _, agent, _ = run_planned(tmp_path, model, planned(actions=("get_observations", "list_seasons")))
+    assert len(model.requests) == 3 and agent.errors == []
+    model = scripted_model(LIST_SEASONS, LIST_SEASONS, final=FINISHED)
+    _, agent, _ = run_planned(tmp_path / "meta", model, planned(pairs=(), actions=()))
+    assert len(model.requests) == 3 and agent.errors == []
+    model = scripted_model(OBSERVATIONS, LIST_SEASONS, final=FINISHED)
+    _, agent, _ = run_planned(tmp_path / "none", model, None)
+    assert len(model.requests) == 3 and agent.errors == []
+
+
+def test_a_table_call_after_a_complete_plan_goes_to_the_approval_gate(tmp_path):
+    """Deliberate bug S4: the stop never takes a fetch or an export, even one the plan does not name (an export here): it is sent,
+    and an unplanned study is refused by the approval gate, as before; the loop goes on to the model's own answer. (Round 1's test
+    called a planned action, so the S4 bug passed it: the review of this set, finding 2.)"""
+    export = ("export_metadata", json.dumps({"entity": "studies"}))
+    other_study = ("get_observations", json.dumps({"study_db_id": "S2", "variable_db_id": "V1"}))
+    model = scripted_model(OBSERVATIONS, export, other_study, final=FINISHED)
+    _, agent, _ = run_planned(tmp_path, model, planned())
+    assert len(model.requests) == 4 and agent.errors == []
+    assert "blocked before dispatch" in tool_messages(agent)[2]["error"]["message"]
+
+
+def test_a_planned_catalog_export_is_waited_for(tmp_path):
+    """Deliberate bug S7: the step ends only once the plan's catalog export is complete too: before it a further call is sent, after
+    it the next one ends the step."""
+    export = ("export_metadata", json.dumps({"entity": "studies"}))
+    plan = rt.PlannedFetches(observation_pairs=frozenset({("S1", "V1")}), catalog_exports=({"entity": "studies"},),
+                             actions=frozenset({"get_observations", "export_metadata"}))
+    model = scripted_model(OBSERVATIONS, LIST_SEASONS, export, LIST_SEASONS, final=FINISHED)
+    _, agent, _ = run_planned(tmp_path, model, plan)
+    assert len(model.requests) == 4 and [e.code for e in agent.errors] == [rt.PLAN_DONE_ENDED]
+
+
+def test_the_runs_own_request_log_is_never_ended(tmp_path):
+    """request_log reads this run's own records and sends nothing to the server, so after a complete plan it is sent; an exact
+    repeat of the table still ends the step the old way (test_retrieval_workflow's q14 run, eval baseline 20261016T150241Z)."""
+    model = scripted_model(OBSERVATIONS, REQUEST_LOG, OBSERVATIONS, REQUEST_LOG, OBSERVATIONS, final=FINISHED)
+    _, agent, _ = run_planned(tmp_path, model, planned())
+    assert [e.code for e in agent.errors] == ["repeated_request"] and len(model.requests) == 5
+
+
 def test_a_first_exact_repeat_of_a_complete_table_is_not_sent_and_uses_no_fetch(tmp_path):
     budget = Budget(max_fetches=1)                     # before: the repeat reached this limit and the run ended
     model = scripted_model(OBSERVATIONS, REQUEST_LOG, OBSERVATIONS, final=FINISHED)
