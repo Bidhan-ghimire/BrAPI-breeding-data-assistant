@@ -266,8 +266,11 @@ def _ranking_block(claims: list[Claim], sources: _Sources, source_labels: dict[t
             table.append([_number(rank.value), "; ".join(entry), mean_text, "" if mean is None else mean.denominator.n])
             shown |= {rank.claim_id, *([mean.claim_id] if mean is not None else [])}
         order = "highest first" if "highest first" in name else "lowest first"
-        lines += [f"**Ranking by entry mean, {order}, of {n} entries{source_labels.get(hashes, '')}**", "",
-                  *_table(["Rank", "Entry", "Mean", "n"], table), ""]
+        by_study = "per-study" in name                                # rank_entries basis="study_means" (T3)
+        lines += [f"**Ranking by {'the mean of per-study entry means' if by_study else 'entry mean'}, {order}, of {n} entries"
+                  f"{source_labels.get(hashes, '')}**", "", *_table(["Rank", "Entry", "Mean", "n"], table), ""]
+        if by_study:
+            lines.append("Mean: the unweighted mean of each entry's per-study means (each study weighted equally; n = studies averaged).")
         lines += [_text(f"{item.reason}: {item.count}.") for item in pairs[0][0].exclusions if item.reason.startswith("entries ")]
         lines += [RANK_SENTENCE, ""]
     return lines, shown
@@ -381,9 +384,9 @@ def _anova_cell(quantity: str, claim: Claim | None) -> str:
         return "n/a"                                          # the reason is stated under the table
     if quantity == "df":
         return str(int(claim.value))
-    if quantity == "p" and claim.value < 0.0001:
-        return "< 0.0001"
-    return _anova_number(claim.value)
+    if quantity == "p" and claim.value == 0:
+        return "< 1e-300"                                     # an F tail below what a double holds; the claim carries the bound (review 2)
+    return _anova_number(claim.value)                     # a small p keeps its digits: "< 0.0001" is a number no claim carries
 
 
 def _anova_block(claims: list[Claim], source_labels: dict[tuple[str, ...], str]) -> tuple[list[str], set[str]]:
@@ -447,6 +450,71 @@ def _anova_block(claims: list[Claim], source_labels: dict[tuple[str, ...], str])
             elif part.startswith(("adjusted:", "incomplete blocks not modelled:", "blocks not modelled:")):
                 lines.append(_text(part[0].upper() + part[1:] + "."))
         lines += ["", ANOVA_SENTENCE, ""]
+        shown |= {claim.claim_id for claim in group}
+    return lines, shown
+
+
+GXE_SENTENCE = "Descriptive numbers only: a partition of recorded entry means across trials, not a recommendation."
+_GXE_CALL = re.compile(r"^(clm_v2_[0-9a-f]{6}_[0-9]{4,}_gxe-[0-9a-f]{8})_")
+_GXE_ROWS = (("environment", "Environment"), ("entry", "Entry"), ("entry x environment", "Entry × environment"), ("total", "Total"))
+
+
+def _gxe_block(claims: list[Claim], source_labels: dict[tuple[str, ...], str]) -> tuple[list[str], set[str]]:
+    """T3 (2026-10-23): the claims of one gxe_partition call as the means-table ANOVA (Source, df, SS, MS, F, p), the studies and
+    entries, the shares of the sum of squares, the F's denominator, the grand mean, the across-environment heritability and the
+    variance components (or why they are not given), then the descriptive sentence. Returns the lines and the IDs shown."""
+    calls: dict[str, list[Claim]] = defaultdict(list)
+    for claim in claims:
+        match = _GXE_CALL.match(claim.claim_id)
+        if match:
+            calls[match[1]].append(claim)
+    lines: list[str] = []
+    shown: set[str] = set()
+    for group in calls.values():
+        named = {claim.transformation.split(" | ")[0]: claim for claim in group}
+        first = next((claim for claim in group if claim.kind == "anova"), None)
+        if first is None:
+            continue
+        rows = []
+        for source, label in _GXE_ROWS:
+            cells = [named.get(f"means-table ANOVA: {quantity} of {source}") for quantity in ("df", "ss", "ms", "f", "p")]
+            if cells[0] is not None:
+                rows.append([label, *(_anova_cell(q, c) for q, c in zip(("df", "ss", "ms", "f", "p"), cells))])
+        parts = first.transformation.split(" | ")[1:]
+        label = source_labels.get(tuple(sorted(first.source_artifact_hashes)), "")
+        lines += [f"**Genotype × environment partition of entry means{label}**", "", _text("; ".join(parts[:2]) + "."), "",
+                  *_table(["Source", "df", "SS", "MS", "F", "p"], rows), ""]
+        undefined_f = named.get("means-table ANOVA: f of entry")
+        if undefined_f is not None and undefined_f.value is None:
+            lines.append(f"F and p not available: {_text(undefined_f.missing_reason or 'reason not provided')}.")
+        shares = [(text, named.get(f"share of the means-table SS: {source}")) for source, text in
+                  (("environment", "environment"), ("entry", "entry"), ("entry x environment", "entry × environment"))]
+        if all(claim is not None and claim.value is not None for _, claim in shares):
+            lines.append("Shares of the means-table sum of squares: " + ", ".join(f"{text} {_anova_number(claim.value)} %" for text, claim in shares) + ".")
+        lines.append("F for entries is tested against entry × environment (environments random).")
+        grand = named.get("grand mean of the entry means")
+        if grand is not None and grand.value is not None:
+            lines.append(f"Grand mean of the entry means {_anova_number(grand.value)}" + (f" {_text(grand.unit)}" if grand.unit else "") + ".")
+        h2 = named.get("across-environment entry-mean heritability H2")
+        if h2 is not None:
+            if h2.value is None:
+                lines.append(f"Across-environment entry-mean heritability (H²) not available ({_text(h2.missing_reason or 'reason not provided')}).")
+            else:
+                zero = "MS entry is below MS entry x environment: set to 0" in h2.transformation   # its flag, not the H2 text (review 2)
+                lines.append(f"Across-environment entry-mean heritability (H²) {_anova_number(h2.value)}"
+                             + (" (set to 0: MS entry is below MS entry × environment)" if zero else "") + ".")
+        components = [(text, named.get(name)) for text, name in (("genotype variance", "genotype variance sigma2 g"),
+                                                                 ("genotype × environment variance", "genotype x environment variance sigma2 ge"),
+                                                                 ("error variance (pooled within trials)", "error variance sigma2 e (pooled within trials)"))]
+        r_b = named.get("type-B genetic correlation r_B = sigma2 g / (sigma2 g + sigma2 ge)")
+        if components and all(claim is not None and claim.value is not None for _, claim in components):
+            lines.append("Variance components: " + ", ".join(
+                f"{text} {_anova_number(claim.value)}" + (" (set to 0)" if "estimate negative, set to 0" in claim.transformation else "")
+                for text, claim in components)
+                + (f"; r_B {_anova_number(r_b.value)}" if r_b is not None and r_b.value is not None else "") + ".")
+        elif components[0][1] is not None:
+            lines.append(f"Variance components not available ({_text(components[0][1].missing_reason or 'reason not provided')}).")
+        lines += ["", GXE_SENTENCE, ""]
         shown |= {claim.claim_id for claim in group}
     return lines, shown
 
@@ -759,7 +827,8 @@ def answer_summary(controller: Any) -> str:
     thresholds, in_threshold = _threshold_block(claims, sources, source_labels)
     correlations, in_correlation = _correlation_block(claims, source_labels)
     anova_lines, in_anova = _anova_block(claims, source_labels)
-    in_ranking |= in_threshold | in_correlation | in_anova
+    gxe_lines, in_gxe = _gxe_block(claims, source_labels)
+    in_ranking |= in_threshold | in_correlation | in_anova | in_gxe
     # a mean the ranking table shows is not shown again (group_stats on the same table states the same entry mean; review)
     ranked_means = {(tuple(sorted(c.source_artifact_hashes)), tuple(sorted(c.filters.items())), c.value)
                     for c in claims if c.claim_id in in_ranking and c.kind == "mean" and c.claim_id not in in_threshold}
@@ -775,7 +844,7 @@ def answer_summary(controller: Any) -> str:
             buckets[(tuple(sorted(claim.source_artifact_hashes)), claim.grouping[0], claim.denominator.name, claim.denominator.n)].append(claim)
         else:
             other.append(claim)
-    lines: list[str] = [*ranking, *thresholds, *correlations, *anova_lines]
+    lines: list[str] = [*ranking, *thresholds, *correlations, *anova_lines, *gxe_lines]
     in_catalog_titles: set[str] = set()              # distinct counts a catalog block's title already leads with
     for key, group in buckets.items():
         block = _catalog_block(group, sources, source_labels.get(key[0], ""), focus_count=focus_count)

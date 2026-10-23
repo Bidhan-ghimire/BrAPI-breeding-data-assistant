@@ -41,7 +41,7 @@ import sys
 from collections import Counter
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Any, Callable, Literal, Mapping
+from typing import Any, Callable, Iterable, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -406,6 +406,9 @@ class RankEntriesArgs(ToolArgs):
     min_independent_n: int = Field(default=1, ge=1, description="exclusion threshold on independent units; not a design correction")
     duplicate_policy: DuplicatePolicy = Field(default="reject")
     allow_incomplete: bool = Field(default=False)
+    basis: Literal["pooled", "study_means"] = Field(default="pooled", description="pooled: the mean of all the entry's valid values; "
+                                                    "study_means: the unweighted mean of its per-study means, over the entries present in "
+                                                    "every study of the table (each study weighted equally)")
 
 
 class ThresholdCountArgs(ToolArgs):
@@ -481,6 +484,21 @@ class AnovaTrialArgs(ToolArgs):
                                                 "one, the analysis is one-way (entries only)")
     duplicate_policy: DuplicatePolicy = Field(default="reject", description="what to do with repeated measurements of one plot")
     allow_incomplete: bool = Field(default=False, description="analyse an incomplete artifact anyway, clearly labelled")
+
+
+class GxePartitionArgs(ToolArgs):
+    artifact_ids: list[ArtifactId] = Field(min_length=1, max_length=40,
+                                           description="the measurements of ONE trait: one table per study, or one table holding several "
+                                                       "studies (concat_tables); each study is one environment")
+    by: str = Field(default="germplasmDbId", description="the entry ID column (names are carried as labels)")
+    value: str = Field(default=VALUE_COL)
+    rep: str = Field(default="rep", description="the replicate column plot_design adds: when every plot states one and every study is a "
+                                                "complete RCBD with the same number of reps, the pooled error and the variance components "
+                                                "are given too")
+    exclude: list[str] = Field(default_factory=list, max_length=50, description="entries (exact ID or exact name) left out, for example the checks")
+    name_prefix: str | None = Field(default=None, min_length=1, description="keep only the entries whose name starts with this exact text, for example PH17.")
+    duplicate_policy: DuplicatePolicy = Field(default="reject", description="what to do with repeated measurements of one plot")
+    allow_incomplete: bool = Field(default=False)
 
 
 # --------------------------------------------------------------------------
@@ -910,7 +928,10 @@ def tool_count_records(registry: ArtifactRegistry, a: CountRecordsArgs) -> ToolR
 # app may state, as an ordering of recorded values; "best", "select", "advance" and "recommend" stay refused elsewhere.
 ORDERING_NOTE = "descriptive ordering of recorded values, not a recommendation"
 RANK_RESULT_COLUMNS = {**GROUP_RESULT_COLUMNS, "rank": "rank among the ranked entries (ties share a rank; '' = not ranked)",
-                       "left_out": "true when the entry was left out before ranking (exclude)"}
+                       "left_out": "true when the entry was left out before ranking (exclude)",
+                       "basis": "what mean is: pooled = the mean of the entry's valid values; study_means = the unweighted mean of its "
+                                "per-study means (median, min, max and sd stay over its values)",
+                       "n_studies": "studies behind the mean under study_means ('' under pooled)"}
 
 
 def _entries(table: Table, by: str, label_col: str | None, wanted: list[str], what: str) -> list[str]:
@@ -967,6 +988,24 @@ def tool_rank_entries(registry: ArtifactRegistry, a: RankEntriesArgs) -> ToolRes
         transformation = f"{caveat}; {transformation}"
     unit = table.manifest.measurement.unit
     results, no_group_rows = _group_results(table, a.by, a.value, classified, used, a.min_independent_n, label_col)
+    studies: list[str] = []
+    if a.basis == "study_means":                                  # coach 2026-10-22 23:50 UTC (T3): each study weighted equally
+        _require_column(table, "studyDbId", "study column")
+        studies = sorted({row.get("studyDbId", "") for row, _ in used} - {""})      # studies with a valid value (review 1)
+        per_entry: dict[str, dict[str, list[float]]] = {}
+        for row, number in used:
+            if row.get(a.by, "") and row.get("studyDbId", ""):
+                per_entry.setdefault(row[a.by], {}).setdefault(row["studyDbId"], []).append(number)
+        for g in results:
+            study_means = per_entry.get(g["group_id"], {})
+            g["n_studies"] = len(study_means)
+            if study_means:                                       # the saved table keeps one basis for every entry (review 1)
+                g["mean"] = statistics.fmean(statistics.fmean(values) for values in study_means.values())
+            if g["included"] and len(study_means) < len(studies):
+                g["included"] = False
+                g["exclusion_reason"] = f"not in every study of the table ({len(study_means)} of {len(studies)})"
+    by_study = a.basis == "study_means"
+    measure = "the mean of per-study entry means" if by_study else "entry mean"
 
     first = "highest" if a.order == "highest" else "lowest"
     ranked = [g for g in results if g["included"] and g["group_id"] not in left_out]
@@ -986,10 +1025,11 @@ def tool_rank_entries(registry: ArtifactRegistry, a: RankEntriesArgs) -> ToolRes
     not_ranked = [g for g in results if not g["included"] and g["group_id"] not in left_out]
 
     lineage = [f"lineage: rank_entries by {a.by} on {table.manifest.artifact_id} sha256={table.manifest.sha256}",
-               f"transformation: {transformation}", f"order: {first} entry mean first; ties share a rank",
+               f"transformation: {transformation}", f"order: {first} {measure} first; ties share a rank", f"basis: {a.basis}",
                f"left out before ranking: {sorted(left_out) or 'none'}", f"min_independent_n={a.min_independent_n} (exclusion threshold)",
                f"rows with an empty {a.by}: {no_group_rows} (excluded, not dropped silently)", f"analysis target: {ANALYSIS_TARGET}"]
     text_rows = [{**g, "included": "true" if g["included"] else "false", "left_out": "true" if g["group_id"] in left_out else "false",
+                  "basis": a.basis, "n_studies": "" if g.get("n_studies") is None else str(g["n_studies"]),
                   "n_independent_units": "" if g["n_independent_units"] is None else str(g["n_independent_units"]),
                   "rank": "" if g["rank"] is None else str(g["rank"]),
                   **{k: ("" if g[k] is None else repr(g[k])) for k in ("mean", "median", "min", "max", "sd")}} for g in results]
@@ -1003,30 +1043,38 @@ def tool_rank_entries(registry: ArtifactRegistry, a: RankEntriesArgs) -> ToolRes
     order_exclusions = list(exclusions)
     if left_out:
         order_exclusions.append(Exclusion(reason="entries left out before ranking", count=len(left_out)))
-    if not_ranked:
-        order_exclusions.append(Exclusion(reason=f"entries not ranked: fewer than {a.min_independent_n} independent units",
-                                          count=len(not_ranked)))
+    absent = sum(1 for g in not_ranked if g["exclusion_reason"].startswith("not in every study"))     # each reason counted (review 1)
+    for reason, count in ((f"entries not ranked: fewer than {a.min_independent_n} independent units", len(not_ranked) - absent),
+                          ("entries not ranked: not in every study of the table", absent)):
+        if count:
+            order_exclusions.append(Exclusion(reason=reason, count=count))
     # one namespace per ranking: a second call with other entries left out ranks differently, so its claims must not share IDs
     variant = hashlib.sha256(json.dumps([a.order, sorted(left_out), a.min_independent_n, a.duplicate_policy, a.allow_incomplete,
-                                         a.value]).encode("utf-8")).hexdigest()[:10]
+                                         a.value] + ([a.basis] if by_study else [])).encode("utf-8")).hexdigest()[:10]
     averaged = len(used) != len(classified.valid)
     claims: list[Claim] = []
     for g in stated:
-        denominator = Denominator(name=(f"observation units in entry {g['group_id']} ({PER_UNIT})" if averaged else
-                                        f"valid numeric values in entry {g['group_id']}" + ("" if classified.units_known else " (rows; independence unknown)")),
-                                  n=g["n_valid_values"])
+        if by_study:
+            denominator = Denominator(name=f"study means of entry {g['group_id']} (each the mean of its valid values in one study)", n=g["n_studies"])
+            mean_text = (f"entry mean = the unweighted mean of its per-study means over the {len(studies)} studies of the table (each study "
+                         f"weighted equally; entries in every study); {transformation}")
+        else:
+            denominator = Denominator(name=(f"observation units in entry {g['group_id']} ({PER_UNIT})" if averaged else
+                                            f"valid numeric values in entry {g['group_id']}" + ("" if classified.units_known else " (rows; independence unknown)")),
+                                      n=g["n_valid_values"])
+            mean_text = f"entry mean of valid values; {transformation}"
         claims.append(Claim(claim_id=_claim_id(table.manifest.artifact_id, "mean", a.by, g["group_id"], namespace=f"rank-{variant}"),
                             kind="mean", value=g["mean"], unit=unit, denominator=denominator, n_independent_units=g["n_independent_units"],
                             source_artifact_hashes=[table.manifest.sha256], filters={a.by: g["group_id"]}, grouping=[a.by],
-                            transformation=f"entry mean of valid values; {transformation}", exclusions=exclusions))
+                            transformation=mean_text, exclusions=exclusions))
         claims.append(Claim(claim_id=_claim_id(table.manifest.artifact_id, "rank", a.by, g["group_id"], namespace=f"rank-{variant}"),
-                            kind="rank", value=g["rank"], denominator=Denominator(name=f"entries ranked by entry mean, {first} first", n=len(ranked)),
+                            kind="rank", value=g["rank"], denominator=Denominator(name=f"entries ranked by {measure}, {first} first", n=len(ranked)),
                             source_artifact_hashes=[table.manifest.sha256], filters={a.by: g["group_id"]}, grouping=[a.by],
-                            transformation=(f"rank among {len(ranked)} entries by entry mean, {first} first; ties share a rank; "
+                            transformation=(f"rank among {len(ranked)} entries by {measure}, {first} first; ties share a rank; "
                                             f"{ORDERING_NOTE}; {transformation}"), exclusions=order_exclusions))
     data = {
         "artifact_id": table.manifest.artifact_id, "result_artifact_id": manifest.artifact_id, "variable_id": variable, "unit": unit,
-        "by": a.by, "label_column": label_col, "order": f"{first} first", "entries_ranked": len(ranked),
+        "by": a.by, "label_column": label_col, "order": f"{first} first", "entries_ranked": len(ranked), "basis": a.basis, "studies": studies,
         "left_out": [{"entry": e, "label": by_id[e]["label"]} for e in sorted(left_out)],
         "not_ranked": [{"entry": g["group_id"], "label": g["label"], "reason": g["exclusion_reason"]} for g in not_ranked],
         "named_not_ranked": named_not_ranked,
@@ -1844,6 +1892,7 @@ ANOVA_RESULT_COLUMNS = {
     "p": "upper-tail probability of F ('' for error and total)",
 }
 ZERO_ERROR = "the error mean square is 0: the plots of each entry are identical, or the reps explain them exactly"
+P_UNDERFLOW = " | p below 1e-300: smaller than a double holds"     # an F tail of 0.0 (T3 review 2); the answer shows "< 1e-300"
 BLOCK_COL = "block"                                       # plot_design's column (DESIGN_COLUMNS)
 H2_TEXT = ("entry-mean heritability H2 = sigma2 g / (sigma2 g + sigma2 e / r) = 1 - MS error / MS entry, broad sense and within this "
            "trial: the genotype variance is confounded with genotype x environment here, which is why some tools call it repeatability")
@@ -1865,6 +1914,22 @@ def _solve(matrix: list[list[float]], vector: list[float]) -> list[float] | None
                 for k in range(col, n + 1):
                     m[r][k] -= factor * m[col][k]
     return [m[i][n] / m[i][i] for i in range(n)]
+
+
+def _rep_code_clashes(codes: Iterable[str]) -> list[list[str]]:
+    """Rep codes that are the same number written differently ("1" and "1.0"), compared as the plot list compares them:
+    numerals only, exact Decimal equality (no rounding, no overflow)."""
+    written: dict[Decimal, set[str]] = {}
+    for code in codes:
+        if not _NUMERAL.fullmatch(code):
+            continue                                      # as the plot list: only numerals are compared as numbers
+        try:
+            number = Decimal(code)
+        except InvalidOperation:
+            continue
+        if number.is_finite():
+            written.setdefault(number, set()).add(code)
+    return sorted(sorted(found) for found in written.values() if len(found) > 1)
 
 
 def _groups_linked(cells: list[tuple[str, str]]) -> int:
@@ -2015,18 +2080,7 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
                                           "every plot's rep (and a one-way analysis none)")
     rcbd = stated > 0
     if rcbd:
-        written: dict[Decimal, set[str]] = {}
-        for row, _ in used:
-            code = row[a.rep].strip()
-            if not _NUMERAL.fullmatch(code):
-                continue                                      # as the plot list: only numerals are compared as numbers
-            try:
-                number = Decimal(code)
-            except InvalidOperation:
-                continue
-            if number.is_finite():
-                written.setdefault(number, set()).add(code)
-        clashes = sorted(sorted(codes) for codes in written.values() if len(codes) > 1)
+        clashes = _rep_code_clashes(row[a.rep].strip() for row, _ in used)
         if clashes:
             raise AnalystError("unsupported", f"rep codes {' and '.join(repr(c) for c in clashes[0])} are the same number written "
                                               "differently, so they would count as different reps; write each rep one way")
@@ -2121,7 +2175,8 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
                 continue                                      # not part of the table: MS of total, F and p of error and total
             claims.append(Claim(claim_id=_claim_id(aid, "anova", row["source"], quantity, namespace=namespace), kind="anova",
                                 value=value, missing_reason=ZERO_ERROR if value is None else None,
-                                transformation=f"{res.design} ANOVA: {quantity} of {row['source']}{tail}", **common))
+                                transformation=f"{res.design} ANOVA: {quantity} of {row['source']}{tail}"
+                                               + (P_UNDERFLOW if quantity == "p" and value == 0 else ""), **common))
     claims.append(Claim(claim_id=_claim_id(aid, "mean", "grand", namespace=namespace), kind="mean", value=res.grand_mean, unit=unit,
                         transformation=f"grand mean{tail}", **common))
     for name, value, value_unit, reason in (("CV", cv, "%", "the grand mean is not above 0"),
@@ -2175,9 +2230,337 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
             "claims": _claims_json(claims), "note": ANOVA_NOTE, "h2_text": H2_TEXT, "analysis_target": ANALYSIS_TARGET, "value_policy": VALUE_POLICY}
     return ToolResult(ok=True, data=data, artifact_ids=[aid, manifest.artifact_id], complete=table.manifest.complete, warnings=warnings)
 
+# T3 (coach 2026-10-22 22:50 / 23:50 UTC; research build order, tool 5): the genotype x environment partition of ONE trait's
+# entry means across studies. Measured first (t3_gxe_partition_20261023/UNLOCKS.md): D16.3, E12.1, E12.2, E12.5, E17.1, E17.2,
+# E17.3 and E17.5 need it.
+GXE_NOTE = "descriptive partition of recorded entry means across trials, not a recommendation"
+GXE_SOURCES = ("environment", "entry", "entry x environment")
+GXE_ZERO = "the entry x environment mean square is 0: the entry means are exactly additive, so F is undefined"
+GXE_H2_TEXT = ("across-environment entry-mean heritability H2 = 1 - MS entry x environment / MS entry of the means table (on balanced "
+               "data, and when no variance component is set to 0, equal to sigma2 g / (sigma2 g + sigma2 ge / e + sigma2 e / (r e))); "
+               "environments random, so G x E is its denominator")
+GXE_BLOCKS = ("incomplete blocks not modelled: the plots state several blocks within a rep; each study is analysed as the enclosing RCBD, "
+              "so any block variance stays in the error")
+GXE_RESULT_COLUMNS = {
+    "entry": "exact entry ID", "label": "name carried from the label column, if any", "study": "study ID (one environment)",
+    "mean": "the entry's mean in the study: the mean of its plots' values, full precision", "n_plots": "plots behind the mean",
+    "kept": "true when the entry has a mean in every study and is in the partition",
+    "left_out": "why the entry is not in the partition ('' when kept): excluded, outside the name prefix, not in every study",
+}
+
+
+def _entries_in_any(tables: list[Table], by: str, label_col: str | None, wanted: list[str], what: str) -> set[str]:
+    """_entries over several tables: each wanted entry is resolved in the first table that knows it; one no table knows is
+    refused with the first table's message."""
+    found: set[str] = set()
+    for name in wanted:
+        errors: list[AnalystError] = []
+        for table in tables:
+            try:
+                found |= set(_entries(table, by, label_col, [name], what))
+                break
+            except AnalystError as error:
+                errors.append(error)
+        else:
+            raise errors[0]
+    return found
+
+
+def tool_gxe_partition(registry: ArtifactRegistry, a: GxePartitionArgs) -> ToolResult:
+    """The genotype x environment partition of ONE trait's entry means across studies (each study one environment; research
+    build order, tool 5). An entry's mean in a study is the mean of its plots' values; only the entries with a mean in every
+    study are kept (the others are counted and saved). On the entries x studies means table: the environment, entry and entry
+    x environment sums of squares with df and MS, their shares of the table's sum of squares, the F for entries tested against
+    entry x environment (environments random) with its p, the grand mean and the across-environment entry-mean heritability
+    H2 = 1 - MS entry x environment / MS entry (set to 0 and flagged when negative). When every plot states its rep
+    (plot_design's tables) and every study is a complete RCBD of the kept entries with the same r: the pooled within-trial
+    error mean square and the variance components on the means scale, sigma2 e (pooled), sigma2 ge = MS entry x environment -
+    sigma2 e / r, sigma2 g = (MS entry - MS entry x environment) / studies (each set to 0 and flagged when negative), and
+    r_B = sigma2 g / (sigma2 g + sigma2 ge); otherwise they are not available, with the reason (a mixed model would be needed).
+    Input: one table per study, or one table holding several studies (concat_tables). Refused, never guessed: fewer than 2
+    studies, fewer than 2 entries with a mean in every study, more than one variable, the same table twice, a plot in two
+    tables, several values of one plot unless duplicate_policy='mean_per_unit'. Descriptive numbers of recorded values, never
+    a choice of entries or a stability call."""
+    tables = [_load(registry, handle) for handle in a.artifact_ids]
+    seen: dict[str, str] = {}
+    for table in tables:
+        for key in (table.manifest.artifact_id, table.manifest.sha256):
+            if key in seen:
+                raise AnalystError("invalid_argument", f"{seen[key]} and {table.manifest.artifact_id} hold the same rows; pass each table once")
+            seen[key] = table.manifest.artifact_id
+    if a.by.endswith("Name"):
+        raise AnalystError("invalid_argument", f"use the entry ID column, not {a.by!r}; names are carried as labels")
+    variables: set[str] = set()
+    for table in tables:
+        _require_column(table, a.by, "entry column")
+        _require_column(table, a.value, "value column")
+        _require_column(table, "studyDbId", "study column")
+        variables.add(_single_variable(table))
+    if len(variables) > 1:
+        raise AnalystError("unsupported", f"the tables hold {len(variables)} variables {sorted(variables)}; a partition needs one variable (one trait)")
+    variable = next(iter(variables))
+    label_col = LABEL_FOR.get(a.by)
+    label_col = label_col if label_col is not None and all(label_col in table.manifest.columns for table in tables) else None
+    if a.name_prefix is not None and label_col is None:
+        raise AnalystError("invalid_argument", f"name_prefix needs a name column beside {a.by!r} in every table")
+    excluded = _entries_in_any(tables, a.by, label_col, a.exclude, "exclude")
+
+    gates: list[str] = []
+    notes: list[str] = []
+    exclusions: list[Exclusion] = []
+    labels: dict[str, set[str]] = {}
+    plots: list[tuple[str, str, str, float, str, str]] = []      # (study, entry, plot, value, rep, block)
+    plot_table: dict[str, str] = {}
+    repeated_plots = repeated_values = no_study = no_entry = 0
+    units_known = True
+    for table in tables:
+        gate = _completeness_gate(table, a.allow_incomplete)
+        if gate:
+            gates.append(f"{table.manifest.artifact_id}: {gate}")
+        classified = _classify(table, a.value)
+        units_known = units_known and classified.units_known
+        used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy)
+        notes.append(transformation)
+        exclusions += _exclusions(classified)
+        if label_col:
+            for row in table.rows:
+                if row.get(a.by, "").strip() and row.get(label_col, ""):
+                    labels.setdefault(row[a.by].strip(), set()).add(row[label_col])
+        by_plot: dict[str, list[tuple[dict[str, str], float]]] = {}
+        for i, (row, value) in enumerate(used):
+            if not row.get("studyDbId", "").strip():
+                no_study += 1
+            elif not row.get(a.by, "").strip():
+                no_entry += 1
+            else:
+                plot = row.get(UNIT_COL, "").strip() or f"(row {i} of {table.manifest.artifact_id} without a plot ID)"
+                by_plot.setdefault(plot, []).append((row, value))
+        for plot, rows in sorted(by_plot.items()):
+            if plot in plot_table:
+                raise AnalystError("unsupported", f"plot {plot} is in both {plot_table[plot]} and {table.manifest.artifact_id}; pass tables that "
+                                                  "do not overlap")
+            plot_table[plot] = table.manifest.artifact_id
+            if len(rows) > 1:
+                if a.duplicate_policy != "mean_per_unit":
+                    raise AnalystError("unsupported", f"plot {plot} has {len(rows)} values (several dates or timepoints); a partition of entry "
+                                                      "means needs one value per plot: pass duplicate_policy='mean_per_unit' to average each "
+                                                      "plot's values first")
+                if len({(r.get(a.by, "").strip(), r.get("studyDbId", "").strip(), r.get(a.rep, "").strip()) for r, _ in rows}) > 1:
+                    raise AnalystError("unsupported", f"plot {plot} is recorded with more than one entry, study or rep; its values cannot be averaged")
+                repeated_plots += 1
+                repeated_values += len(rows)
+            first = rows[0][0]
+            plots.append((first["studyDbId"].strip(), first[a.by].strip(), plot, math.fsum(v for _, v in rows) / len(rows),
+                          first.get(a.rep, "").strip(), first.get(BLOCK_COL, "").strip() if BLOCK_COL in table.manifest.columns else ""))
+    kept_notes = list(dict.fromkeys(notes))
+    if repeated_plots:                                        # every table's note stays; only "as recorded" is no longer true (review 1)
+        kept_notes = [note for note in kept_notes if not note.startswith("valid values used as recorded")]
+        kept_notes.append(f"each plot's values averaged over its dates ({repeated_values} values in {repeated_plots} plots)")
+    transformation = "; ".join(kept_notes)
+    for reason, count in (("rows with an empty studyDbId", no_study), (f"rows with an empty {a.by}", no_entry)):
+        if count:
+            exclusions.append(Exclusion(reason=reason, count=count))
+
+    studies = sorted({study for study, *_ in plots})
+    if len(studies) < 2:
+        raise AnalystError("unsupported", f"a partition across environments needs at least 2 studies; the tables hold {len(studies)} with a "
+                                          f"valid value ({', '.join(studies) or 'none'})")
+    cells: dict[str, dict[str, list[float]]] = {}
+    for study, entry, _, value, *_ in plots:
+        cells.setdefault(entry, {}).setdefault(study, []).append(value)
+    outside = {e for e in cells if a.name_prefix is not None and e not in excluded and not any(n.startswith(a.name_prefix) for n in labels.get(e, ()))}
+    kept: list[str] = []
+    dropped: list[tuple[str, str]] = []
+    for entry in sorted(cells):
+        reason = ("excluded" if entry in excluded else "outside the name prefix" if entry in outside
+                  else "" if len(cells[entry]) == len(studies) else f"not in every study ({len(cells[entry])} of {len(studies)})")
+        if reason:
+            dropped.append((entry, reason))
+        else:
+            kept.append(entry)
+    if len(kept) < 2:
+        raise AnalystError("unsupported", f"a partition needs at least 2 entries with a mean in every study; {len(kept)} of {len(cells)} have "
+                                          f"one ({len(dropped)} left out)")
+
+    # the means table, centred on its grand mean (the sums of squares do not change; less cancellation)
+    g, e = len(kept), len(studies)
+    means = [[math.fsum(cells[entry][study]) / len(cells[entry][study]) for study in studies] for entry in kept]
+    grand = math.fsum(v for row in means for v in row) / (g * e)
+    centred = [[v - grand for v in row] for row in means]
+    row_mean = [math.fsum(row) / e for row in centred]
+    col_mean = [math.fsum(centred[i][j] for i in range(g)) / g for j in range(e)]
+    ss_total = math.fsum(v * v for row in centred for v in row)
+    ss = {"environment": g * math.fsum(m * m for m in col_mean), "entry": e * math.fsum(m * m for m in row_mean),
+          "entry x environment": math.fsum((centred[i][j] - row_mean[i] - col_mean[j]) ** 2 for i in range(g) for j in range(e))}
+    if ss["entry x environment"] <= 1e-14 * ss_total:
+        ss["entry x environment"] = 0.0                       # an exactly additive table: floating residue, not interaction
+    df = {"environment": e - 1, "entry": g - 1, "entry x environment": (g - 1) * (e - 1)}
+    ms = {source: ss[source] / df[source] for source in GXE_SOURCES}
+    f_entry = ms["entry"] / ms["entry x environment"] if ms["entry x environment"] > 0 else None
+    p_entry = pvalues.f_upper_p(f_entry, df["entry"], df["entry x environment"]) if f_entry is not None else None
+    rows = [{"source": source, "df": df[source], "ss": ss[source], "ms": ms[source], "f": f_entry if source == "entry" else None,
+             "p": p_entry if source == "entry" else None} for source in GXE_SOURCES]
+    rows.append({"source": "total", "df": g * e - 1, "ss": ss_total, "ms": None, "f": None, "p": None})
+    explained = math.fsum(ss.values())
+    shares = {source: (100 * ss[source] / explained if explained > 0 else None) for source in GXE_SOURCES}
+    h2_raw = 1 - ms["entry x environment"] / ms["entry"] if ms["entry"] > 0 else None
+    h2_set_to_zero = h2_raw is not None and h2_raw < 0
+    h2 = 0.0 if h2_set_to_zero else h2_raw
+
+    vc: dict[str, Any] = {"available": False, "reason": None, "r": None, "df_error": None, "sigma2_e": None, "sigma2_ge": None, "sigma2_g": None,
+                          "r_b": None, "h2_long_form": None, "sigma2_g_set_to_zero": False, "sigma2_ge_set_to_zero": False}
+    kept_set = set(kept)
+    in_partition = [p for p in plots if p[1] in kept_set]
+    if not all(a.rep in table.manifest.columns for table in tables) or any(not plot[4] for plot in in_partition):
+        vc["reason"] = (f"the plots state no rep in column {a.rep!r} (plot_design adds it): the means-table partition stands; the pooled error "
+                        "and the variance components need each study's reps")
+    else:
+        per_study: dict[str, list[tuple[str, str, float]]] = {}
+        blocks_in: dict[tuple[str, str], set[str]] = {}
+        for study, entry, _, value, rep, block in in_partition:
+            per_study.setdefault(study, []).append((entry, rep, value))
+            if block:
+                blocks_in.setdefault((study, rep), set()).add(block)
+        reps_of = {study: sorted({rep for _, rep, _ in items}) for study, items in per_study.items()}
+        cells_of = {study: Counter((entry, rep) for entry, rep, _ in items) for study, items in per_study.items()}
+        # one reason per condition (review 1); rep codes belong to their own study, so they are compared within each study
+        clash = next(((study, found[0]) for study in studies for found in [_rep_code_clashes(reps_of[study])] if found), None)
+        doubled = [(study, entry, rep, n) for study in studies for (entry, rep), n in sorted(cells_of[study].items()) if n > 1]
+        one_rep = [study for study in studies if len(reps_of[study]) < 2]
+        missing = [(study, g * len(reps_of[study]) - len(cells_of[study])) for study in studies
+                   if len(cells_of[study]) != g * len(reps_of[study])]     # every study counted, not the first (review 2)
+        stands = "the means-table partition stands"
+        if clash:
+            vc["reason"] = (f"rep codes {' and '.join(repr(code) for code in clash[1])} of study {clash[0]} are the same number written "
+                            f"differently; the variance components are not given ({stands})")
+        elif doubled:
+            first_cell = doubled[0]
+            more = (f" ({len(doubled)} such cells in {len({cell[0] for cell in doubled})} studies)" if len(doubled) > 1 else "")
+            vc["reason"] = (f"entry {first_cell[1]} has {first_cell[3]} plots in rep {first_cell[2]} of study {first_cell[0]}{more}: not an RCBD, "
+                            f"so the variance components are not given ({stands})")
+        elif one_rep:
+            vc["reason"] = (f"{len(one_rep)} of {len(studies)} studies have one rep ({', '.join(one_rep[:10])}{', ...' if len(one_rep) > 10 else ''}): "
+                            f"with one plot per entry, G x E and the plot error cannot be told apart, so the variance components are not given "
+                            f"({stands})")
+        elif len({len(reps_of[study]) for study in studies}) != 1:
+            vc["reason"] = (f"the studies have different numbers of reps ({', '.join(f'{study}: {len(reps_of[study])}' for study in studies)}): "
+                            f"the variance components need a mixed model (REML); {stands}")
+        elif missing:
+            vc["reason"] = (f"{sum(n for _, n in missing)} entry x rep cell(s) have no plot ({'; '.join(f'study {s}: {n}' for s, n in missing[:10])}"
+                            f"{'; ...' if len(missing) > 10 else ''}): the variance components need a mixed model (REML); {stands}")
+        else:
+            r = len(reps_of[studies[0]])
+            ss_e = df_e = 0.0
+            for study in studies:
+                result = _anova([(entry, rep, value) for entry, rep, value in per_study[study]])
+                ss_e += next(row["ss"] for row in result.rows if row["source"] == "error")
+                df_e += result.df_error
+            s2e = ss_e / df_e
+            s2ge_raw = ms["entry x environment"] - s2e / r
+            s2g_raw = (ms["entry"] - ms["entry x environment"]) / e
+            s2ge, s2g = max(s2ge_raw, 0.0), max(s2g_raw, 0.0)
+            vc.update(available=True, r=r, df_error=int(df_e), sigma2_e=s2e, sigma2_ge=s2ge, sigma2_g=s2g,
+                      sigma2_g_set_to_zero=s2g_raw < 0, sigma2_ge_set_to_zero=s2ge_raw < 0,
+                      r_b=s2g / (s2g + s2ge) if s2g + s2ge > 0 else None,
+                      h2_long_form=s2g / (s2g + s2ge / e + s2e / (r * e)) if s2g + s2ge / e + s2e / (r * e) > 0 else None,
+                      note=GXE_BLOCKS if any(len(codes) > 1 for codes in blocks_in.values()) else None)
+
+    first_table = tables[0]
+    aid = first_table.manifest.artifact_id
+    unit = first_table.manifest.measurement.unit
+    trait = first_table.manifest.measurement.trait or variable
+    variant = hashlib.sha256(json.dumps([[t.manifest.sha256 for t in tables], a.by, a.value, a.rep, sorted(excluded), a.name_prefix,
+                                         a.duplicate_policy, a.allow_incomplete]).encode("utf-8")).hexdigest()[:8]
+    namespace = f"gxe-{variant}"
+    context = [f"{trait} in {e} studies ({', '.join(studies)})",
+               f"{g} entries with a mean in every study (of {len(cells)}; {len(dropped)} left out)", transformation, GXE_NOTE, *gates]
+    tail = " | " + " | ".join(context)
+    hashes = [t.manifest.sha256 for t in tables]
+    for reason, count in Counter(reason.split(" (")[0] for _, reason in dropped).items():
+        exclusions.append(Exclusion(reason=f"entries left out: {reason}", count=count))
+    common = {"denominator": Denominator(name="entry means in the partition (entries x studies)", n=g * e), "n_independent_units": None,
+              "source_artifact_hashes": hashes, "grouping": [a.by, "studyDbId"], "exclusions": exclusions}
+    claims: list[Claim] = []
+    for row in rows:
+        for quantity in ("df", "ss", "ms", "f", "p"):
+            value = row[quantity]
+            if value is None and not (quantity in ("f", "p") and row["source"] == "entry"):
+                continue                                      # not part of the table
+            claims.append(Claim(claim_id=_claim_id(aid, "anova", row["source"], quantity, namespace=namespace), kind="anova", value=value,
+                                missing_reason=GXE_ZERO if value is None else None,
+                                transformation=f"means-table ANOVA: {quantity} of {row['source']}{tail}"
+                                               + (P_UNDERFLOW if quantity == "p" and value == 0 else ""), **common))
+    for source in GXE_SOURCES:
+        claims.append(Claim(claim_id=_claim_id(aid, "ratio", "share", source, namespace=namespace), kind="ratio", value=shares[source], unit="%",
+                            missing_reason=None if shares[source] is not None else "all entry means are equal: no sum of squares to share",
+                            transformation=f"share of the means-table SS: {source}{tail}", **common))
+    claims.append(Claim(claim_id=_claim_id(aid, "mean", "grand", namespace=namespace), kind="mean", value=grand, unit=unit,
+                        transformation=f"grand mean of the entry means{tail}", **common))
+    flag = " | MS entry is below MS entry x environment: set to 0" if h2_set_to_zero else ""
+    claims.append(Claim(claim_id=_claim_id(aid, "heritability", "across-environments", namespace=namespace), kind="heritability", value=h2,
+                        missing_reason=None if h2 is not None else "no variation among the entries' means",
+                        transformation=f"across-environment entry-mean heritability H2{tail} | {GXE_H2_TEXT}{flag}", **common))
+    for name, count in (("entries with a mean in every study", g), ("entries dropped: not in every study",
+                                                                    sum(1 for _, reason in dropped if reason.startswith("not in every study"))),
+                        ("studies (environments)", e)):
+        claims.append(Claim(claim_id=_claim_id(aid, "count", name.split(":")[0].replace(" ", "-").replace("(", "").replace(")", ""), namespace=namespace),
+                            kind="count", value=count, transformation=f"{name}{tail}", **common))
+    for name, key, flagged in (("genotype variance sigma2 g", "sigma2_g", "sigma2_g_set_to_zero"),
+                               ("genotype x environment variance sigma2 ge", "sigma2_ge", "sigma2_ge_set_to_zero"),
+                               ("error variance sigma2 e (pooled within trials)", "sigma2_e", None)):
+        note = (f" | r = {vc['r']}" if vc["available"] else "") + (f" | {vc['note']}" if vc.get("note") else "")
+        note += " | estimate negative, set to 0" if flagged and vc[flagged] else ""
+        claims.append(Claim(claim_id=_claim_id(aid, "variance", key, namespace=namespace), kind="variance", value=vc[key],
+                            missing_reason=None if vc[key] is not None else vc["reason"], transformation=f"{name}{tail}{note}", **common))
+    claims.append(Claim(claim_id=_claim_id(aid, "ratio", "r-b", namespace=namespace), kind="ratio", value=vc["r_b"],
+                        missing_reason=None if vc["r_b"] is not None else (vc["reason"] or "sigma2 g and sigma2 ge are both 0"),
+                        transformation=f"type-B genetic correlation r_B = sigma2 g / (sigma2 g + sigma2 ge){tail}", **common))
+
+    # the headline numbers first: the coordinator's view keeps 20 claims (coordination_runtime VIEW_CLAIMS), and on Luna (2026-10-23)
+    # anova_trial's heritability, claim 25 of 25, never reached it
+    headline = {name: i for i, name in enumerate((
+        "across-environment entry-mean heritability H2", "genotype variance sigma2 g", "genotype x environment variance sigma2 ge",
+        "error variance sigma2 e (pooled within trials)", "type-B genetic correlation r_B = sigma2 g / (sigma2 g + sigma2 ge)",
+        *(f"share of the means-table SS: {source}" for source in GXE_SOURCES), "means-table ANOVA: f of entry", "means-table ANOVA: p of entry",
+        "means-table ANOVA: ms of entry", "means-table ANOVA: ms of entry x environment", "grand mean of the entry means"))}
+    claims.sort(key=lambda claim: headline.get(claim.transformation.split(" | ")[0], len(headline)))
+
+    left = dict(dropped)
+    result_rows = [{"entry": entry, "label": "; ".join(sorted(labels.get(entry, ()))), "study": study,
+                    "mean": repr(math.fsum(cells[entry][study]) / len(cells[entry][study])), "n_plots": str(len(cells[entry][study])),
+                    "kept": "true" if entry in kept_set else "false", "left_out": left.get(entry, "")}
+                   for entry in sorted(cells) for study in studies if study in cells[entry]]
+    lineage = [f"lineage: gxe_partition of {', '.join(f'{t.manifest.artifact_id} sha256={t.manifest.sha256}' for t in tables)}",
+               f"studies: {', '.join(studies)}", f"left out: excluded {sorted(excluded)}, name_prefix {a.name_prefix!r}",
+               f"analysis target: {ANALYSIS_TARGET}"]
+    complete = all(t.manifest.complete for t in tables)
+    manifest = registry.save_table(result_rows, kind="analysis_result", columns=GXE_RESULT_COLUMNS, complete=complete,
+                                   source_request_ids=list(dict.fromkeys(i for t in tables for i in t.manifest.source_request_ids)),
+                                   study_ids=studies, variable_ids=[variable], measurement=first_table.manifest.measurement, quality_notes=lineage)
+    warnings = list(gates)
+    if dropped:
+        warnings.append(f"{len(dropped)} entries left out of the partition (not in every study, excluded or outside the name prefix); "
+                        f"{g} kept")
+    if not vc["available"]:
+        warnings.append(f"variance components not given: {vc['reason']}")
+    elif vc.get("note"):
+        warnings.append(vc["note"])
+    if h2_set_to_zero:
+        warnings.append("MS entry is below MS entry x environment: the across-environment heritability is set to 0")
+    if not units_known:
+        warnings.append("independence unknown: some valid rows name no observation unit")
+    data = {"artifact_ids": [t.manifest.artifact_id for t in tables], "result_artifact_id": manifest.artifact_id, "variable_id": variable,
+            "unit": unit, "studies": studies, "entries_kept": g, "entries_dropped": len(dropped),
+            "dropped": [{"entry": entry, "label": "; ".join(sorted(labels.get(entry, ()))), "reason": reason} for entry, reason in dropped[:50]],
+            "anova": rows, "shares": shares, "grand_mean": grand, "h2": h2, "h2_set_to_zero": h2_set_to_zero, "variance_components": vc,
+            "f_denominator": "entry x environment (environments random)", "transformation": transformation,
+            "claims": _claims_json(claims), "note": GXE_NOTE, "h2_text": GXE_H2_TEXT, "analysis_target": ANALYSIS_TARGET, "value_policy": VALUE_POLICY}
+    return ToolResult(ok=True, data=data, artifact_ids=[*(t.manifest.artifact_id for t in tables), manifest.artifact_id], complete=complete,
+                      warnings=warnings)
+
 
 # --------------------------------------------------------------------------
-# ONE registry of the thirteen tools, schemas and dispatch
+# ONE registry of the fourteen tools, schemas and dispatch
 # --------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -2208,9 +2591,10 @@ ANALYST_TOOLS: dict[str, AnalystToolSpec] = {spec.name: spec for spec in [
     AnalystToolSpec("correlate_entry_means", CorrelateEntryMeansArgs, tool_correlate_entry_means),
     AnalystToolSpec("plot_design", PlotDesignArgs, tool_plot_design),
     AnalystToolSpec("anova_trial", AnovaTrialArgs, tool_anova_trial),
+    AnalystToolSpec("gxe_partition", GxePartitionArgs, tool_gxe_partition),
 ]}
 ANALYST_TOOL_NAMES = list(ANALYST_TOOLS)
-assert len(ANALYST_TOOL_NAMES) == 13
+assert len(ANALYST_TOOL_NAMES) == 14
 
 
 def analyst_tool_schemas() -> list[dict[str, Any]]:

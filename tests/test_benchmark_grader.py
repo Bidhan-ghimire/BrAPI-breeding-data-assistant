@@ -504,3 +504,46 @@ def test_a_note_with_both_quote_kinds_is_blanked_whole(tmp_path):
         assert "\\'" in notes[-1] and '"' in notes[-1]
     run = _with_report_lines(_run_dir(tmp_path, []), notes=notes)
     assert bench.run_numbers([run]) == [4610.0, 4610.0]
+
+
+
+def test_a_large_or_small_number_in_scientific_notation_is_backed_at_its_own_scale():
+    """T3 review 1 (2026-10-23): "1.121e+07" was backed only within 0.0005 of a claim; its last digit stands for 10 000."""
+    claims = [{"kind": "anova", "value": 11214567.1234, "denominator": {"name": "entry means", "n": 30}, "n_independent_units": None,
+               "exclusions": [], "filters": {}, "grouping": [], "transformation": "means-table ANOVA: ss of environment"},
+              {"kind": "anova", "value": 1.9158923323333683e-07, "denominator": {"name": "plots", "n": 40}, "n_independent_units": None,
+               "exclusions": [], "filters": {}, "grouping": [], "transformation": "RCBD ANOVA: p of entry"}]
+    shown = "| Environment | 1.121e+07 | 5.607e+06 |\n| Entry | 1.916e-07 |"
+    g = bench.grade(sub(expected=[{"value": 1.9e-07, "kind": "other", "decimals": 8, "abs": 5e-09}], tolerance={"rule": "display", "abs": 5e-09}),
+                    shown=shown, status="run ended", claims=claims + [dict(claims[0], value=5607283.5617)])
+    assert g["invented"] == [] and g["bucket"] == "pass"
+    g = bench.grade(sub(expected=[{"value": 1.9e-07, "kind": "other", "decimals": 8, "abs": 5e-09}], tolerance={"rule": "display", "abs": 5e-09}),
+                    shown=shown.replace("1.121e+07", "1.125e+07"), status="run ended", claims=claims + [dict(claims[0], value=5607283.5617)])
+    assert [item["value"] for item in g["invented"]] == [11250000]                   # 35 000 off at a 10 000 step: not backed
+
+
+
+def test_scientific_numbers_are_read_at_four_significant_digits_and_never_crash():
+    """T3 review 2: "1e+07" (.4g drops trailing zeros) was backed by any claim within 5e6; an entry name like TMS-92E0326
+    crashed grade() with an overflow; a model's "5e3" was backed by the study ID 4775."""
+    def claim_of(value, reason=None):
+        return {"kind": "anova", "value": value, "denominator": {"name": "entry means", "n": 30}, "n_independent_units": None,
+                "exclusions": [], "filters": {}, "grouping": [], "transformation": "means-table ANOVA: ss of environment", "missing_reason": reason}
+    loose = bench.grade(sub(), shown="| Environment | 1e+07 |", status="run ended", claims=[claim_of(14000000.0)])
+    assert [item["value"] for item in loose["invented"]] == [10000000]
+    exact = bench.grade(sub(), shown="| Environment | 1e+07 |", status="run ended", claims=[claim_of(10003456.0)])
+    assert exact["invented"] == []
+    named = bench.grade(sub(), shown="Entry TMS-92E0326 ranks 1.", status="run ended", claims=[claim_of(1.0)])
+    assert named["bucket"] != "invented" or named["invented"]                      # no OverflowError
+    reply = bench.grade(sub(question="How many plots does study 4775 have?"), shown="About 5e3 plots.",
+                        status=bench.MODEL_REPLY_STATUS + ": a reply", claims=[])
+    assert reply["bucket"] == "invented"
+
+
+def test_numbers_in_a_claims_missing_reason_are_backed():
+    """T3 review 2: a reason shown in the answer ("6 entry x rep cell(s) ... study 4775") was backed only by the run's caveats."""
+    reason = "6 entry x rep cell(s) have no plot (study 4775: 6): the variance components need a mixed model (REML)"
+    claims = [{"kind": "variance", "value": None, "missing_reason": reason, "denominator": {"name": "entry means", "n": 330},
+               "n_independent_units": None, "exclusions": [], "filters": {}, "grouping": [], "transformation": "genotype variance sigma2 g"}]
+    g = bench.grade(sub(expected=[]), shown=f"Variance components not available ({reason}).", status="run ended", claims=claims)
+    assert g["invented"] == []

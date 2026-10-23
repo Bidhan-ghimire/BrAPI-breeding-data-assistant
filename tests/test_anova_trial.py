@@ -253,9 +253,9 @@ def test_every_number_is_a_claim_with_its_kind_source_and_plots(registry):
 
 
 def test_every_menu_and_prompt_names_the_tool():
-    assert "anova_trial" in at.ANALYST_TOOL_NAMES and len(at.ANALYST_TOOL_NAMES) == 13
+    assert "anova_trial" in at.ANALYST_TOOL_NAMES and len(at.ANALYST_TOOL_NAMES) == 14
     assert "anova_trial" in an.NUMERIC_TOOLS and "anova_trial" in an.DERIVING_TOOLS
-    assert "thirteen fixed tools" in an.ANALYST_SYSTEM_PROMPT and "anova_trial" in an.ANALYST_SYSTEM_PROMPT
+    assert "fourteen fixed tools" in an.ANALYST_SYSTEM_PROMPT and "anova_trial" in an.ANALYST_SYSTEM_PROMPT
     assert "anova_trial" in co.ANALYST_ACTIONS and "anova_trial(artifact_id=" in co.COORDINATOR_SYSTEM_PROMPT
     schema = next(s for s in at.analyst_tool_schemas() if s["name"] == "anova_trial")
     assert schema["inputSchema"]["required"] == ["artifact_id"] and "RCBD" in schema["description"]
@@ -417,3 +417,24 @@ def test_rep_codes_are_compared_as_the_plot_list_compares_them(registry):
     assert r.ok and r.data["balance"]["reps"] == 4                          # a huge exponent is a code, not an overflow
     r = anova(registry, save(registry, [(u, e, "1_0" if rep == "1" else "10" if rep == "2" else rep, v) for u, e, rep, v in plots(RICE)]))
     assert r.ok and r.data["balance"]["reps"] == 4                          # "1_0" is no numeral: not the number 10
+
+
+
+def test_a_small_p_is_shown_with_its_digits(tmp_path):
+    """T3 review 1 and Luna A40.4 (2026-10-23): "< 0.0001" is a number no claim carries; the p itself is shown instead."""
+    ctx = synthetic_context(cache_dir=tmp_path / "cache", out_dir=tmp_path / "out", run_id="run_anova_p")
+    values = {"A": [10.0, 10.1, 9.9], "B": [20.0, 20.1, 19.9], "C": [30.0, 30.2, 29.8], "D": [40.0, 39.9, 40.1]}
+    r = anova(ctx.registry, save(ctx.registry, plots(values, reps=False), rep_column=False))
+    p = table(r)["entry"]["p"]
+    shown = answer(ctx, r)
+    assert p < 1e-4 and "< 0.0001" not in shown and f"| {cp._anova_number(p)} |" in shown
+
+
+
+def test_a_p_below_what_a_double_holds_is_shown_as_a_bound(tmp_path):
+    """T3 review 2: an F tail under 1e-308 is 0.0; the table showed "0". 300 entries x 3 plots, entries far apart."""
+    ctx = synthetic_context(cache_dir=tmp_path / "cache", out_dir=tmp_path / "out", run_id="run_anova_p0")
+    values = {f"E{i:03d}": [float(i), i + 0.01, i - 0.01] for i in range(300)}
+    r = anova(ctx.registry, save(ctx.registry, plots(values, reps=False), rep_column=False))
+    p = next(k for k in claims(r) if k.transformation.startswith("one-way ANOVA: p of entry"))
+    assert p.value == 0.0 and "p below 1e-300" in p.transformation and "| &lt; 1e-300 |" in answer(ctx, r)

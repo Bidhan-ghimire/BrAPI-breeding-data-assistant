@@ -115,8 +115,14 @@ def _numbers(text: str) -> list[tuple[float, int, int, int]]:
     text = _TIMESTAMP.sub(blank, text)
     found = []
     for match in _SCIENTIFIC.finditer(text):
-        mantissa = match.group(0).lower().split("e")[0]
-        found.append((float(match.group(0)), len(mantissa.split(".")[1]) if "." in mantissa else 0, match.start(), match.end()))
+        value = float(match.group(0))
+        if not math.isfinite(value):
+            continue                                          # "92E0326" inside a name reads as inf: no number (T3 review 2)
+        mantissa, _, exponent = match.group(0).lower().partition("e")
+        # read at 4 significant digits at least: the app writes .4g, which drops trailing zeros ("1e+07" is 1.000e+07), so the last
+        # digit steps by 10^(exponent - 3); "1.9e-07" is read as 1.900e-07 (T3 reviews 1 and 2, 2026-10-23)
+        decimals = max(len(mantissa.split(".")[1]) if "." in mantissa else 0, 3) - int(exponent)
+        found.append((value, decimals, match.start(), match.end()))
     found += harness.numbers_in(_ONTOLOGY.sub(blank, _SCIENTIFIC.sub(blank, text)))
     return sorted(found, key=lambda n: n[2])
 
@@ -133,7 +139,7 @@ def _without_quotes(text: str) -> str:
 
 def claim_numbers(claims: Iterable[dict[str, Any]]) -> list[float]:
     """Every number a run's claims carry: values, denominators, units, exclusion counts, and numbers in their filters,
-    grouping, method and denominator texts."""
+    grouping, method, missing-reason and denominator texts (a reason the answer shows is claim text; T3 review 2)."""
     found: list[float] = []
     for c in claims:
         denominator = c.get("denominator") or {}
@@ -142,7 +148,7 @@ def claim_numbers(claims: Iterable[dict[str, Any]]) -> list[float]:
             if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
                 found.append(float(v))
         for text in (*(c.get("filters") or {}).values(), *(c.get("grouping") or []), c.get("transformation") or "",
-                     denominator.get("name") or ""):
+                     c.get("missing_reason") or "", denominator.get("name") or ""):
             found += [n for n, *_ in _numbers(str(text))]
     return found
 
