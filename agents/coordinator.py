@@ -39,6 +39,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from artifacts import ArtifactRegistry
+from contracts import unknown_metadata  # one rule for an unknown catalog field
 from contracts import (
     DEFAULT_PLAN_STEPS,
     AgentResult,
@@ -168,6 +169,17 @@ class KnownVariable(_Strict):
     unit: str | None = None
 
 
+def _program_field(row: dict[str, Any], key: str) -> str | None:
+    """A study's program ID or name: the standard field, or, when BOTH standard fields name nothing, the same field of its
+    additionalInfo, which SweetPotatoBase uses (studies 5073, 5074, 5106: programDbId 5017 "DR&SS") and the export keeps as
+    additionalInfo<key> (brapi_mcp_server._study_row; an old saved export has no fill). Never an ID of one and a name of the
+    other (review 2). "", "[]", "{}", "NA", "null" are no program (contracts.unknown_metadata); a study with neither stays
+    unknown (coach 2026-10-24 12:50 / 14:49 UTC, NEXT 4; Luna B29.4, D15.2)."""
+    standard = unknown_metadata(row.get("programDbId")) and unknown_metadata(row.get("programName"))
+    value = row.get(f"additionalInfo{key[0].upper()}{key[1:]}") if standard else row.get(key)
+    return None if unknown_metadata(value) else str(value)
+
+
 class KnownMetadata(_Strict):
     """What the controller has actually fetched and validated. Nothing here comes from a model."""
 
@@ -204,8 +216,8 @@ class KnownMetadata(_Strict):
         catalogs this way, without saving a table (catalog_summary.py)."""
         studies = [KnownStudy(study_id=r["studyDbId"], name=r.get("studyName", ""), location_id=r.get("locationDbId") or None,
                               location_name=r.get("locationName") or None, seasons=_seasons_from_text(r.get("seasons", "")),
-                              study_type=r.get("studyType") or None, program_id=r.get("programDbId") or None,
-                               program_name=r.get("programName") or None) for r in study_rows if r.get("studyDbId")]
+                              study_type=r.get("studyType") or None, program_id=_program_field(r, "programDbId"),
+                              program_name=_program_field(r, "programName")) for r in study_rows if r.get("studyDbId")]
         variables = [KnownVariable(variable_id=r["observationVariableDbId"], name=r.get("observationVariableName", ""),
                                    trait=r.get("traitName") or None, unit=r.get("units") or None) for r in variable_rows if r.get("observationVariableDbId")]
         location_ids = sorted({s.location_id for s in studies if s.location_id})

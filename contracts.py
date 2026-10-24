@@ -85,6 +85,16 @@ class ContractError(ValueError):
 CollectionStatus = Literal["complete", "empty", "incomplete", "unsupported", "failed", "unknown"]
 # The per-study ledger adds "blocked": the fetch was refused by the approval guard.
 StudyFetchStatus = Literal["complete", "empty", "incomplete", "unsupported", "failed", "unknown", "blocked"]
+UNKNOWN_METADATA = frozenset({"", "[]", "{}", "na", "null"})
+
+
+def unknown_metadata(value: Any) -> bool:
+    """A catalog field that names nothing: no value, no text, an empty JSON list or object, "NA" or "null" (any case, spaces
+    ignored). A JSON number is a value (review 2: {"programDbId": 5017}). One rule for the study export, the planner's metadata,
+    the offline catalog filter, filter_rows and count_records on program fields (coach 2026-10-24 14:49 UTC, NEXT 4)."""
+    return value is None or str(value).strip().lower() in UNKNOWN_METADATA
+
+
 # How an agent run ended (the Task 3B vocabulary).
 TerminalStatus = Literal["completed", "needs_clarification", "incomplete", "blocked", "failed", "limit_reached"]
 # How a whole run ended (Stage 5): the agent vocabulary plus "canceled" (Ctrl+C or a human's cancel).

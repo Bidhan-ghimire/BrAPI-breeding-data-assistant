@@ -417,13 +417,14 @@ def test_study_based_lists_say_what_they_cover_and_empty_program_fields_are_expl
     no_programs = KnownMetadata(base_url=LIVE, complete=True, studies=[KnownStudy(study_id=f"S{i}", location_id="L1",
                                                                                   location_name="Clinton") for i in range(3)])
     programs = catalog_lists.chat_message(catalog_lists.build(catalog_lists.ListRequest("programs"), no_programs, TABLES), in_report=True)
-    assert programs.startswith("**Programs in the catalog: none.**\n\n3 studies name no program. Some servers keep the program only "
-                               "in each study's additional information (additionalInfo); this app does not use that field for programs.")
+    assert programs.startswith("**Programs in the catalog: none.**\n\n3 studies name no program. The program is read from the standard "
+                               "program fields or, where those are blank, from each study's additional information (additionalInfo); these "
+                               "studies name one in neither.")                            # NEXT 4 (c): additionalInfo is read
     assert "Only programs named" not in programs and programs.endswith("No measurements were used.")
     locations = catalog_lists.chat_message(catalog_lists.build(catalog_lists.ListRequest("locations"), no_programs, TABLES), in_report=True)
     assert "- Clinton — 3 studies\n\nOnly locations named by at least one study are listed.\n\nSource:" in locations
     report = "\n".join(catalog_lists.report_lines(catalog_lists.build(catalog_lists.ListRequest("programs"), no_programs, TABLES)))
-    assert "Programs come from the study records. 3 studies name no program. Some servers keep the program only" in report
+    assert "Programs come from the study records. 3 studies name no program. The program is read from the standard" in report
     assert "(no matching names)" in report
 
 

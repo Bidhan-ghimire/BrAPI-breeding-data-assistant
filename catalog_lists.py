@@ -438,9 +438,9 @@ def _study_notes(listing: CatalogList) -> list[str]:
     notes = [f"Only {many} named by at least one study are listed."] if listing.total else []
     if listing.unrecorded:
         notes.append(f"{_count(listing.unrecorded, 'study names', 'studies name')} no {one}.")
-    if listing.request.entity == "programs" and not listing.total:      # SweetPotatoBase: the standard fields are empty
-        notes.append("Some servers keep the program only in each study's additional information (additionalInfo); "
-                     "this app does not use that field for programs.")
+    if listing.request.entity == "programs" and not listing.total:      # no program in either field (NEXT 4: additionalInfo is read)
+        notes.append("The program is read from the standard program fields or, where those are blank, from each study's "
+                     "additional information (additionalInfo); these studies name one in neither.")
     return notes
 
 

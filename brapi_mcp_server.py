@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from artifacts import ArtifactError, ArtifactRegistry, cell_text
 from brapi_client import PART2_DIR, BrapiClient, BrapiClientError, Settings, load_settings, reads_plot_records
 from cache_store import CacheStore
+from contracts import unknown_metadata  # one rule for an unknown catalog field
 from contracts import (
     CollectionResult,
     FetchApproval,
@@ -211,6 +212,25 @@ def _text(value: Any) -> str | None:
 
 
 def _study_row(r: dict[str, Any]) -> dict[str, Any]:
+    """One study record as an export row. SweetPotatoBase keeps a study's program in additionalInfo and leaves the standard
+    programDbId / programName empty: when BOTH standard fields name nothing (contracts.unknown_metadata), the additionalInfo pair
+    fills them, never one field of each (review 2: P1 with DR&SS was an ID and a name of two programs). programSource says where
+    the program came from ("standard fields", "additionalInfo (...)", or empty: none); the additionalInfo columns stay as
+    recorded (coach 2026-10-24 14:49 UTC, NEXT 4, fix (c))."""
+    row = _study_fields(r)
+    filled = []
+    if unknown_metadata(row["programDbId"]) and unknown_metadata(row["programName"]):
+        for key, extra_key in (("programDbId", "additionalInfoProgramDbId"), ("programName", "additionalInfoProgramName")):
+            if not unknown_metadata(row[extra_key]):
+                row[key] = row[extra_key]
+                filled.append(key)
+        row["programSource"] = f"additionalInfo ({', '.join(filled)})" if filled else ""
+    else:
+        row["programSource"] = "standard fields"
+    return row
+
+
+def _study_fields(r: dict[str, Any]) -> dict[str, Any]:
     design = r.get("experimentalDesign") if isinstance(r.get("experimentalDesign"), dict) else {}
     extra = r.get("additionalInfo") if isinstance(r.get("additionalInfo"), dict) else {}
     return {"studyDbId": _text(r.get("studyDbId")), "studyName": _text(r.get("studyName")),

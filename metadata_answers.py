@@ -19,7 +19,8 @@ STUDY_FIELDS = {
     "locationName": "Location", "seasons": "Season(s)", "startDate": "Study start date",
     "endDate": "Study end date", "plantingDate": "Planting date", "harvestDate": "Harvest date",
     "experimentalDesignDescription": "Experimental design", "experimentalDesignPUI": "Design identifier",
-    "programDbId": "Program ID", "programName": "Program name", "trialDbId": "Trial ID", "trialName": "Trial name",
+    "programDbId": "Program ID", "programName": "Program name", "programSource": "Program source",
+    "trialDbId": "Trial ID", "trialName": "Trial name",
     "additionalInfoProgramDbId": "Program ID (additionalInfo)", "additionalInfoProgramName": "Program name (additionalInfo)",
 }
 VARIABLE_FIELDS = {

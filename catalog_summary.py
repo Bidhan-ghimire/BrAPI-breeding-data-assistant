@@ -335,7 +335,7 @@ def summarize(metadata: KnownMetadata, *, host: str, fetched_at: datetime | None
         "Seasons named by studies, newest first (studies in brackets): "
         + (_shown([f"{name} ({len(seasons[name])})" for name in season_order], SEASONS_LISTED) or "none"),
         "Study types with the most studies (studies in brackets): " + (_shown(type_items, TYPES_LISTED) or "none recorded"),
-        f"Programs: {programs} of {len(studies)} studies name a program in the standard program fields.",
+        f"Programs: {programs} of {len(studies)} studies name a program (standard or additionalInfo).",   # NEXT 4: the fallback
         "A few study names, newest season first: " + ("; ".join(named) or "none"),
     ]
     head = f"Saved catalog of {host}, fetched {_when(fetched_at)}. These facts were read by code; no records were looked up."

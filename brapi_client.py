@@ -44,6 +44,7 @@ from urllib.parse import urlsplit
 from cache_store import CacheEntry, CacheIdentity, CacheStore, sha256_bytes
 from pydantic import Field
 
+from contracts import unknown_metadata  # one rule for an unknown catalog field
 from contracts import (
     CollectionResult,
     CollectionStatus,
@@ -405,6 +406,16 @@ class _Page:
     total_count: int | None
     total_pages: int | None
     result_null: bool
+
+
+def _study_program(record: dict[str, Any]) -> Any:
+    """A study record's program ID as the study export reads it (SweetPotatoBase keeps it only in additionalInfo; coach
+    2026-10-24 14:49 UTC, NEXT 4): the standard field; when BOTH standard fields name nothing, the additionalInfo one; a
+    half-recorded standard program is not mixed with additionalInfo (review 2). A record with neither has no program."""
+    if not (unknown_metadata(record.get("programDbId")) and unknown_metadata(record.get("programName"))):
+        return None if unknown_metadata(record.get("programDbId")) else record.get("programDbId")
+    extra = record.get("additionalInfo") if isinstance(record.get("additionalInfo"), dict) else {}
+    return extra.get("programDbId") if not unknown_metadata(extra.get("programDbId")) else None
 
 
 class BrapiClient:
@@ -859,7 +870,7 @@ class BrapiClient:
         def keep(r: dict[str, Any]) -> bool:
             if "locationDbId" in params and str(r.get("locationDbId")) != str(params["locationDbId"]):
                 return False
-            if "programDbId" in params and str(r.get("programDbId")) != str(params["programDbId"]):
+            if "programDbId" in params and str(_study_program(r)) != str(params["programDbId"]):
                 return False
             if "seasonDbId" in params:
                 seasons = r.get("seasons") if isinstance(r.get("seasons"), list) else []

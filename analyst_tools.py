@@ -46,7 +46,7 @@ from typing import Any, Callable, Iterable, Literal, Mapping
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from artifacts import ArtifactError, ArtifactRegistry
-from contracts import ArtifactId, ArtifactManifest, Claim, Denominator, Exclusion, ToolError, ToolResult
+from contracts import ArtifactId, ArtifactManifest, Claim, Denominator, Exclusion, ToolError, ToolResult, unknown_metadata
 import pvalues
 
 __all__ = [
@@ -297,6 +297,16 @@ def _named_reason(reason: str, entries: Iterable[str], label: dict[str, str]) ->
     names = sorted(_short(label.get(entry) or entry) for entry in entries)
     more = f" and {len(names) - NAMED_ENTRIES} more" if len(names) > NAMED_ENTRIES else ""
     return f"{reason} ({', '.join(names[:NAMED_ENTRIES])}{more})"
+
+
+PROGRAM_COLUMNS = ("programDbId", "programName", "additionalInfoProgramDbId", "additionalInfoProgramName")
+
+
+def _unknown_cell(column: str, cell: str) -> bool:
+    """A catalog cell that names nothing. Program columns use the shared rule (contracts.unknown_metadata: "", "[]", "{}", "NA",
+    "null"; coach 2026-10-24 14:49 UTC, NEXT 4); every other column keeps "" and "[]" (review 2: SweetPotatoBase's location 120 is
+    named "NA")."""
+    return unknown_metadata(cell) if column in PROGRAM_COLUMNS else (not cell.strip() or cell.strip() == "[]")
 
 
 def _apply_duplicate_policy(table: Table, classified: Classified, policy: str,
@@ -926,8 +936,7 @@ def tool_filter_rows(registry: ArtifactRegistry, a: FilterRowsArgs) -> ToolResul
     needle = a.value
     catalog_comparison = (table.manifest.kind in {"studies", "variables", "locations", "programs", "seasons"}
                           and a.op in {"eq", "ne", "contains"} and bool(needle.strip()))
-    unknown_cells = sum(not row.get(a.column, "").strip() or row.get(a.column, "").strip() == "[]"
-                        for row in table.rows) if catalog_comparison else 0
+    unknown_cells = sum(_unknown_cell(a.column, row.get(a.column, "")) for row in table.rows) if catalog_comparison else 0
     if table.rows and unknown_cells == len(table.rows):
         raise AnalystError("incomplete_data", f"{a.column} is missing for all {unknown_cells} catalog rows; "
                            "matching membership is unknown, not zero. Ask for a recorded field or more metadata.")
@@ -940,7 +949,7 @@ def tool_filter_rows(registry: ArtifactRegistry, a: FilterRowsArgs) -> ToolResul
     dropped_non_numeric = 0
     for row in table.rows:
         cell = row.get(a.column, "")
-        if catalog_comparison and (not cell.strip() or cell.strip() == "[]"):
+        if catalog_comparison and _unknown_cell(a.column, cell):
             continue                    # absent metadata is neither a match nor a known non-match
         if a.op == "eq":
             keep = cell == needle
@@ -965,7 +974,7 @@ def tool_filter_rows(registry: ArtifactRegistry, a: FilterRowsArgs) -> ToolResul
     lineage = [*earlier, f"lineage: {description} on {table.manifest.artifact_id} sha256={table.manifest.sha256}",
                f"rows in: {len(table.rows)}, rows kept: {len(kept)}, rows without a valid number to compare: {dropped_non_numeric}",
                *[note for note in table.manifest.quality_notes if note.startswith(ROWS_NOTE)]]      # GAP 1: the same row unit
-    membership_incomplete = bool(unknown_cells and a.column in {"programDbId", "programName"})
+    membership_incomplete = bool(unknown_cells and a.column in PROGRAM_COLUMNS)
     warnings = ([f"{unknown_cells} of {len(table.rows)} catalog rows have no {a.column}; {len(kept)} known matches were found, "
                  "but the full matching count is unknown. Counts describe recorded matches only."
                  + (" The filtered table is incomplete." if membership_incomplete else "")] if unknown_cells else [])
@@ -1189,6 +1198,12 @@ def tool_count_records(registry: ArtifactRegistry, a: CountRecordsArgs) -> ToolR
     table = _load(registry, a.artifact_id)
     if not table.manifest.complete:
         raise AnalystError("incomplete_data", f"{table.manifest.artifact_id} is not a complete collection; a count from it would not be a count of the catalog")
+    for column in dict.fromkeys(c for c in (a.group_by, a.distinct_by) if c in PROGRAM_COLUMNS and c in table.manifest.columns):
+        if table.manifest.kind in {"studies", "variables", "locations", "programs", "seasons"}:   # as filter_rows (NEXT 4 review)
+            unknown = sum(_unknown_cell(column, row.get(column, "")) for row in table.rows)
+            if unknown:
+                raise AnalystError("incomplete_data", f"{unknown} of {len(table.rows)} catalog rows have no {column}; a count of programs "
+                                   "from them is not known (missing is not zero). Ask for a recorded field or more metadata.")
     hashes = [table.manifest.sha256]
     denominator = Denominator(name=_rows_label(table.manifest), n=table.manifest.row_count)   # rows, after any filter
     claims: list[Claim] = []

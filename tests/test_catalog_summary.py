@@ -110,7 +110,7 @@ def test_the_summary_is_read_from_the_cache_only_no_request_no_run_folder_no_fil
     assert "Locations with the most studies (studies in brackets): Clinton, NC (2); Kinston, NC (1); Namulonge, Uganda (1)" in text
     assert "Seasons named by studies, newest first (studies in brackets): 2025 (2); 2024 (1); 2019 (1); Fall season (1)" in text
     assert "Study types with the most studies (studies in brackets): Advanced Yield Trial (2); Preliminary Yield Trial (2)" in text
-    assert "Programs: 1 of 5 studies name a program in the standard program fields." in text
+    assert "Programs: 1 of 5 studies name a program (standard or additionalInfo)." in text     # NEXT 4: additionalInfo is read
     assert ("A few study names, newest season first: “Clinton yield trial 2025” (ID S1; Clinton, NC; 2025); “Kinston observation "
             "2025” (ID S3; Kinston, NC; 2025); “Clinton yield trial 2024” (ID S2; Clinton, NC; 2024)") in text
     assert "Florida" not in text
