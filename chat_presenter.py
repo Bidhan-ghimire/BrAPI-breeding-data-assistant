@@ -8,7 +8,7 @@ from collections import Counter, defaultdict
 from typing import Any
 
 import brapi_client
-from analyst_tools import MISSING_GROUP
+from analyst_tools import CV_OF_VALUES, MISSING_GROUP, PERCENT_MISSING
 from catalog_answers import plain_reason as catalog_plain
 from contracts import Claim
 from metadata_answers import plain_reason as metadata_plain, render_metadata_facts
@@ -159,7 +159,7 @@ def _catalog_block(claims: list[Claim], sources: _Sources, source_label: str, *,
 
 
 def _claim_method(claim: Claim) -> str:
-    return re.sub(r"^(?:mean|median|min|max|sd|count) of valid values;\s*", "", claim.transformation)
+    return re.sub(r"^(?:mean|median|min|max|sd|cv|count) of valid values;\s*", "", claim.transformation)
 
 
 def _mean_focus(controller: Any, claims: list[Claim]) -> bool:
@@ -175,7 +175,8 @@ def _mean_focus(controller: Any, claims: list[Claim]) -> bool:
     # An explicit second metric or a general summary request keeps every supplied metric visible.
     # 'n' means the displayed denominator and does not require a redundant Count row.
     return not re.search(r"\b(?:median|minimum|maximum|min|max|sd|std|standard deviation|variance|range|"
-                         r"count|counts|total|totals|ratio|rank|ranks|percentile|quartile|statistics|stats|summary|summarize|describe)\b", words, re.I)
+                         r"count|counts|total|totals|ratio|rank|ranks|percentile|quartile|statistics|stats|summary|summarize|describe|"
+                         r"cv|coefficient of variation|percent missing|missing values?)\b", words, re.I)
 
 
 def _count_focus(controller: Any, claims: list[Claim]) -> bool:
@@ -804,6 +805,15 @@ def _call_of(claim: Claim) -> str:
     return match.group(1) if match else ""
 
 
+def _is_percent_missing(claim: Claim) -> bool:
+    return claim.kind == "ratio" and claim.transformation.startswith(PERCENT_MISSING)
+
+
+def _is_cv(claim: Claim) -> bool:
+    return claim.kind == "ratio" and claim.transformation.startswith(CV_OF_VALUES)
+
+
+
 def _numeric_blocks(claims: list[Claim], sources: _Sources, source_labels: dict[tuple[str, ...], str], *, focus_mean: bool = False) -> list[str]:
     groups: dict[tuple[Any, ...], list[Claim]] = defaultdict(list)
     for claim in claims:
@@ -824,7 +834,7 @@ def _numeric_blocks(claims: list[Claim], sources: _Sources, source_labels: dict[
             name_columns = NAMES.get(column, (column, ()))[1]
             names = [_names(rows, column, value, name_column) for name_column, _ in name_columns]
             about.append(" · ".join([value, *[name for name in names if name]]))
-        title = "; ".join(about) or "Summary"
+        title = "; ".join(about) or ("Plots without a value" if all(_is_percent_missing(claim) for claim in group) else "Summary")
         if not focus_mean or about or source_labels.get(hashes):
             lines += [f"**{_text(title)}{source_labels.get(hashes, '')}**", ""]
         rendered = []
@@ -841,6 +851,10 @@ def _numeric_blocks(claims: list[Claim], sources: _Sources, source_labels: dict[
                 label = f"Distinct {claim.grouping[0]} values"
             elif claim.transformation in (ROW_COUNT, FREQUENCY):
                 label = "Rows"
+            elif _is_cv(claim):
+                label = "CV (sample SD as % of the mean)"
+            elif _is_percent_missing(claim):
+                label = "Percent missing"
             value = (_percent(claim.value) if claim.kind == "ratio" and claim.unit == "%"           # compare_means' own rule only
                      and claim.transformation.startswith(("percent change =", "percent reduction =")) else _number(claim.value))
             if claim.value is None:
@@ -858,6 +872,8 @@ def _numeric_blocks(claims: list[Claim], sources: _Sources, source_labels: dict[
             units = "Analysis units: not checked by a row count."  # "unknown" read as contradicting a block that has them (q14)
         if focus_mean:
             lines += ["", f"n = {first.denominator.n} ({_text(first.denominator.name)}). {units}", ""]
+        elif all(_is_percent_missing(claim) and claim.value is None for claim in group):    # no count beside "not available"
+            lines += ["", f"Method: {_text(_claim_method(first))}.", ""]
         else:
             lines += ["", f"Based on {_text(first.denominator.name)}: {first.denominator.n}. {units}",
                       f"Method: {_text(_claim_method(first))}.", ""]
@@ -1164,7 +1180,8 @@ def answer_summary(controller: Any) -> str:
         caveats.append(ZEROS_LEFT_OUT)
     if focus_mean:
         for claim in claims:
-            if claim.kind != "mean" and claim.value is None and claim.missing_reason:
+            if (claim.kind != "mean" and claim.value is None and claim.missing_reason
+                    and not _is_cv(claim) and not _is_percent_missing(claim)):        # neither was asked in a mean-only question
                 warning = _text("An additional statistic could not be calculated: " + claim.missing_reason)
                 if warning not in caveats:
                     caveats.append(warning)

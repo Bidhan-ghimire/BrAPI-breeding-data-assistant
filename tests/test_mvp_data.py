@@ -99,7 +99,7 @@ def test_known_units_enter_manifest_and_claim_without_metadata_request(context):
     assert manifest.measurement.unit == "t/ha"
     summary = at.dispatch_analyst(context.registry, "numeric_summary", {"artifact_id": manifest.artifact_id})
     assert summary.ok
-    assert all(c["unit"] == "t/ha" for c in summary.data["claims"] if c["kind"] != "count")
+    assert all(c["unit"] == ("%" if c["kind"] == "ratio" else "t/ha") for c in summary.data["claims"] if c["kind"] != "count")   # ratio: the CV
     assert [r.endpoint for r in context.client.provenance()] == ["/observations"]
 
 

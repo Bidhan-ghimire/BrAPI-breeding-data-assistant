@@ -12,6 +12,7 @@ from typing import Any
 
 from agents.coordinator import add_clarification
 from agents.supervisor import choose_next
+from analyst_tools import CV_OF_VALUES, PERCENT_MISSING
 from artifacts import ArtifactError
 from console import say
 from llm import FakeModelClient, reply_text
@@ -29,6 +30,9 @@ def _call_of(claim: Any) -> tuple[str, ...]:
     return tuple(parts[:5]) if parts[:2] == ["clm", "v2"] else tuple(parts[:3])
 
 
+SUMMARY_EXTRA_TURN = 4             # numeric_summary's CV and percent missing come after each call's first four claims (item 22)
+
+
 def _overall_first(claims: list[Any]) -> list[Any]:
     """The claims with overall totals before per-item counts: the fewest filters first, otherwise in their own order. The
     view below keeps 20 claims; run_20261016T150253_016a3c counted 22 trait names, one count per name and the total last,
@@ -36,7 +40,11 @@ def _overall_first(claims: list[Any]) -> list[Any]:
     its own order: the analysis tools put their headline numbers first, and on Luna (2026-10-23, E16.1-E16.5) two or more
     anova_trial calls left only the first call's claims in view, so the coordinator stopped. One call keeps its order. Claims
     without a namespace (numeric_summary, count_records, group_stats: their "call" is only the table) keep their old place, before
-    the calls that take turns (review: C27.1's distinct-entry totals left the view)."""
+    the calls that take turns (review: C27.1's distinct-entry totals left the view), except numeric_summary's CV and percent
+    missing, which take the fifth turn among the calls (SUMMARY_EXTRA_TURN): before them, one more claim per numeric_summary call
+    pushed two anova_trial calls' variance components out of the view (2026-10-23, item 15), and after all the turns one
+    anova_trial call left them out (its review; Bidhan's (22), 2026-10-24). The 20 stays, so it is a trade (review of item 22):
+    two numeric_summary calls with plot lists beside one anova_trial call push its error variance, F and p of entry and CV out."""
     by_filters = sorted(claims, key=lambda claim: len(claim.filters))
     turn: dict[int, int] = {}
     seen: dict[tuple[Any, ...], int] = {}
@@ -49,7 +57,13 @@ def _overall_first(claims: list[Any]) -> list[Any]:
         seen[key] = seen.get(key, 0) + 1
     # claims without a namespace first, in their original order; then the calls take turns
     return sorted(by_filters, key=lambda claim: (len(claim.filters), 1, turn[id(claim)], order[_call_of(claim)])
-                  if _call_of(claim)[:2] == ("clm", "v2") else (len(claim.filters), 0, 0, 0))
+                  if _call_of(claim)[:2] == ("clm", "v2") else (len(claim.filters), 1, SUMMARY_EXTRA_TURN, order[_call_of(claim)])
+                  if _summary_extra(claim) else (len(claim.filters), 0, 0, 0))
+
+
+def _summary_extra(claim: Any) -> bool:
+    """numeric_summary's CV and percent missing (Breedbase's Phenotype Summary columns beside the mean, min, max, SD, count)."""
+    return claim.kind == "ratio" and claim.transformation.startswith((CV_OF_VALUES, PERCENT_MISSING))
 
 
 # Names for the Coordinator's view of the claims. Benchmark 2026-10-21: it saw entry IDs only and stopped A41.3 ("does not

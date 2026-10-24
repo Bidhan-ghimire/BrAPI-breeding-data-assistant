@@ -517,6 +517,12 @@ Rules:
      and count_records(distinct_by="germplasmDbId") for the check entries - a count, never anova_trial's exclude (plot_design
      writes entryType in lower case, so "check" also finds CHECK and Check). The design fields are only what each plot's
      position states; nothing is read from names.
+   - a trait's summary in ONE study as Breedbase's Phenotype Summary shows it (mean, min, max, SD, CV, count, percent missing):
+     get_observations and get_observation_units of that study, then numeric_summary(artifact_id=<the observations>,
+     roster_artifact_id=<the plot list>) - percent missing counts the plot list's plots without a valid value; it is given
+     only for the two tables as fetched (not a filtered, stacked or joined table, such as plot_design's) and never without the
+     plot list. ONE study only, never plot lists for several studies. This CV is the
+     CV of the values, not the trial's error CV (that is anova_trial's).
    - the analysis of variance of ONE trial's plot values for one trait (ANOVA table, CV, LSD, variance components, entry-mean
      heritability): get_observation_units and get_observations of that study, then plot_design(roster_artifact_id=...,
      artifact_id=<the observations>) so each plot carries its rep, then anova_trial(artifact_id="<the table plot_design saved>")

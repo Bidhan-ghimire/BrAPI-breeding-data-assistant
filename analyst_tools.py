@@ -164,6 +164,21 @@ def _stats(values: list[float]) -> dict[str, float | None]:
             "sd": statistics.stdev(values) if len(values) >= 2 else None}
 
 
+CV_OF_VALUES = "cv of valid values"          # numeric_summary's CV (Breedbase's Phenotype Summary CV), not anova_trial's error CV
+PERCENT_MISSING = "percent missing"           # numeric_summary's share of the plot list's plots without a valid value
+
+
+def _cv(stats: dict[str, float | None]) -> tuple[float | None, str | None]:
+    """CV = 100 x sample SD / mean of the same values (Breedbase's Phenotype Summary CV), or None with the reason."""
+    if stats["mean"] is None:
+        return None, "no valid numeric values"
+    if stats["sd"] is None:
+        return None, "fewer than 2 valid values: sample SD undefined"
+    if stats["mean"] <= 0:
+        return None, "the mean is not positive, so SD / mean is not a CV"
+    return 100 * stats["sd"] / stats["mean"], None
+
+
 def _claim_component(part: str) -> str:
     # Plain components have no separator and may not occupy the encoding namespace.
     # UTF-8 hex is injective; punctuation, Unicode, underscores and empty text stay distinct.
@@ -291,6 +306,12 @@ def _filters_applied(manifest: Any) -> list[str]:
     return [re.sub(r"""'"([^'"]*)"'$""", r'"\1"', text) for text in found]
 
 
+def _made_by(manifest: Any) -> list[str]:
+    """The tools that made this table from other tables, read from its lineage notes (filter_rows, concat_tables, plot_design,
+    ...); [] for a table as fetched from the server, which has none."""
+    return list(dict.fromkeys(m[1] for m in (re.match(r"lineage: (\w+)", note) for note in manifest.quality_notes) if m))
+
+
 def _rows_label(manifest: Any) -> str:
     """What a row count of this table counts: its rows, and the filters that kept them."""
     filters = _filters_applied(manifest)
@@ -319,6 +340,11 @@ def _numeric_claims(table: Table, classified: Classified, used: list[tuple[dict[
                             missing_reason=reason, denominator=denominator, n_independent_units=n_units,
                             source_artifact_hashes=hashes, filters=filters, grouping=grouping,
                             transformation=f"{kind} of valid values; {transformation}", exclusions=exclusions))
+    cv, cv_reason = _cv(stats)
+    claims.append(Claim(claim_id=_claim_id(table.manifest.artifact_id, "ratio", "cv", *label_parts, namespace=claim_namespace), kind="ratio",
+                        value=cv, unit="%", missing_reason=cv_reason, denominator=denominator, n_independent_units=n_units,
+                        source_artifact_hashes=hashes, filters=filters, grouping=grouping,
+                        transformation=f"{CV_OF_VALUES}; {transformation}", exclusions=exclusions))
     claims.append(Claim(claim_id=_claim_id(table.manifest.artifact_id, "count", *label_parts, namespace=claim_namespace), kind="count", value=len(values),
                         denominator=denominator, n_independent_units=n_units, source_artifact_hashes=hashes, filters=filters,
                         grouping=grouping, transformation=f"count of valid values; {transformation}", exclusions=exclusions))
@@ -351,6 +377,9 @@ class NumericSummaryArgs(ToolArgs):
     value: str = Field(default=VALUE_COL, description="the value column")
     duplicate_policy: DuplicatePolicy = Field(default="reject", description="what to do with repeated measurements of one unit")
     allow_incomplete: bool = Field(default=False, description="describe an incomplete artifact anyway, clearly labelled")
+    roster_artifact_id: ArtifactId | None = Field(default=None, description="the study's plot list (get_observation_units) for Percent "
+                                                  "missing: its plots without a valid value, over its plots, x 100; ONE study, "
+                                                  "the measurements table as fetched (not a filtered, stacked or joined table)")
 
 
 class GroupStatsArgs(ToolArgs):
@@ -665,10 +694,12 @@ def _timing_warnings(table: Table, value_column: str) -> list[str]:
 
 
 def tool_numeric_summary(registry: ArtifactRegistry, a: NumericSummaryArgs) -> ToolResult:
-    """Counts (total, valid, raw-missing, invalid/non-finite) and mean, median, min, max, sample SD of the valid values
-    of ONE variable, as typed claims with a named denominator, n_independent_units (or unknown) and the exclusions.
-    Refuses mixed variables, unresolved duplicates and incomplete artifacts (unless allow_incomplete). SD with fewer
-    than 2 valid values is null. Values keep full precision; `display` is rounded."""
+    """Counts (total, valid, raw-missing, invalid/non-finite) and mean, median, min, max, sample SD and CV (100 x SD / mean)
+    of the valid values of ONE variable, as typed claims with a named denominator, n_independent_units (or unknown) and the
+    exclusions; with the study's plot list (roster_artifact_id) also Percent missing, the share of its plots without a valid
+    value - the columns of Breedbase's Phenotype Summary. Refuses mixed variables, unresolved duplicates and incomplete
+    artifacts (unless allow_incomplete). SD with fewer than 2 valid values is null. Values keep full precision; `display` is
+    rounded."""
     table = _load(registry, a.artifact_id)
     _require_column(table, a.value, "value column")
     caveat = _completeness_gate(table, a.allow_incomplete)
@@ -692,6 +723,16 @@ def tool_numeric_summary(registry: ArtifactRegistry, a: NumericSummaryArgs) -> T
     if unit is None:
         warnings.append("unit not stated in the artifact's measurement metadata; claims carry unit=null")
     warnings.extend(_timing_warnings(table, a.value))
+    percent_missing = None
+    if a.roster_artifact_id is not None:
+        roster = _plot_list(registry, a.roster_artifact_id, table, require_complete=False)
+        percent_missing, missing_claim = _percent_missing(table, roster, used, transformation,
+                                                          label_parts=() if a.value == VALUE_COL else (a.value,),
+                                                          namespace=None if a.value == VALUE_COL else "numeric-value")
+        claims.append(missing_claim)
+        if percent_missing["valid_values_not_on_list"]:                   # valid values only: 'NA' is in no statistic
+            warnings.append(f"{percent_missing['valid_values_not_on_list']} valid value(s) on plots not on the plot list "
+                            f"{roster.manifest.artifact_id}: kept in the statistics; percent missing not available")
     data = {
         "artifact_id": table.manifest.artifact_id, "sha256": table.manifest.sha256, "variable_id": variable, "unit": unit,
         "value_column": a.value, "counts": {"total_rows": classified.n_rows, "valid": classified.n_valid, "raw_missing": classified.n_missing,
@@ -699,8 +740,10 @@ def tool_numeric_summary(registry: ArtifactRegistry, a: NumericSummaryArgs) -> T
         "n_independent_units": claims[0].n_independent_units, "stats": stats, "display": {k: _display(v) for k, v in stats.items()},
         "transformation": transformation, "exclusions": [e.model_dump() for e in _exclusions(classified)],
         "claims": _claims_json(claims), "value_policy": VALUE_POLICY, "analysis_target": ANALYSIS_TARGET,
+        "cv_percent": _cv(stats)[0], "percent_missing": percent_missing,
     }
-    return ToolResult(ok=True, data=data, artifact_ids=[table.manifest.artifact_id], complete=table.manifest.complete, warnings=warnings)
+    return ToolResult(ok=True, data=data, artifact_ids=[table.manifest.artifact_id] + ([a.roster_artifact_id] if a.roster_artifact_id else []),
+                      complete=table.manifest.complete, warnings=warnings)
 
 
 GROUP_RESULT_COLUMNS = {
@@ -939,6 +982,96 @@ def tool_concat_tables(registry: ArtifactRegistry, a: ConcatTablesArgs) -> ToolR
     return ToolResult(ok=True, data=data, artifact_ids=[manifest.artifact_id], complete=complete, warnings=warnings)
 
 
+def _plot_list(registry: ArtifactRegistry, roster_id: str, table: Table, *, require_complete: bool) -> Table:
+    """The study's plot list (an observation_units table of the table's study), for missing_report and numeric_summary's
+    percent missing. An incomplete list is refused when require_complete; otherwise the caller says the number of plots is
+    unknown."""
+    roster = _load(registry, roster_id)
+    if roster.manifest.kind != "observation_units":
+        raise AnalystError("invalid_argument", f"roster {roster.manifest.artifact_id} is {roster.manifest.kind}, not observation_units")
+    if require_complete and not roster.manifest.complete:
+        raise AnalystError("incomplete_data", f"roster {roster.manifest.artifact_id} is not a complete collection; expected units are unknown")
+    if set(roster.manifest.study_ids) != set(table.manifest.study_ids):
+        raise AnalystError("invalid_argument", f"roster studies {sorted(roster.manifest.study_ids)} differ from the table's {sorted(table.manifest.study_ids)}")
+    _require_column(roster, UNIT_COL, "roster unit column")
+    _require_column(table, UNIT_COL, "unit column")
+    return roster
+
+
+def _percent_missing(table: Table, roster: Table, used: list[tuple[dict[str, str], float]], transformation: str, *,
+                     label_parts: tuple[str, ...], namespace: str | None) -> tuple[dict[str, Any], Claim]:
+    """Breedbase's Percent missing: the plots on the study's plot list without a valid value, over the plots on the list, x 100.
+    A measurements table holds only recorded values, so only the plot list knows the plots; every listed plot counts, fillers
+    included, as on Breedbase. A plot with several values counts once. A list with units of several levels (levelName plot,
+    plant, ...; read without case) counts only the level the values are recorded on. Unit IDs are exact text, as in
+    missing_report. Not available, with the reason and no count, whenever the table cannot show which listed plots have a value
+    (Bidhan's (15)(a), 2026-10-23; the coach's guard of 2026-10-22 23:50): a filtered table, a table or plot list made from other
+    tables (any lineage note: concat_tables, plot_design, filter_rows, ...; Bidhan's (22), 2026-10-24: a number only for the two
+    tables as fetched), an incomplete table or plot list, more than one study, a valid value on a row without a plot ID, a row
+    whose plot is not on the list, or levels that do not settle on one."""
+    level_of: dict[str, str] = {}
+    listed_twice = False
+    for r in roster.rows:
+        unit = r.get(UNIT_COL, "")
+        if unit:
+            level = (r.get("levelName") or "").strip().casefold()
+            listed_twice = listed_twice or level_of.get(unit, level) != level
+            level_of[unit] = level
+    valued = {row.get(UNIT_COL, "") for row, _ in used} - {""}
+    without_id = sum(1 for row, _ in used if not row.get(UNIT_COL, ""))
+    off_list = sum(1 for r in table.rows if r.get(UNIT_COL, "") and r.get(UNIT_COL, "") not in level_of)
+    off_list_valid = sum(1 for row, _ in used if row.get(UNIT_COL, "") and row.get(UNIT_COL, "") not in level_of)
+    levels = set(level_of.values())
+    measured = {level_of[u] for u in valued if u in level_of}
+    listed = set(level_of) if len(levels) <= 1 else {u for u, level in level_of.items() if level in measured}
+    made, list_made = _made_by(table.manifest), _made_by(roster.manifest)
+    reason = None
+    if _filters_applied(table.manifest):
+        reason = "the table is a filtered subset: the plots it left out would count as without a value"
+    elif made:
+        reason = (f"the table was made by {', '.join(made)} from other tables, not fetched from the server: percent missing needs "
+                  "the measurements table as fetched")
+    elif list_made:
+        reason = (f"the plot list {roster.manifest.artifact_id} was made by {', '.join(list_made)}, not fetched from the server: "
+                  "percent missing needs the study's plot list as fetched")
+    elif not table.manifest.complete:
+        reason = "the measurements table is incomplete: plots never fetched would count as without a value"
+    elif not roster.manifest.complete:
+        reason = f"the plot list {roster.manifest.artifact_id} is incomplete, so the number of plots is unknown"
+    elif len(set(table.manifest.study_ids) | set(roster.manifest.study_ids)) != 1:
+        reason = "the table and the plot list are not one single study"
+    elif not level_of:
+        reason = f"the plot list {roster.manifest.artifact_id} holds no unit"
+    elif without_id:
+        reason = "valid values on rows without a plot ID cannot be matched to the plot list"
+    elif off_list:
+        reason = "the table holds plots that are not on the plot list, so the list is not the table's"
+    elif listed_twice:
+        reason = "a unit is listed under two levels on the plot list"
+    elif "" in levels and len(levels) > 1:
+        reason = "the plot list holds units without a stated level beside units with one"
+    elif len(levels) > 1 and len(measured) != 1:
+        reason = (f"the plot list holds units of several levels ({', '.join(sorted(levels))}) and the values "
+                  f"{'are recorded on several of them' if measured else 'show none of them'}: percent missing needs one level")
+    with_value = len(valued & listed)
+    without = len(listed) - with_value
+    value = None if reason else 100.0 * without / len(listed)
+    level = next(iter(measured)) if len(levels) > 1 and len(measured) == 1 else None
+    method = (f"{PERCENT_MISSING} = plots on the plot list {roster.manifest.artifact_id} without a valid value / plots on the list x 100 "
+              f"({without} of {len(listed)}; every listed plot counts, fillers included, as on Breedbase)" if reason is None
+              else f"{PERCENT_MISSING} with the plot list {roster.manifest.artifact_id}: not available")
+    claim = Claim(claim_id=_claim_id(table.manifest.artifact_id, "ratio", "missing", "list-" + roster.manifest.artifact_id[4:].replace("_", "-"),
+                                     *label_parts, namespace=namespace), kind="ratio", value=value, unit="%", missing_reason=reason,
+                  denominator=Denominator(name=("plots on the study's plot list" + (f" (level {level})" if level else "")) if reason is None
+                                          else "plots read from the plot list", n=len(listed)),
+                  n_independent_units=None if reason else with_value, source_artifact_hashes=[table.manifest.sha256, roster.manifest.sha256],
+                  filters={}, grouping=[], transformation=f"{method}; {transformation}", exclusions=[])
+    data = {"value": value, "plots_listed": len(listed), "with_valid_value": with_value, "without_valid_value": without,
+            "rows_not_on_list": off_list, "valid_values_not_on_list": off_list_valid, "rows_without_plot_id": without_id, "level": level,
+            "reason": reason, "roster_artifact_id": roster.manifest.artifact_id}
+    return data, claim
+
+
 def tool_missing_report(registry: ArtifactRegistry, a: MissingReportArgs) -> ToolResult:
     """Raw-missing, invalid and valid counts for the value column, overall and per group. The denominator is rows
     unless a verified observation_units roster for the same study is supplied; then it also reports expected units,
@@ -965,15 +1098,7 @@ def tool_missing_report(registry: ArtifactRegistry, a: MissingReportArgs) -> Too
         data["expected_units"] = None
         data["expected_units_note"] = "no verified unit roster supplied; the only denominator is rows"
     else:
-        roster = _load(registry, a.roster_artifact_id)
-        if roster.manifest.kind != "observation_units":
-            raise AnalystError("invalid_argument", f"roster {roster.manifest.artifact_id} is {roster.manifest.kind}, not observation_units")
-        if not roster.manifest.complete:
-            raise AnalystError("incomplete_data", f"roster {roster.manifest.artifact_id} is not a complete collection; expected units are unknown")
-        if set(roster.manifest.study_ids) != set(table.manifest.study_ids):
-            raise AnalystError("invalid_argument", f"roster studies {sorted(roster.manifest.study_ids)} differ from the table's {sorted(table.manifest.study_ids)}")
-        _require_column(roster, UNIT_COL, "roster unit column")
-        _require_column(table, UNIT_COL, "unit column")
+        roster = _plot_list(registry, a.roster_artifact_id, table, require_complete=True)
         expected = {r.get(UNIT_COL, "") for r in roster.rows if r.get(UNIT_COL, "")}
         units_valid = {r.get(UNIT_COL, "") for r, _ in c.valid if r.get(UNIT_COL, "")}
         units_present = {r.get(UNIT_COL, "") for r in table.rows if r.get(UNIT_COL, "")}

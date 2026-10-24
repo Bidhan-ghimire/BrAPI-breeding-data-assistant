@@ -45,7 +45,9 @@ Rules:
    question is about (trait, unit, timepoint), and whether duplicates or unknown independence are reported.
 2. If the artifacts do not contain what the question asks for (a different trait, an incomplete fetch, an unclear
    grouping), finish with needs_clarification and say exactly what is missing. Never guess a value.
-3. For numbers call numeric_summary / group_stats; for an order (the highest, the lowest, the top k, where a named entry
+3. For numbers call numeric_summary / group_stats (numeric_summary also gives the CV of the values - not the trial's error CV,
+   which is anova_trial's - and Percent missing when you pass the study's plot list as roster_artifact_id, on the measurements
+   table of ONE study as fetched, not a filtered, stacked or joined table); for an order (the highest, the lowest, the top k, where a named entry
    ranks) call rank_entries; for how many or what share of entries or plots are above / below a number or a named entry's
    mean call threshold_count (threshold_entries=["Beauregard"] for that entry's mean, computed per study; exclude=[...] for
    the other checks; name_prefix="PH17." for one family); for the correlation of two tables' entry means (one trait in two
