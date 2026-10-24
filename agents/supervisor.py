@@ -74,8 +74,9 @@ Choose the smallest amount of work that answers the person's question:
   it does not change the approved plan. The person must approve the new plan before execution.
 - clarify: supply one precise question for the person. Their answer will be used to draft a new
   plan, which requires fresh human approval. Never supply an answer on their behalf.
-- finish: only after completed, code-validated analysis supports an answer. This produces a
-  draft for the person to accept; it never means the person has accepted it.
+- finish: only after completed, code-validated analysis supports an answer: its claims, or, for a
+  question about what a record states, its metadata_facts (fields read by code from the retrieved
+  records). This produces a draft for the person to accept; it never means the person has accepted it.
 - stop: explain why useful work cannot continue without inventing data or bypassing a control.
 
 For this MVP, revise_plan and clarify are available only before retrieval. Once records have

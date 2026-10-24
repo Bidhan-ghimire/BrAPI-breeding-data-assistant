@@ -73,6 +73,33 @@ NAME_BESIDE = {"germplasmDbId": "germplasmName", "observationUnitDbId": "observa
                "locationDbId": "locationName", "observationVariableDbId": "observationVariableName"}
 NAME_LIMIT = 200                           # characters of names shown per ID: database text, bounded like the caveats
 VIEW_CLAIMS = 20                           # claims in the usual order; claims about entries the question names come on top
+# The metadata path's facts (fields read by code from the retrieved records), bounded like the claims. Luna 2026-10-24, B26.1 and
+# B30.1: the view held only claims and caveats, so a question about what a study description says always looked unanswered and
+# the Coordinator stopped (every run since 22 Oct with facts and no claims ended "blocked"; coach 09:49 UTC, NEXT 1). One study has
+# about 20 fields, so the entities take turns (review of this change: a cap of 20 showed only the first study).
+VIEW_FACTS, VIEW_FACT_CHARS = 60, 300
+
+
+def _view_facts(facts: list[Any]) -> list[dict[str, Any]]:
+    """The metadata facts the Coordinator sees: each entity's fields in their own order, the entities taking turns, at most
+    VIEW_FACTS. A value longer than VIEW_FACT_CHARS is cut at its last space before that and marked value_cut (review of this
+    change: "202-208oF" reached it as "202-2"); the person's answer keeps the whole value."""
+    groups: dict[tuple[str, str], list[Any]] = {}
+    for fact in facts:
+        groups.setdefault((fact.entity_kind, fact.entity_id), []).append(fact)
+    turns: list[Any] = []
+    for depth in range(max((len(group) for group in groups.values()), default=0)):
+        turns.extend(group[depth] for group in groups.values() if depth < len(group))
+    shown = []
+    for fact in turns[:VIEW_FACTS]:
+        value, cut = fact.value, fact.value is not None and len(fact.value) > VIEW_FACT_CHARS
+        if cut:
+            head = value[:VIEW_FACT_CHARS]
+            value = head.rsplit(" ", 1)[0].rstrip() if " " in head else head
+        shown.append({"entity": f"{fact.entity_kind} {fact.entity_id}", "field": fact.field, "value": value,
+                      **({"value_cut": True} if cut else {}),
+                      "missing_reason": None if fact.missing_reason is None else fact.missing_reason[:200]})
+    return shown
 
 
 def _fetched_names(c: Any) -> dict[tuple[str, str], set[str]]:
@@ -153,6 +180,8 @@ def _state(c: Any, stage: str) -> dict[str, Any]:
             "claims": [_with_names(claim, names) for claim in shown],
             "claims_omitted": len(analysis.claims) - len(shown),
             "caveats": [v[:400] for v in analysis.caveats[:10]],
+            "metadata_facts": _view_facts(list(getattr(analysis, "metadata_facts", None) or [])),
+            "metadata_facts_omitted": max(0, len(getattr(analysis, "metadata_facts", None) or []) - VIEW_FACTS),
         },
         "history": c.supervision["decisions"],
         "plan_revisions": c.supervision["plan_revisions"],
