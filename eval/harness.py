@@ -6,8 +6,8 @@ What it does, in plain words:
   example "how many studies name the season 2026"). The file never stores an answer.
 * Copies the given cache folder into a new results folder (eval/results/<UTC time>/cache) and computes every expected
   answer BY CODE from that copy: from the raw study and trait catalog records, and from the cached measurements of a
-  study (on a server whose measurements the app reads from the plot records, sweetpotatobase.org, from its cached plot
-  records, which keep the values recorded as 0). Nothing is requested for this. A question whose expected answer cannot be computed from the copy (for example,
+  study (on a server whose measurements the app reads from the plot records, brapi_client.PLOT_RECORD_HOSTS:
+  sweetpotatobase.org and cassavabase.org, from its cached plot records, which keep the values recorded as 0). Nothing is requested for this. A question whose expected answer cannot be computed from the copy (for example,
   its measurements are not in it) is skipped, not run.
 * Feeds each question, as a new chat, through the app's own pipeline (app.respond: the front door, the planner, the
   approvals, the retrieval, the analysis) on that copy, with a scripted approver that types only two words: "approve" at

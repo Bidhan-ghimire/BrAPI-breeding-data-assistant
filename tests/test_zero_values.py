@@ -71,7 +71,7 @@ def test_answers_from_sweetpotatobase_observations_carry_the_note_once(ctx):
 
 
 @pytest.mark.parametrize("server, plot_records", [(SPB, True), ("https://www.sweetpotatobase.org/brapi/v2", True),
-                                                  ("https://synthetic.invalid/brapi/v2", False), ("https://cassavabase.org/brapi/v2", False)])
+                                                  ("https://synthetic.invalid/brapi/v2", False), ("https://cassavabase.org/brapi/v2", True)])
 def test_a_real_run_reads_the_plot_records_on_sweetpotatobase_and_never_needs_the_note(monkeypatch, tmp_path, server, plot_records):
     """The real Controller, offline, with the synthetic study cached under each address (review 2026-10-22). Until item (3)
     of 2026-10-22 a run on sweetpotatobase.org read /observations and carried the note (expected 1); it now reads the plot
@@ -97,9 +97,10 @@ def real_run(monkeypatch, tmp_path, server):
 
 def test_both_paths_give_the_same_numbers_on_the_synthetic_study(monkeypatch, tmp_path):
     """The synthetic plot records hold the same V1 values as the synthetic /observations reply (plus an other trait's values,
-    which are dropped), so a run on sweetpotatobase.org (plot records) and on cassavabase.org (/observations) state the same."""
+    which are dropped), so a run on sweetpotatobase.org (plot records) and on a server read through /observations state the same
+    (cassavabase.org reads its plot records too since 2026-10-24, so the /observations path runs on synthetic.invalid)."""
     numbers = [sorted((c.transformation, c.value) for c in real_run(monkeypatch, tmp_path / name, server).analysis.claims)
-               for name, server in (("spb", SPB), ("cassava", "https://cassavabase.org/brapi/v2"))]
+               for name, server in (("spb", SPB), ("observations", "https://synthetic.invalid/brapi/v2"))]
     assert numbers[0] and numbers[0] == numbers[1]
 
 

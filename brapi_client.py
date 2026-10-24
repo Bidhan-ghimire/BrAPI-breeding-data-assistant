@@ -292,17 +292,21 @@ def _check_id(value: str, label: str) -> str:
 
 
 PLOT_RECORD_PAGE_SIZE = 250          # sweetpotatobase.org caps /observationunits pages at 250 (1000 per page was too large, 2026-10-21)
-# The servers whose /observations leaves out every value recorded as 0 (size check of 2026-10-21). There, get_observations reads
-# the plot records instead (item (3) of 2026-10-22); the approval covers them and the answer's zeros note is not needed. The one
-# list for the switch, the approval and the note; a server is added only once measured.
-PLOT_RECORD_HOSTS = ("sweetpotatobase.org",)
+# The servers whose /observations leaves out values recorded as 0: sweetpotatobase.org (size check of 2026-10-21: 3,132 values in
+# 26 of 117 tables, every one a 0) and cassavabase.org (size check of 2026-10-24: 316 of 1,067 values of 0 in 15 tables of 5
+# studies, every one stored as the text "0"; the 751 stored as "0.00" were kept; coach 2026-10-24 08:48 UTC). There,
+# get_observations reads the plot records instead (item (3) of
+# 2026-10-22); the approval covers them and the answer's zeros note is not needed. The one list for the switch, the approval and
+# the note; a server is added only once measured.
+PLOT_RECORD_HOSTS = ("sweetpotatobase.org", "cassavabase.org")
 PLOT_RECORDS_NOTE = "source: the plot records (observationunits?includeObservations=true), which keep values recorded as 0"
 
 
 def reads_plot_records(base_url: str) -> bool:
-    """Are this server's measurements read from the plot records? Matched by host, exactly or as a subdomain, in any case and
-    with any port; anything else (another host, a longer name that only starts with a listed one, no host) is not."""
-    host = (urlsplit(base_url or "").hostname or "").lower()
+    """Are this server's measurements read from the plot records? Matched by host, exactly or as a subdomain, in any case, with
+    any port and with or without the trailing dot of a fully qualified name; anything else (another host, a longer name that
+    only starts with a listed one, no host) is not."""
+    host = (urlsplit(base_url or "").hostname or "").lower().rstrip(".")
     return bool(host) and any(host == known or host.endswith("." + known) for known in PLOT_RECORD_HOSTS)
 _UNIT_FIELDS = ("observationUnitDbId", "observationUnitName", "germplasmDbId", "germplasmName", "studyDbId")
 _OBSERVATION_FIELDS = ("observationDbId", "observationVariableDbId", "observationVariableName", "observationTimeStamp", "value")
@@ -919,9 +923,10 @@ class BrapiClient:
     def plot_records(self, study_id: str, variable_id: str, *, approval: FetchApproval | None = None,
                      paging: bool = False, max_pages: int = 1) -> CollectionResult:
         """ONE study's plot records with their recorded values (GET /observationunits?includeObservations=true), flattened to
-        /observations-shaped rows and reduced to ONE approved variable: no other trait's value leaves the client. Why: this
-        database's /observations leaves out every value recorded as 0 (2026-10-21: 7 of the 388 yield values of study 4577);
-        the plot records carry them. Same allowlist, approval (the measurement approval: study, variable, observations), page cap,
+        /observations-shaped rows and reduced to ONE approved variable: no other trait's value leaves the client. Why: on the
+        listed servers (PLOT_RECORD_HOSTS) /observations leaves out values recorded as 0 (sweetpotatobase.org, 2026-10-21: 7 of
+        the 388 yield values of study 4577; cassavabase.org, 2026-10-24: every 0 stored as the text "0"); the plot records
+        carry them. Same allowlist, approval (the measurement approval: study, variable, observations), page cap,
         timeouts and 429 rule as every collection; 250 units per page (the server's cap); timeouts are never retried. A server
         that ignores includeObservations gives units without an observations key: the result is "unsupported", never "empty"."""
         _check_id(study_id, "study_id")

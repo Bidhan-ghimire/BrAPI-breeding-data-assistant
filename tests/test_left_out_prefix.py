@@ -308,7 +308,7 @@ def test_on_a_plot_record_server_the_planner_is_told_to_skip_the_plot_lists(tmp_
     from llm import Budget, FakeModelClient, reply_text
     question = "Compare dry matter between 4614 and 4608 for all entries except Beauregard and Tanzania."
     on = co._user_message(question, None, [], base_url="https://sweetpotatobase.org/brapi/v2")
-    off = co._user_message(question, None, [], base_url="https://cassavabase.org/brapi/v2")
+    off = co._user_message(question, None, [], base_url="https://synthetic.invalid/brapi/v2")   # unlisted (cassavabase.org is listed)
     assert co.PLOT_RECORDS_PLANNER_NOTE in on and co.PLOT_RECORDS_PLANNER_NOTE not in off
     # the words (review of this change, finding 1): the link to the prompt, the scope, and every other plot-list use kept (finding 2)
     note = co.PLOT_RECORDS_PLANNER_NOTE

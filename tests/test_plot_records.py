@@ -193,11 +193,21 @@ def obs_plan(base, variables=("V1",)):
 
 
 @pytest.mark.parametrize("url, expected", [(SPB, True), ("https://www.sweetpotatobase.org/brapi/v2", True),
-                                           ("https://SweetPotatoBase.org:443/brapi/v2", True), (CASSAVA, False),
+                                           ("https://SweetPotatoBase.org:443/brapi/v2", True), (CASSAVA, True),
+                                           ("https://www.cassavabase.org/brapi/v2", True), ("https://notcassavabase.org/brapi/v2", False),
+                                           ("https://cassavabase.org.evil.invalid/brapi/v2", False),
+                                           ("https://cassavabase.org./brapi/v2", True), ("https://sweetpotatobase.org./brapi/v2", True),
                                            ("https://notsweetpotatobase.org/brapi/v2", False),
                                            ("https://sweetpotatobase.org.evil.invalid/brapi/v2", False), (SYNTHETIC_BASE, False), ("", False)])
 def test_plot_records_are_read_only_on_the_listed_servers(url, expected):
     assert bc.reads_plot_records(url) is expected
+
+
+def test_the_listed_servers_are_the_two_measured():
+    """A server is added only once measured. sweetpotatobase.org: the size check of 2026-10-21 (3,132 values of 0 left out by
+    /observations in 26 of 117 tables). cassavabase.org: the size check of 2026-10-24 (316 of 1,067 values of 0 left out in 15
+    tables of 5 studies, every one stored as "0"; coach 2026-10-24 08:48 UTC)."""
+    assert bc.PLOT_RECORD_HOSTS == ("sweetpotatobase.org", "cassavabase.org")
 
 
 def test_get_observations_reads_the_plot_records_on_a_listed_server(tmp_path, monkeypatch):
@@ -257,7 +267,7 @@ def test_the_approval_of_a_listed_server_is_the_same_as_elsewhere():
     """Safety review of 2026-10-22 (C6): the plot records are read under the measurement approval, so a listed server's
     approval asks for exactly what another server's does — no plot-list family is added."""
     listed = fetch_manifest(obs_plan(SPB), run_id="run_pr", base_url=SPB, max_http_attempts=10)
-    other = fetch_manifest(obs_plan(CASSAVA), run_id="run_pr", base_url=CASSAVA, max_http_attempts=10)
+    other = fetch_manifest(obs_plan(SYNTHETIC_BASE), run_id="run_pr", base_url=SYNTHETIC_BASE, max_http_attempts=10)   # unlisted
     assert listed.endpoint_families == other.endpoint_families and "observationunits" not in listed.endpoint_families
     assert listed.observation_study_ids == ["S1"] and listed.observation_variable_ids == ["V1"]
 
@@ -271,7 +281,7 @@ def test_the_approval_screen_says_other_traits_are_carried_and_dropped_on_a_list
         return cp.approval_summary(SimpleNamespace(plan=plan, manifest=manifest, metadata=None, catalog_fetched_at="2026-10-22",
                                                    catalog_setup=None, config=SimpleNamespace(question=plan.question, max_fetches=5),
                                                    budget=SimpleNamespace(max_model_calls=30)))
-    listed, other = screen(SPB), screen(CASSAVA)
+    listed, other = screen(SPB), screen(SYNTHETIC_BASE)       # an unlisted server (cassavabase.org is listed since 2026-10-24)
     assert "other observations are excluded" in other and "other observations are excluded" not in listed
     assert ("the plot records also carry other traits' values, which are dropped before any table, preview or answer (the raw "
             "pages stay in the local request cache)") in listed and "before anything is saved" not in listed
@@ -284,8 +294,8 @@ def test_the_approval_text_says_the_values_come_from_the_plot_records():
     assert "the plot records also carry other traits' values; only the approved trait is used" in text and "is kept" not in text
     two = obs_plan(SPB, ("V1", "V2"))
     assert "only the 2 approved traits are used" in ctl.approval_lead(fetch_manifest(two, run_id="run_pr", base_url=SPB, max_http_attempts=10), two)
-    plan = obs_plan(CASSAVA)
-    assert "plot records" not in ctl.approval_lead(fetch_manifest(plan, run_id="run_pr", base_url=CASSAVA, max_http_attempts=10), plan)
+    plan = obs_plan(SYNTHETIC_BASE)                            # an unlisted server (cassavabase.org is listed since 2026-10-24)
+    assert "plot records" not in ctl.approval_lead(fetch_manifest(plan, run_id="run_pr", base_url=SYNTHETIC_BASE, max_http_attempts=10), plan)
 
 
 def test_the_zeros_note_is_left_out_for_tables_read_from_the_plot_records():

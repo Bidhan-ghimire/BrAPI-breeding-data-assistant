@@ -8,8 +8,8 @@ code computes from the same saved data. It is how we measure whether the app ans
 1. Copies the cache folder you name into a new results folder, `eval/results/<UTC time>/cache`. The original is never
    changed. (`eval/results/` is in `.gitignore`.)
 2. Computes each expected answer by code from that copy: from the raw study and trait catalog records, and, for the
-   measurement questions, from the cached measurements (on sweetpotatobase.org from the cached plot records, as the app
-   reads them there: its /observations leaves out the values recorded as 0). Nothing is requested. A question whose answer cannot be computed
+   measurement questions, from the cached measurements (on sweetpotatobase.org and cassavabase.org from the cached plot
+   records, as the app reads them there: their /observations leaves out values recorded as 0). Nothing is requested. A question whose answer cannot be computed
    from the copy is skipped, never run.
 3. Sends each question, as a new chat, through the app's own pipeline (front door, planner, approvals, retrieval, analysis)
    on the copy. A scripted approver types only "approve" at the data request's approval screen and "continue" at the data
