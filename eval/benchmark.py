@@ -35,6 +35,7 @@ from typing import Any, Callable, Iterable
 sys.path.insert(0, str(Path(__file__).resolve().parent))           # the harness beside this file
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))    # the app
 import harness  # noqa: E402
+import triage  # noqa: E402
 from console import say  # noqa: E402
 
 SUBQUESTIONS = Path(__file__).resolve().parent / "benchmark" / "spb_subquestions.json"
@@ -59,6 +60,10 @@ _BLOCKED_STATUS = ("error", "stopped: the catalog setup needs an approval", "sto
 # A reply in the model's own words, with no run (the front door's talk reply): never an answer to score; the app's own
 # backstop allows only numbers from the person's words in it, so any other number is the red flag (review 10).
 MODEL_REPLY_STATUS = "no run: the app answered without starting one"
+# A no-run reply that code wrote, not the model (coach 2026-10-24 12:50 UTC, (b)): C29.6 was "invented" for the 2026 of the
+# front door's example question. Only a reply byte-identical to one of code_written_texts() is exempt; one character
+# off, or one digit added, is graded as before.
+CODE_REPLY_WHY = "no run: code-written reply (triage.out_of_scope_line), numbers not graded"
 # Report lines that quote the model, not what code did: its notes; the IDs it named that nothing fetched, returned or produced
 # (agents/retriever.py build_report and _drop_unknown_kinds, agents/analyst.py build_report); its rejected tool arguments; the
 # agents' questions, with any answer to them (run.py's clarification notes; the harness never answers); the supervisor's stop
@@ -204,12 +209,14 @@ def expected_label(e: dict[str, Any]) -> str:
 
 
 def grade(sub: dict[str, Any], *, shown: str, status: str, claims: list[dict[str, Any]],
-          backed_extra: Iterable[float] = (), run: bool = True, code_catalog: bool = False) -> dict[str, Any]:
+          backed_extra: Iterable[float] = (), run: bool = True, code_catalog: bool = False,
+          code_replies: Iterable[str] = ()) -> dict[str, Any]:
     """One sub-question's bucket, from the chat's last message (shown), how the question ended (status, as harness.ask
     writes it), the run's claims and other numbers the run's own code or data wrote (backed_extra).
     run=False: no run answered. code_catalog=True: a list run's answer, written by code from the saved catalog.
     Neither is checked for invention against claims (there are none to check against); a reply in the model's own words
-    (MODEL_REPLY_STATUS) is never scored and may hold only numbers from the question."""
+    (MODEL_REPLY_STATUS) is never scored and may hold only numbers from the question, unless it is byte-identical to one of
+    code_replies (code_written_texts(): the line code writes then), whose numbers are not graded."""
     text = _without_quotes(harness.code_written(shown))
     asked = [n for n, *_ in _numbers(sub.get("question", ""))]
     result: dict[str, Any] = {"bucket": "", "why": "", "invented": [], "matched": []}
@@ -219,6 +226,8 @@ def grade(sub: dict[str, Any], *, shown: str, status: str, claims: list[dict[str
                 for v, d, start, end in numbers if not _backed(v, d, sources)]
 
     if status.startswith(MODEL_REPLY_STATUS):
+        if shown in ((code_replies,) if isinstance(code_replies, str) else tuple(code_replies)):
+            return {**result, "bucket": "no_number", "why": CODE_REPLY_WHY, "code_written_reply": True}
         invented = flagged(_numbers(text), asked)
         if invented:
             return {**result, "bucket": "invented", "invented": invented,
@@ -253,6 +262,21 @@ def grade(sub: dict[str, Any], *, shown: str, status: str, claims: list[dict[str
     if backed_shown:
         return {**result, "bucket": "wrong", "why": "numbers shown, but not every expected value"}
     return {**result, "bucket": "no_number", "why": "no number for the statistic was shown"}
+
+
+def code_written_texts() -> tuple[str, ...]:
+    """The one no-run reply code writes whose numbers are not graded (coach 2026-10-24 12:50 UTC, the narrowest form): the
+    front door's out_of_scope line with its example question (app.py front door -> triage.front_door_reply ->
+    triage.out_of_scope_line), for the host the app names (app._source_name). Other replies code writes without a run also
+    hold numbers (the greeting's "Questions to try" guide, an app question's answer) and stay graded."""
+    return (triage.out_of_scope_line(harness.app._source_name()),)
+
+
+def invented_summary(report: dict[str, Any]) -> str:
+    """Both counts, always (coach 2026-10-24 12:50 UTC): the invented rows, then the code-written replies not graded."""
+    code = report.get("code_written_replies") or []
+    replies = f"{len(code)} code-written {'reply' if len(code) == 1 else 'replies'}, numbers not graded"
+    return f"{', '.join(report['invented']) or 'none'} ({replies}{': ' + ', '.join(code) if code else ''})"
 
 
 def run_numbers(run_dirs: Iterable[Path]) -> list[float]:
@@ -308,6 +332,7 @@ def run_subquestions(subs: list[dict[str, Any]], *, cache_copy: Path, out_dir: P
                      base_config: Callable[[str], Any], make_models: Callable[[], Any], triage_model: Callable[[], Any] | None,
                      preflight: Callable[[str], list[str]] | None, allow_live: bool, wait: float = 120.0) -> dict[str, Any]:
     make_config = harness.eval_config(base_config, cache_copy, out_dir)
+    code_replies = code_written_texts()
     saved_transport, saved_job = harness.brapi_client.RequestsTransport, harness.app.Job
     harness.app.Job = harness.TrackedJob
     if not allow_live:
@@ -330,7 +355,8 @@ def run_subquestions(subs: list[dict[str, Any]], *, cache_copy: Path, out_dir: P
             ran = bool(outcome.results)
             catalog_run = any(step.action in CATALOG_ACTIONS for r in outcome.results if r.plan for step in r.plan.steps)
             graded = grade(s, shown=outcome.shown, status=outcome.status, claims=claims,
-                           backed_extra=run_numbers(outcome.run_dirs) if ran else (), run=ran, code_catalog=catalog_run)
+                           backed_extra=run_numbers(outcome.run_dirs) if ran else (), run=ran, code_catalog=catalog_run,
+                           code_replies=code_replies)
             run_calls = sum(r.counts.model_calls for r in outcome.results)
             tokens = harness.tally((counter.replies if counter else []) + harness.run_replies(outcome.run_dirs),
                                    (counter.calls if counter else 0) + run_calls)
@@ -352,7 +378,8 @@ def run_subquestions(subs: list[dict[str, Any]], *, cache_copy: Path, out_dir: P
     costs = [r["tokens"]["cost_usd"] for r in rows]
     by_tier = {t: {b: sum(1 for r in rows if r["tier"] == t and r["bucket"] == b) for b in BUCKETS} for t in TIERS}
     return {"cost_usd": None if None in costs else round(sum(costs), 6), "by_tier": by_tier,
-            "invented": [r["sub_id"] for r in rows if r["bucket"] == "invented"], "subquestions": rows,
+            "invented": [r["sub_id"] for r in rows if r["bucket"] == "invented"],
+            "code_written_replies": [r["sub_id"] for r in rows if r.get("code_written_reply")], "subquestions": rows,
             "requests": "allowed after the scripted approval" if allow_live else "none: cache copy only"}
 
 
@@ -360,7 +387,7 @@ def results_markdown(report: dict[str, Any]) -> str:
     lines = [f"# Benchmark run, {report['started_utc']}", "", f"- Models: {report['models']}",
              f"- Cache copy: `{report['cache_copy']}`; database requests: {report['requests']}",
              f"- Cost: {report['cost_usd']} US dollars at the prices in eval/harness.py PRICES (an upper bound for OpenAI)",
-             f"- INVENTED (red flag): {', '.join(report['invented']) or 'none'}", "",
+             f"- INVENTED (red flag): {invented_summary(report)}", "",
              "| Tier | Sub-questions | pass | wrong | no number | blocked | invented |", "|---|---|---|---|---|---|---|"]
     for tier, counts in report["by_tier"].items():
         total = sum(counts.values())
@@ -473,7 +500,7 @@ def main(argv: list[str] | None = None, *, base_config: Callable[[str], Any] | N
     (folder / "results.json").write_text(json.dumps(report, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
     (folder / "results.md").write_text(results_markdown(report), encoding="utf-8")
     print(f"{sum(c['pass'] for c in report['by_tier'].values())} pass of {len(report['subquestions'])}; invented: "
-          f"{', '.join(report['invented']) or 'none'} -> {folder / 'results.md'}")
+          f"{invented_summary(report)} -> {folder / 'results.md'}")
     return 0
 
 
