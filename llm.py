@@ -24,6 +24,9 @@ What is here:
   request sets the asking role's effort (for_role) and never sends temperature,
   top_p, top_k, thinking or a forced tool; the reply's blocks go back unchanged on
   the next turn; a used-up budget (credit, spend limit, billing) is never retried.
+  Prompt caching: every request marks the system prompt, the last tool and the last
+  block of the newest turn with cache_control ephemeral (the 5-minute cache), so a
+  call reads from cache what the calls before it wrote (to_anthropic_request).
   LLM_MODEL must be a model that takes the effort setting (Opus 5 / 5.5, Sonnet 5 /
   5.5, Haiku 5.5); an older one answers every request with HTTP 400. The address,
   key and headers are fixed in code; proxy and certificate variables of the
@@ -147,6 +150,9 @@ ANTHROPIC_TIMEOUT_RANGE = (30.0, 300.0)
 # replace its own) and request logging. Refused while set; their values are never read. An explicit key makes the SDK
 # ignore ANTHROPIC_AUTH_TOKEN and profiles, and telemetry is switched off in code (AnthropicClient.__aenter__).
 ANTHROPIC_REFUSED_ENV = ("ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_LOG")
+# Prompt caching (Bidhan's decision, coach 2026-10-24 23:00 UTC, item (29)): the 5-minute cache, on three blocks of every request.
+# Without it every call paid the full input price (24 Oct, Opus: A36.4's 250,464 input tokens were $1.00 of its $1.09).
+CACHE_MARK = {"type": "ephemeral"}
 
 
 # --------------------------------------------------------------------------
@@ -539,11 +545,16 @@ def to_anthropic_request(messages: list[dict[str, Any]], tools: list[dict[str, A
     Consecutive tool results become ONE user turn of tool_result blocks, in the calls' order. An assistant turn that kept
     Claude's own blocks (provider_content) is sent with exactly those blocks. Refused before anything is sent: a system
     message after the first, a tool result without its call, a tool call left without a result, two turns in a row from
-    one side, an empty assistant turn, and a conversation that ends on the assistant's turn (Claude refuses "prefill")."""
+    one side, an empty assistant turn, and a conversation that ends on the assistant's turn (Claude refuses "prefill").
+
+    Prompt caching: the system prompt (as one text block), the last tool and the last block of the newest turn carry
+    CACHE_MARK. The API renders tools, then system, then messages, and a marker caches everything before it, so the next call
+    reads the whole conversation so far from cache. An empty system prompt stays the empty string: an empty block is refused."""
     request: dict[str, Any] = {}
     rest = list(messages)
     if rest and rest[0].get("role") == "system":
-        request["system"] = str(rest.pop(0).get("content") or "")
+        system = str(rest.pop(0).get("content") or "")
+        request["system"] = [{"type": "text", "text": system, "cache_control": dict(CACHE_MARK)}] if system else system
     turns: list[dict[str, Any]] = []
     results: list[dict[str, Any]] = []
     waiting: list[Any] = []                    # the tool_use ids of the last assistant turn, in order
@@ -585,9 +596,16 @@ def to_anthropic_request(messages: list[dict[str, Any]], tools: list[dict[str, A
     close_results()
     if not turns or turns[-1]["role"] != "user":
         raise _not_sent("the conversation must end with the person's message or tool results")
+    newest = turns[-1]
+    if isinstance(newest["content"], str):
+        if newest["content"]:
+            newest["content"] = [{"type": "text", "text": newest["content"], "cache_control": dict(CACHE_MARK)}]
+    elif newest["content"]:
+        newest["content"][-1] = {**newest["content"][-1], "cache_control": dict(CACHE_MARK)}
     request["messages"] = turns
     if tools:
         request["tools"] = [_anthropic_tool(tool) for tool in tools]
+        request["tools"][-1] = {**request["tools"][-1], "cache_control": dict(CACHE_MARK)}
     return request
 
 

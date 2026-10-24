@@ -385,13 +385,14 @@ def compare(kind: str, expected: Any, shown: str) -> tuple[bool, str, str]:
 # --------------------------------------------------------------------------
 
 # US dollars per million tokens (Anthropic's prices as given in the claude-api skill and the coach's research note,
-# checked 2026-10-17; OpenAI's gpt-6-luna from the research note). Cache writes: 1.25 x input (an assumption; the app sets
-# no prompt caching, so none are expected). Haiku 5.5 costs 5x for a request whose prompt is over 100k tokens; the app's
-# requests stay far below. A reply from a model not listed here has no cost.
+# checked 2026-10-17; OpenAI's gpt-6-luna from the research note). Cache writes: 1.25 x input, the 5-minute cache the app marks
+# on the Anthropic path (llm.CACHE_MARK, 2026-10-24); Sonnet 5.5's cache reads are $0.20 (shared/models.md; the table had
+# $0.10). Haiku 5.5 costs 5x for a request whose prompt is over 100k tokens; the app's requests stay far below. A reply
+# from a model not listed here has no cost.
 PRICES = {
     "gpt-6-luna": {"input": 0.10, "cache_write": 0.125, "cache_read": 0.01, "output": 0.50},
     "claude-opus-5-5": {"input": 4.00, "cache_write": 5.00, "cache_read": 0.20, "output": 20.00},
-    "claude-sonnet-5-5": {"input": 2.00, "cache_write": 2.50, "cache_read": 0.10, "output": 10.00},
+    "claude-sonnet-5-5": {"input": 2.00, "cache_write": 2.50, "cache_read": 0.20, "output": 10.00},
     "claude-haiku-5-5": {"input": 0.10, "cache_write": 0.125, "cache_read": 0.01, "output": 0.50},
 }
 TOKEN_KINDS = ("input", "cache_write", "cache_read", "output")

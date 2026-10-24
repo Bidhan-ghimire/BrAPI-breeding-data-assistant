@@ -159,6 +159,48 @@ def dumped(reply: Message):
     return [block.model_dump(mode="json", exclude_unset=True, by_alias=True) for block in reply.content]
 
 
+def markers(request) -> list[tuple[str, object]]:
+    """Every cache_control in a request (prompt caching, coach 2026-10-24 23:00 UTC), as (where, value)."""
+    found: list[tuple[str, object]] = []
+
+    def walk(node, where):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "cache_control":
+                    found.append((where, value))
+                else:
+                    walk(value, f"{where}.{key}")
+        elif isinstance(node, list):
+            for i, value in enumerate(node):
+                walk(value, f"{where}[{i}]")
+    walk(request, "request")
+    return found
+
+
+def stripped(request):
+    """The request without its cache markers, in the shape it had before them: a system or a user text sent as one marked text
+    block is its plain text again (the API reads a string as one text block)."""
+    request = copy.deepcopy(request)
+
+    def drop(node):
+        if isinstance(node, dict):
+            node.pop("cache_control", None)
+            for value in node.values():
+                drop(value)
+        elif isinstance(node, list):
+            for value in node:
+                drop(value)
+    drop(request)
+    system = request.get("system")
+    if isinstance(system, list) and len(system) == 1 and system[0].get("type") == "text":
+        request["system"] = system[0]["text"]
+    for turn in request.get("messages", []):
+        content = turn.get("content")
+        if turn.get("role") == "user" and isinstance(content, list) and len(content) == 1 and content[0].get("type") == "text":
+            turn["content"] = content[0]["text"]
+    return request
+
+
 # --- settings --------------------------------------------------------------------------------------------------------------
 
 def test_unset_provider_keeps_the_openai_path_and_skips_every_claude_check(tmp_path):
@@ -270,8 +312,11 @@ def test_every_request_carries_the_roles_effort_and_nothing_claude_refuses(tmp_p
     sent = sdk.sent[0]
     assert set(sent) == {"model", "max_tokens", "system", "messages", "tools", "output_config"}   # no sampling, thinking, tool_choice
     assert sent["output_config"] == {"effort": effort} and sent["model"] == "claude-opus-5-5" and sent["max_tokens"] == 16000
-    assert sent["system"].startswith("SYSTEM\n\n") and sent["messages"] == [{"role": "user", "content": "What is 2+3?"}]
-    assert sent["tools"] == [{"name": "add", "description": "Add two integers.", "input_schema": AddTools.SCHEMAS[0]["inputSchema"]}]
+    plain = stripped(sent)                                 # prompt caching (coach 2026-10-24 23:00 UTC): the markers aside
+    assert plain["system"].startswith("SYSTEM\n\n") and plain["messages"] == [{"role": "user", "content": "What is 2+3?"}]
+    assert plain["tools"] == [{"name": "add", "description": "Add two integers.", "input_schema": AddTools.SCHEMAS[0]["inputSchema"]}]
+    assert dict(markers(sent)) == {"request.system[0]": {"type": "ephemeral"}, "request.messages[0].content[0]": {"type": "ephemeral"},
+                                   "request.tools[0]": {"type": "ephemeral"}}
     start = events(tmp_path, agent)[0]
     assert start["event"] == "start" and start["reply_limit_sent"] == 16000 and start["effort_sent"] == effort
     assert start["max_tokens"] == 8192                                         # the caller's limit, as logged before
@@ -297,8 +342,9 @@ def test_the_real_sdk_sends_only_the_key_to_the_fixed_address_at_the_front_doors
     assert str(request.url) == URL and request.headers["x-api-key"] == KEY and "authorization" not in request.headers
     assert not any(name.lower() in ("traceparent", "tracestate") for name in request.headers)
     body = json.loads(request.content)
-    assert body["output_config"] == {"effort": "low"} and body["max_tokens"] == 16000 and body["system"] == "PROMPT"
-    assert body["messages"] == [{"role": "user", "content": "hello"}] and body["model"] == "claude-opus-5-5"
+    assert body["output_config"] == {"effort": "low"} and body["max_tokens"] == 16000 and stripped(body)["system"] == "PROMPT"
+    assert stripped(body)["messages"] == [{"role": "user", "content": "hello"}] and body["model"] == "claude-opus-5-5"
+    assert dict(markers(body)) == {"request.system[0]": {"type": "ephemeral"}, "request.messages[0].content[0]": {"type": "ephemeral"}}
     assert not set(body) & {"temperature", "top_p", "top_k", "thinking", "tool_choice", "tools"}
     assert reply.content == "Hi" and reply.finish_reason == "stop" and reply.usage.total_tokens == 15
 
@@ -345,8 +391,9 @@ def test_claudes_blocks_go_back_unchanged_and_one_turns_tool_results_form_one_us
     assert [b["tool_use_id"] for b in results["content"]] == ["toolu_a", "toolu_b"]
     assert json.loads(results["content"][0]["content"])["data"] == {"sum": 5}
     repaired = sdk.sent[2]["messages"]
-    assert repaired[:3] == asked and repaired[3] == {"role": "assistant", "content": dumped(second)}    # append-only
-    assert repaired[4]["role"] == "user" and "not a valid JSON object" in repaired[4]["content"] and len(repaired) == 5
+    plain = stripped({"messages": repaired})["messages"]                       # the cache marker moves to the newest turn
+    assert plain[:3] == stripped({"messages": asked})["messages"] and repaired[3] == {"role": "assistant", "content": dumped(second)}
+    assert plain[4]["role"] == "user" and "not a valid JSON object" in plain[4]["content"] and len(repaired) == 5   # append-only
     assert all(sent["system"] == sdk.sent[0]["system"] and sent["tools"] == sdk.sent[0]["tools"] for sent in sdk.sent)
     assert result.usage.prompt_tokens == 10 + 10 + 130 and result.usage.completion_tokens == 5 + 5 + 20
     details = [e["usage_detail"] for e in events(tmp_path) if e["event"] == "assistant"]
@@ -598,7 +645,7 @@ def test_conversations_claude_would_refuse_are_never_sent(tmp_path, messages, wh
 
 
 def test_a_turn_written_in_the_openai_shape_is_sent_as_claudes_blocks():
-    request = llm.to_anthropic_request([SYSTEM, USER, asked_tools("t1", "t2"), result_for("t1"), result_for("t2")], [])
+    request = stripped(llm.to_anthropic_request([SYSTEM, USER, asked_tools("t1", "t2"), result_for("t1"), result_for("t2")], []))
     assert request["system"] == "S" and "tools" not in request
     assert request["messages"][1] == {"role": "assistant", "content": [
         {"type": "tool_use", "id": "t1", "name": "add", "input": {"a": 1, "b": 2}},
