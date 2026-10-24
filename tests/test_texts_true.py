@@ -86,6 +86,13 @@ def test_the_notes_own_left_out_still_goes():
     assert cp._left_out_text("entries left out: excluded (A left out: b)") == "excluded (A left out: b)"
 
 
+def test_the_notes_own_left_out_goes_without_an_entries_prefix_too():
+    """Coach 2026-10-24 17:48 UTC: deliberate bug R12 (strip "left out: " only after "entries ") passed every test. No reason on the
+    three answer lines starts with "left out: " today (they start "entries " or with the table's name), so no answer differs; this
+    pins the helper's own rule: the note's "left out: " at its start goes, with or without "entries " before it."""
+    assert cp._left_out_text("left out: excluded (Beauregard)") == "excluded (Beauregard)"
+
+
 # --- (b) a stack filtered down to some of its sources says which -------------------------------------------------------
 
 def test_a_stack_filtered_to_one_source_names_the_one_table(registry):
@@ -172,6 +179,16 @@ def test_a_stack_of_pooled_and_study_means_rank_tables_says_they_differ(registry
     text = summary_text(registry, run(registry, "concat_tables", artifact_ids=ranked).artifact_ids[0], "mean")
     assert ("stacked rows of different kinds (rank_entries by germplasmDbId, basis pooled | rank_entries by germplasmDbId, "
             "basis study_means)") in text and "values are group means" not in text
+
+
+def test_a_stack_of_different_kinds_says_no_count_of_tables(registry):
+    """Coach 2026-10-24 17:48 UTC: deliberate bug R9 (", from N stacked tables" added to the different-kinds note too) passed
+    every test; the note is said as concat_tables writes it, with no count of tables."""
+    table = two_studies(registry)
+    ranked = [run(registry, "rank_entries", artifact_id=table, by="germplasmDbId", value="value", basis=b).data["result_artifact_id"]
+              for b in ("pooled", "study_means")]
+    text = summary_text(registry, run(registry, "concat_tables", artifact_ids=ranked).artifact_ids[0], "mean")
+    assert "basis study_means))" in text and "stacked tables" not in text
 
 
 def test_stacked_rank_entries_tables_say_each_stacked_table(registry):

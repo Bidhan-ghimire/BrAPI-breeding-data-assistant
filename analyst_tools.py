@@ -782,7 +782,10 @@ def tool_numeric_summary(registry: ArtifactRegistry, a: NumericSummaryArgs) -> T
     exclusions; with the study's plot list (roster_artifact_id) also Percent missing, the share of its plots without a valid
     value - the columns of Breedbase's Phenotype Summary. Refuses mixed variables, unresolved duplicates and incomplete
     artifacts (unless allow_incomplete). SD with fewer than 2 valid values is null. Values keep full precision; `display` is
-    rounded."""
+    rounded. On a group_stats or rank_entries result (one row per group or entry), value="mean" gives the mean of the group
+    means, each group weighted equally (a mean of genotype means). Those tables keep every group: included=false marks one
+    under min_independent_n (or not ranked), left_out=true one that rank_entries left out; filter_rows on those columns first
+    when they must not count."""
     table = _load(registry, a.artifact_id)
     _require_column(table, a.value, "value column")
     caveat = _completeness_gate(table, a.allow_incomplete)
@@ -878,7 +881,9 @@ def tool_group_stats(registry: ArtifactRegistry, a: GroupStatsArgs) -> ToolResul
     reason (an exclusion threshold, not a design correction); rows with an empty group ID are excluded and counted.
     The FULL result (every group, included or not) is saved as an analysis_result artifact; the message shows top_n
     included groups ranked by mean at full precision, ties shared and listed. Descriptive only: not adjusted, not
-    evidence of superiority."""
+    evidence of superiority. For the mean of all the group means in the saved result (each group weighted equally), call
+    numeric_summary on the result_artifact_id with value="mean"; the result keeps every group, included or not, so
+    filter_rows on it first (included eq true, or on the label) leaves groups out."""
     table = _load(registry, a.artifact_id)
     _require_column(table, a.by, "group column")
     _require_column(table, a.value, "value column")
