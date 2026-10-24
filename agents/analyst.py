@@ -261,9 +261,16 @@ class ToolRecord:
 # Coach 2026-10-24 05:48 UTC, (A): Luna E15.3 ran one plot_basis_h2 computation three times and D16.3 one gxe_partition
 # computation in four spellings, each until the run's 30 model calls with no answer. As the Retriever's repeat stop does (llm.py),
 # an exact repeat gets its saved result and is not run again; the second ends the analysis step with the claims already made.
-ANALYST_REPEAT_NOTE = ("This exact call (the same tool, arguments and tables) already ran in this run; its result is shown again "
-                       "and was not computed again. Use it and do not ask for it again: a second exact repeat of one call ends "
-                       "the analysis with the claims the tools have made.")
+ANALYST_REPEAT_NOTE = ("This exact call (the same tool, arguments and tables) was already answered in this run, with a result or "
+                       "the tool's refusal; the same answer is shown again and the call was not run again. Do not ask for it "
+                       "again: a second exact repeat of one call ends the analysis with the claims the tools have made.")
+# A tool's own refusal is saved like a result: the same arguments and tables get the same answer. A crash is not (internal_error:
+# a file the tool could not read, a save that failed; review of the refusal change), nor a timeout or an upstream error.
+SAVED_REFUSAL_CODES = frozenset({"invalid_argument", "unsupported", "incomplete_data"})
+# When a call that ended the step was refused (review of the refusal change: "Rows 6" for a mean question, the mean refused). The
+# tool's message stays in the Full report: it can quote the arguments the model wrote.
+REFUSED_ENDED_CAVEAT = ("The tool refused {tool} ({code}), and code ended the analysis when that call was asked for a third time; "
+                        "its numbers are not in this answer (the Full report has the tool's reason).")
 # What the person reads when code ended the step (review of A: a model might still have finished, or asked); no digits.
 CODE_ENDED_CAVEAT = ("Code ended the analysis when one calculation was asked for a third time (the same tool, arguments and "
                      "tables); the numbers are the tools' own, without the Analyst's final check or summary.")
@@ -298,7 +305,8 @@ class GuardedAnalystTools:
     claim_refs: dict[str, str] = field(default_factory=dict, init=False)  # model reference -> canonical ID
     _refs_by_id: dict[str, str] = field(default_factory=dict, init=False)
     _saved: dict[tuple[Any, ...], ToolResult] = field(default_factory=dict, init=False)  # repeat key -> the result the model saw
-    repeats: list[tuple[int, str, dict[str, Any]]] = field(default_factory=list, init=False)  # (calls run before it, tool, args)
+    repeats: list[tuple[int, str, dict[str, Any], bool]] = field(default_factory=list, init=False)  # (calls run before, tool, args, ok)
+    ended_keys: list[tuple[Any, ...]] = field(default_factory=list, init=False)   # the calls whose second repeat ended the step
 
     def __post_init__(self) -> None:
         self.allowed = set(self.supplied)
@@ -323,13 +331,14 @@ class GuardedAnalystTools:
         return name, json.dumps(effective, sort_keys=True), hashes
 
     def saved_result(self, name: str, args: Mapping[str, Any]) -> ToolResult | None:
-        """For an exact repeat of a call that succeeded in this run: its result as the model saw it, with the note, not run
-        again (llm.run_agent_loop counts it; the second repeat ends the step). None for anything else."""
+        """For an exact repeat of a call the tool answered in this run: its result as the model saw it, or the tool's own refusal
+        (coach 2026-10-24 07:49 UTC), with the note, not run again (llm.run_agent_loop counts it; the second repeat ends the
+        step). None for anything else, the guard's own refusals included."""
         key = self.repeat_key(name, args)
         saved = self._saved.get(key) if key is not None else None
         if saved is None:
             return None
-        self.repeats.append((len(self.records), name, dict(args)))   # the run record lists it (build_report)
+        self.repeats.append((len(self.records), name, dict(args), saved.ok))   # the run record lists it (build_report)
         data = {"not_run_again": True, **saved.data} if isinstance(saved.data, dict) else {"not_run_again": True}
         return saved.model_copy(update={"data": data, "warnings": [ANALYST_REPEAT_NOTE, *saved.warnings]})
 
@@ -338,8 +347,14 @@ class GuardedAnalystTools:
         every claim the tools made (tool-backed only, as for key_claim_ids [])."""
         return {"methods": [], "caveats": [], "narrative": "", "key_claim_ids": []}
 
-    def repeat_ended_text(self, count: int) -> str:
+    def repeat_ended_text(self, count: int, keys: list[tuple[Any, ...]] = ()) -> str:
+        self.ended_keys = list(keys)
         return ANALYST_REPEAT_ENDED.format(count=count)
+
+    def ended_refusals(self) -> list[tuple[str, str]]:
+        """(tool, error code) of each call that ended the step and had been refused by the tool."""
+        saved = [self._saved.get(key) for key in self.ended_keys]
+        return [(key[0], s.error.code) for key, s in zip(self.ended_keys, saved) if s is not None and not s.ok and s.error is not None]
 
     def may_end(self) -> bool:
         """The stop ends the step only once a tool made a claim (review of A: repeated table_info calls before any calculation
@@ -400,7 +415,10 @@ class GuardedAnalystTools:
             data["claim_selection_note"] = ("Claim IDs are exact short selection references. The preview may omit claims; "
                                             "all original tool claims are retained in the report. key_claim_ids may be [].")
             shown = result.model_copy(update={"data": data})
-        key = self.repeat_key(name, args) if result.ok else None
+        # a tool's own refusal too (coach 2026-10-24 07:49 UTC): the same arguments and tables get the same answer. The guard's
+        # refusals (_refuse) never get here: some lift later in the run ("call table_info first", a table not yet made).
+        refused = not result.ok and result.error is not None and result.error.code in SAVED_REFUSAL_CODES
+        key = self.repeat_key(name, args) if result.ok or refused else None
         if key is not None:
             self._saved.setdefault(key, shown)                  # an exact repeat gets this back (saved_result)
         return shown
@@ -510,9 +528,9 @@ def build_report(agent: AgentResult, tools: GuardedAnalystTools, inputs: Analysi
     claims, exclusions, caveats, results, incomplete = _harvest(tools, supplied)
     methods = [f"{r.name}({json.dumps(effective_arguments(r.name, r.args), sort_keys=True)}) -> "
                f"{'ok' if r.result.ok else 'refused: ' + (r.result.error.code if r.result.error else '?')}" for r in tools.records]
-    for position, name, args in reversed(getattr(tools, "repeats", ())):   # each repeat after the calls run before it (A)
+    for position, name, args, ok in reversed(getattr(tools, "repeats", ())):   # each repeat after the calls run before it (A)
         methods.insert(position, f"{name}({json.dumps(effective_arguments(name, args), sort_keys=True)}) -> repeat: the saved "
-                                 "result of an earlier call, not run again")
+                                 f"{'result' if ok else 'refusal'} of an earlier call, not run again")
     refused = [r for r in tools.records if r.refused_here]
     if refused:
         caveats.append(f"{len(refused)} tool call(s) refused by the runtime guards: " + "; ".join(sorted({r.result.error.message for r in refused if r.result.error})))
@@ -523,6 +541,7 @@ def build_report(agent: AgentResult, tools: GuardedAnalystTools, inputs: Analysi
         methods.append("code: the analysis step was ended at the second exact repeat of one call (the same tool, arguments and "
                        "tables); the answer keeps the claims the tools had made")
         caveats.append(CODE_ENDED_CAVEAT)
+        caveats.extend(REFUSED_ENDED_CAVEAT.format(tool=tool, code=code) for tool, code in getattr(tools, "ended_refusals", list)())
 
     def finish(status: TerminalStatus, chosen: list[Claim], narrative: str) -> tuple[AnalysisReport, str]:
         return AnalysisReport(status=status, claims=chosen, methods=methods, exclusions=exclusions, caveats=caveats,

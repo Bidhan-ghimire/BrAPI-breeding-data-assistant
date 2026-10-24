@@ -20,7 +20,7 @@ import pytest
 import agents.analyst as an
 import analyst_tools as at
 import brapi_mcp_server as srv
-from contracts import AnalysisReport, MeasurementMeta, ToolResult
+from contracts import AnalysisReport, MeasurementMeta, ToolError, ToolResult
 from llm import REPEAT_ENDED, Budget, FakeModelClient, reply_text, reply_tools
 from part2_support import synthetic_context
 
@@ -453,6 +453,96 @@ def test_a_repeat_before_any_claim_does_not_end_the_analysis(tmp_path):
     assert agent.errors == [] and report.status == "completed" and report.claims               # the model's own final answer
 
 
+class FlakyOnce:
+    """The analyst tools, but the first call of one tool crashes (internal_error), as a locked or half-written file would."""
+
+    def __init__(self, inner, name):
+        self.inner, self.name, self.failed = inner, name, False
+
+    async def schemas(self):
+        return await self.inner.schemas()
+
+    async def call(self, name, args):
+        if name == self.name and not self.failed:
+            self.failed = True
+            return ToolResult(ok=False, error=ToolError(code="internal_error", message="PermissionError: the table file was locked"))
+        return await self.inner.call(name, args)
+
+
+def test_a_crash_is_not_saved_and_the_identical_retry_runs(tmp_path):
+    """Review of the refusal change, BUG: only the tool's own refusals (invalid_argument, unsupported, incomplete_data) are saved;
+    a crash (internal_error: a file the tool could not read, a save that failed) is not, so the identical retry runs."""
+    ctx = make_ctx(tmp_path)
+    inputs = s1_inputs(ctx, "calc_before_inspect.json")
+    art = inputs.artifact_ids[0]
+    model = scripted(inputs.artifact_ids, ("numeric_summary", {"artifact_id": art}), ("numeric_summary", {"artifact_id": art}))
+
+    async def go():
+        return await an.run_analyst(inputs, model=model, ctx=ctx, budget=Budget(), run_id=RUN, log_dir=ctx.registry.out_root,
+                                    raw_tools=FlakyOnce(an.AnalystTools(ctx.registry), "numeric_summary"))
+
+    report, agent, _ = anyio.run(go)
+    assert calls_run(report) == ["table_info", "table_info", "numeric_summary", "numeric_summary"]   # the retry ran
+    assert report.status == "completed" and report.claims and agent.errors == []
+
+
+def test_what_the_model_is_shown_for_a_saved_refusal(tmp_path):
+    """Review of the refusal change (its surviving mutants M5-M7): a saved refusal reaches the model as the refusal it was (ok
+    false, the tool's error code), marked not run again, with the note first; the run record says "saved refusal" for it and
+    "saved result" for a repeat of a call that succeeded."""
+    ctx = make_ctx(tmp_path)
+    inputs = s1_inputs(ctx, "calc_before_inspect.json")
+    art = inputs.artifact_ids[0]
+    wrong = {"artifact_id": art, "value": "no_such_column"}
+    model = scripted(inputs.artifact_ids, ("numeric_summary", wrong), ("numeric_summary", wrong),
+                     ("numeric_summary", {"artifact_id": art}), ("numeric_summary", {"artifact_id": art}))
+    report, agent, _, _ = run(ctx, inputs, model=model)
+    shown = [msg for name, msg in tool_messages(agent) if name == "numeric_summary"]
+    assert shown[1]["ok"] is False and shown[1]["error"]["code"] == "invalid_argument" and shown[1]["data"]["not_run_again"] is True
+    assert shown[1]["warnings"][0] == an.ANALYST_REPEAT_NOTE and "refusal" in an.ANALYST_REPEAT_NOTE
+    assert shown[3]["ok"] is True and shown[3]["data"]["not_run_again"] is True and shown[3]["warnings"][0] == an.ANALYST_REPEAT_NOTE
+    repeats = [m for m in report.methods if m.endswith("not run again")]
+    assert len(repeats) == 2 and "the saved refusal" in repeats[0] and "the saved result" in repeats[1]
+
+
+def test_a_step_ended_on_a_refused_call_says_which_calculation_was_refused(tmp_path):
+    """Review of the refusal change, SHOULD-FIX 2 (its probe: "Rows 6" for a mean question, the mean refused three times): when
+    a call that ended the step was refused by the tool, the answer names the tool and says its numbers are not in it."""
+    import chat_presenter as cp
+    from types import SimpleNamespace
+
+    ctx = make_ctx(tmp_path)
+    inputs = s1_inputs(ctx, "calc_before_inspect.json")
+    art = inputs.artifact_ids[0]
+    wrong = {"artifact_id": art, "value": "no_such_column"}
+    model = scripted(inputs.artifact_ids, ("count_records", {"artifact_id": art}), *[("numeric_summary", wrong)] * 3)
+    report, agent, _, _ = run(ctx, inputs, model=model)
+    assert [e.code for e in agent.errors] == [REPEAT_ENDED] and report.claims
+    view = SimpleNamespace(execution_status="completed", analysis=report, ctx=ctx, notes=[],
+                           retrieval=SimpleNamespace(status="completed", warnings=[], artifacts=[]),
+                           plan=SimpleNamespace(question="Mean fresh root yield in S1?", statistic=SimpleNamespace(kind="mean")))
+    expected = an.REFUSED_ENDED_CAVEAT.format(tool="numeric_summary", code="invalid_argument")
+    assert expected in report.caveats and cp._text(expected) in cp.answer_summary(view)
+    assert "no_such_column" not in expected                                     # the tool's message (model-written words) stays out
+
+
+def test_identical_calls_in_one_turn_count_once(tmp_path):
+    """Review of the refusal change, SHOULD-FIX 2 (p5): the model has not seen a call's answer when it sends the same call again
+    in the same turn, so those copies get the saved answer but are not counted; the model can then correct itself."""
+    ctx = make_ctx(tmp_path)
+    inputs = s1_inputs(ctx, "calc_before_inspect.json")
+    art = inputs.artifact_ids[0]
+    wrong = {"artifact_id": art, "value": "no_such_column"}
+    model = FakeModelClient([reply_tools([("table_info", json.dumps({"artifact_id": a})) for a in inputs.artifact_ids]),
+                             reply_tools([("count_records", json.dumps({"artifact_id": art}))]),
+                             reply_tools([("numeric_summary", json.dumps(wrong))] * 3),               # one turn, three copies
+                             reply_tools([("numeric_summary", json.dumps({"artifact_id": art}))]),    # corrected
+                             reply_text(json.dumps(FINAL_NO_PROSE))], reported_model="mock-model")
+    report, agent, _, _ = run(ctx, inputs, model=model)
+    assert agent.errors == [] and len(model.requests) == 5 and report.status == "completed"
+    assert calls_run(report) == ["table_info", "table_info", "count_records", "numeric_summary", "numeric_summary"]
+
+
 def test_other_arguments_are_other_calls(tmp_path):
     """Each call is counted on its own: two calls repeated once each do not end the step (the loop's count per saved table
     would have added them up: numeric_summary names the same table both times)."""
@@ -495,8 +585,10 @@ def test_the_run_record_names_every_call_with_the_arguments_the_tool_read(tmp_pa
     assert ran[0].endswith("-> ok") and all(m.endswith("not run again") for m in ran[1:])
 
 
-def test_a_call_that_failed_is_run_again(tmp_path):
-    """Only a call that succeeded is saved: a failed one runs again, and is no repeat."""
+def test_a_refusal_by_the_tool_is_saved_and_before_a_claim_the_step_goes_on(tmp_path):
+    """Coach 2026-10-24 07:49 UTC, refused calls under A: the tool's own refusal is saved like a result, same key, same rule (the
+    same arguments and tables get the same answer; E15.3 ran plot_basis_h2 on its own result table three times). Before any claim
+    the repeats are answered from the saved refusal and the analysis goes on to compute."""
     ctx = make_ctx(tmp_path)
     inputs = s1_inputs(ctx, "calc_before_inspect.json")
     art = inputs.artifact_ids[0]
@@ -504,7 +596,24 @@ def test_a_call_that_failed_is_run_again(tmp_path):
     model = scripted(inputs.artifact_ids, ("numeric_summary", wrong), ("numeric_summary", wrong), ("numeric_summary", wrong),
                      ("numeric_summary", {"artifact_id": art}))
     report, agent, _, _ = run(ctx, inputs, model=model)
-    assert calls_run(report) == ["table_info", "table_info", *["numeric_summary"] * 4] and agent.errors == [] and report.status == "completed"
+    assert calls_run(report) == ["table_info", "table_info", "numeric_summary", "numeric_summary"]   # the refused call ran once
+    assert agent.errors == [] and report.status == "completed" and report.claims                  # the model's own final answer
+    repeats = [m for m in report.methods if m.endswith("not run again")]
+    assert len(repeats) == 2 and all("the saved refusal" in m and "no_such_column" in m for m in repeats)
+
+
+def test_a_repeated_refusal_after_a_claim_ends_the_step(tmp_path):
+    """Once a tool has made a claim, the second exact repeat of a refused call ends the step with the tool-backed claims."""
+    ctx = make_ctx(tmp_path)
+    inputs = s1_inputs(ctx, "calc_before_inspect.json")
+    art = inputs.artifact_ids[0]
+    wrong = {"artifact_id": art, "value": "no_such_column"}
+    model = scripted(inputs.artifact_ids, ("numeric_summary", {"artifact_id": art}), *[("numeric_summary", wrong)] * 3,
+                     ("group_stats", {"artifact_id": art, "by": "germplasmDbId"}))
+    report, agent, _, _ = run(ctx, inputs, model=model)
+    assert calls_run(report) == ["table_info", "table_info", "numeric_summary", "numeric_summary"]   # the claim, the refusal once
+    assert len(model.requests) == 5 and [e.code for e in agent.errors] == [REPEAT_ENDED]          # the group_stats turn never came
+    assert report.status == "completed" and report.claims
 
 
 def test_without_a_registry_nothing_is_saved(tmp_path):

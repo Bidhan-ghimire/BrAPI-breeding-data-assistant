@@ -1078,6 +1078,8 @@ async def run_agent_loop(
                                                                               "function": {"name": c.name, "arguments": c.arguments_json}}
                                                                              for c in reply.tool_calls]}, reply))
                 ended = False                                      # a second repeat for one table: ends after this turn
+                repeat_key = getattr(repeat_guard, "repeat_key", None)    # the Analyst's guard counts per call
+                answered_now: set[Any] = set()                     # its calls this turn ran: the model has not seen their answers
                 for call in reply.tool_calls:                      # sequential: no parallel fetching
                     budget.tool_calls += 1
                     tcorr = f"t{budget.tool_calls}"
@@ -1099,11 +1101,11 @@ async def run_agent_loop(
                     args = outcome
                     saved = repeat_guard.saved_result(call.name, args) if repeat_guard is not None else None
                     if saved is not None:                          # an exact repeat of a complete table: not sent again,
-                        repeat_key = getattr(repeat_guard, "repeat_key", None)            # and no fetch is used; the Analyst
                         key = (repeat_key(call.name, args) if repeat_key is not None else None) or (call.name, *saved.artifact_ids)
-                        repeats[key] = repeats.get(key, 0) + 1
-                        ended = ended or repeats[key] >= MAX_REPEATS
-                        emit("repeat_not_sent", correlation_id=tcorr, name=call.name, repeat=repeats[key],
+                        if key not in answered_now:                # and no fetch is used; a copy in the turn that ran the call
+                            repeats[key] = repeats.get(key, 0) + 1   # is answered but not counted (review of the refusal change)
+                            ended = ended or repeats[key] >= MAX_REPEATS
+                        emit("repeat_not_sent", correlation_id=tcorr, name=call.name, repeat=repeats.get(key, 0),
                              artifact_ids=list(saved.artifact_ids))
                         _append_tool_message(state, call, saved, tcorr, emit)
                         continue
@@ -1125,6 +1127,8 @@ async def run_agent_loop(
                         return finish("limit_reached", None)
                     try:
                         result = await tools.call(call.name, args)
+                        if repeat_key is not None:
+                            answered_now.add(repeat_key(call.name, args))
                     except BridgeTimeout as exc:
                         add_error("tool_timeout", str(exc))
                         return finish("failed", None)
@@ -1135,7 +1139,8 @@ async def run_agent_loop(
                 may_end = getattr(repeat_guard, "may_end", None)
                 if ended and (may_end is None or may_end()):        # the second repeat for one table: code ends this step;
                     ended_text = getattr(repeat_guard, "repeat_ended_text", None)
-                    add_error(REPEAT_ENDED, ended_text(max(repeats.values())) if ended_text is not None else
+                    add_error(REPEAT_ENDED, ended_text(max(repeats.values()), [k for k, n in repeats.items() if n >= MAX_REPEATS])
+                              if ended_text is not None else
                               f"a complete table this run already saved was asked for again ({max(repeats.values())} "
                               "exact repeats of one request, none sent); the fetching step was ended by code")
                     return finish("completed", repeat_guard.payload_from_evidence())   # the caller's checks decide
