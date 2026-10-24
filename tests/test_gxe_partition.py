@@ -14,7 +14,9 @@ Q3: means-table SS 93.191184 / 4.331681 / 10.406522, H2 0.8151984) are added onc
 """
 from __future__ import annotations
 
+import json
 import math
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -579,3 +581,154 @@ def test_a_real_small_g_x_e_beside_a_large_environment_effect_is_kept(registry):
     x, t = expected(values, with_error=False), table(r)
     f = (x["ss_entry"] / 2) / (x["ss_ge"] / 2)
     assert t["entry"]["f"] == pytest.approx(f, rel=1e-4) and r.data["h2"] == pytest.approx(1 - 1 / f, rel=1e-4)
+
+
+# --- 9. the plot-level shares (D16.3; coach 2026-10-23 15:49 UTC, NEXT 8) ------------------------------------------------
+
+# REAL data stays git-ignored (ACCESS_NOTES: until the redistribution question is answered): snapshots/, absent from a clone
+FIXTURE_UMBELUZI = Path(__file__).resolve().parents[1] / "snapshots" / "spb_umbeluzi_2019_yield_20261023.json"
+PLOT_SOURCES = ("environment", "entry", "entry x environment", "reps within environment", "error (pooled within trials)")
+
+
+def plot_shares(r) -> dict[str, float | None]:
+    found = {k.transformation.split(" | ")[0]: k for k in claims(r)}
+    return {source: found[f"share of the plot-level SS: {source}"].value for source in PLOT_SOURCES}
+
+
+def test_the_plot_level_shares_match_an_independent_computation(registry):
+    """A balanced r-rep set: the plot values' total sum of squares about their grand mean is r x the means-table sums (environment,
+    entry, entry x environment), the reps within each environment and the pooled within-trial error; each as a share of it.
+    Computed here from the plot values, with the error as what is left (the tool takes it from the per-trial ANOVAs)."""
+    values = trial(r=3)
+    r = gxe(registry, [save(registry, rows_of(values))])
+    x = expected(values, with_error=False)
+    plots = [(s, k, v) for s, by in values.items() for vs in by.values() for k, v in enumerate(vs)]
+    grand = sum(v for *_, v in plots) / len(plots)
+    total = sum((v - grand) ** 2 for *_, v in plots)
+    reps = 0.0
+    for s in values:
+        study = [v for st, _, v in plots if st == s]
+        mean_s = sum(study) / len(study)
+        for k in range(3):
+            rep_values = [v for st, kk, v in plots if st == s and kk == k]
+            reps += len(rep_values) * (sum(rep_values) / len(rep_values) - mean_s) ** 2
+    parts = {"environment": 3 * x["ss_env"], "entry": 3 * x["ss_entry"], "entry x environment": 3 * x["ss_ge"], "reps within environment": reps}
+    parts["error (pooled within trials)"] = total - sum(parts.values())
+    got = plot_shares(r)
+    assert got == pytest.approx({s: 100 * v / total for s, v in parts.items()}, rel=1e-9) and sum(got.values()) == pytest.approx(100.0)
+    k = next(k for k in claims(r) if k.transformation.startswith("share of the plot-level SS: error"))
+    assert k.denominator.n == 60 and "r = 3" in k.transformation                       # 5 entries x 4 studies x 3 reps
+
+
+def test_d16_3_the_five_umbeluzi_water_regimes(registry):
+    """REAL data (benchmark row D16.3): 24 genotypes x 5 water regimes x 2 reps of SweetPotatoBase's Umbeluzi 2019 studies, as the
+    app saved them. The means-table and the plot-level shares match an independent computation (the snapshot's check, from
+    d163_check.py) to two decimals, and the benchmark's gold (65.1 / 4.4 / 30.5 %; 55.6 / 3.8 / 26.1 / 14.4 %) within its 0.05."""
+    if not FIXTURE_UMBELUZI.is_file():
+        pytest.skip("the REAL snapshot is git-ignored and not in this copy (ACCESS_NOTES)")
+    doc = json.loads(FIXTURE_UMBELUZI.read_text(encoding="utf-8"))
+    rows = [{"observationDbId": f"O{unit}", "observationUnitDbId": unit, "observationUnitName": f"plot {unit}", "germplasmDbId": entry,
+             "germplasmName": name, "studyDbId": study, "observationVariableDbId": "V1", "observationVariableName": "yield",
+             "observationTimeStamp": "", "value": value, "rep": rep} for study, entry, name, unit, rep, value in doc["plots"]]
+    r = gxe(registry, per_study(registry, rows))
+    assert r.ok, r.error
+    found = {k.transformation.split(" | ")[0]: k.value for k in claims(r)}
+    assert {s: f"{found[f'share of the means-table SS: {s}']:.2f}" for s in doc["check"]["means_table_shares"]} == doc["check"]["means_table_shares"]
+    assert {s: f"{v:.2f}" for s, v in plot_shares(r).items()} == doc["check"]["plot_level_shares"]
+    gold = {"share of the means-table SS: entry": 65.1, "share of the means-table SS: environment": 4.4,
+            "share of the means-table SS: entry x environment": 30.5, "share of the plot-level SS: entry": 55.6,
+            "share of the plot-level SS: environment": 3.8, "share of the plot-level SS: entry x environment": 26.1,
+            "share of the plot-level SS: error (pooled within trials)": 14.4}
+    assert all(abs(found[name] - value) <= 0.05 for name, value in gold.items())
+
+
+def test_no_plot_level_shares_when_a_means_table_sum_is_float_residue(registry):
+    """Reviews of NEXT 8 (made-up input, rule 11: guard + test): values of 1e9 that differ by about 5e-4 leave the means-table sums
+    at float residue, set to 0, while each trial's error and reps come out of its own ANOVA, so the five parts no longer add up to
+    the plot values' total (here 0 / 0 / 0 / 0.2 / 99.8 against an exact 0.1 / 5.4 / 82.6 / 0.0 / 12.0). Not available, with the
+    reason and a warning; so too when only one source is residue (entries 1e-2 apart, environments 5e-4 apart)."""
+    values = {s: {e: [1e9 + 5e-4 * math.sin(1.3 * i + 2.1 * j + 0.7 * k) for k in range(2)] for i, e in enumerate(ENTRIES)}
+              for j, s in enumerate(STUDIES)}
+    one = {s: {e: [1e9 + 1e-2 * G[i] + 5e-4 * ENV[j] + 3e-3 * math.sin(1.7 * i + 2.3 * j + 3.1 * k) for k in range(2)]
+               for i, e in enumerate(ENTRIES)} for j, s in enumerate(STUDIES)}
+    for case in (values, one):
+        r = gxe(registry, [save(registry, rows_of(case))])
+        found = [k for k in claims(r) if k.transformation.startswith("share of the plot-level SS")]
+        assert len(found) == 5 and all(k.value is None and "float residue" in k.missing_reason for k in found)
+        assert any(w.startswith("plot-level shares not given") for w in r.warnings)
+
+
+def test_a_source_that_is_exactly_zero_keeps_the_plot_level_shares(registry):
+    """Review 2 of NEXT 8: equal study means make the environment sum of squares exactly 0; the shares are right and given (the
+    first guard hid them), checked against the plot values themselves."""
+    values = {"S1": {"E0": [1.0, 3.0], "E1": [5.0, 7.0], "E2": [9.0, 12.0]}, "S2": {"E0": [5.0, 7.0], "E1": [9.0, 12.0], "E2": [1.0, 3.0]}}
+    shares = plot_shares(gxe(registry, [save(registry, rows_of(values))]))
+    plots = [v for by in values.values() for vs in by.values() for v in vs]
+    grand = sum(plots) / len(plots)
+    total = sum((v - grand) ** 2 for v in plots)
+    x = expected(values, with_error=False)
+    assert x["ss_env"] == 0.0 and shares["environment"] == 0.0
+    assert shares["entry"] == pytest.approx(100 * 2 * x["ss_entry"] / total, rel=1e-12)
+    assert shares["entry x environment"] == pytest.approx(100 * 2 * x["ss_ge"] / total, rel=1e-12)
+    assert sum(shares.values()) == pytest.approx(100.0, rel=1e-12)
+
+
+def test_no_plot_level_shares_at_the_edge_of_the_float_range(registry):
+    """Review 2 of NEXT 8 (made-up input): values near 1e-161 have squares below the normal float range, and the shares were 0.12 pp
+    off; the parts no longer add up exactly, so they are not given."""
+    tiny = {s: {e: [v * 1e-161 for v in vs] for e, vs in by.items()} for s, by in trial(r=3).items()}
+    found = [k for k in claims(gxe(registry, [save(registry, rows_of(tiny))])) if k.transformation.startswith("share of the plot-level SS")]
+    assert len(found) == 5 and all(k.value is None for k in found)
+
+
+def test_the_chat_line_pairs_each_plot_level_share_with_its_source(tmp_path):
+    """Review of NEXT 8: the line's labels were checked as substrings only (a reps / error swap passed)."""
+    ctx = synthetic_context(cache_dir=tmp_path / "cache", out_dir=tmp_path / "out", run_id="run_gxe_plot_line")
+    r = gxe(ctx.registry, per_study(ctx.registry, rows_of(trial(r=3))))
+    shares = plot_shares(r)
+    text = ", ".join(f"{label} {cp._anova_number(shares[source])} %" for source, label in zip(PLOT_SOURCES, (
+        "environment", "entry", "entry × environment", "reps within environment", "error")))
+    assert f"Shares of the plot-level sum of squares: {text}." in answer(ctx, claims(r))
+
+
+def test_unavailable_plot_level_shares_take_no_place_in_the_coordinators_view(registry):
+    """Review of NEXT 8: not available (no reps), the five plot-level shares sort last, so the coordinator's 20 claims are what they
+    were before them."""
+    import coordination_runtime as cr
+    shown = [k.transformation.split(" | ")[0]
+             for k in cr._view_claims(claims(gxe(registry, [save(registry, rows_of(trial(r=3), reps=False))])), set())]
+    assert not any(name.startswith("share of the plot-level SS") for name in shown) and "means-table ANOVA: ms of environment" in shown
+
+
+def test_two_calls_keep_f_and_p_of_entries_in_the_coordinators_view(registry):
+    """Review of NEXT 8: two gxe_partition calls take turns in the coordinator's 20 claims; the plot-level shares come after the
+    older headline numbers, so each call's F and p of entries stay in view."""
+    import coordination_runtime as cr
+    both = [*claims(gxe(registry, [save(registry, rows_of(trial(r=3)))])), *claims(gxe(registry, [save(registry, rows_of(trial(r=3, g_scale=2.0)))]))]
+    shown = [k.transformation.split(" | ")[0] for k in cr._view_claims(both, set())]
+    assert shown.count("means-table ANOVA: f of entry") == 2 and shown.count("means-table ANOVA: p of entry") == 2
+
+
+def test_the_plot_level_shares_need_a_balanced_rcbd(registry):
+    """No rep on the plots, or an entry x rep cell without a plot: not available, with the reason the variance components give."""
+    values = trial(r=2)
+    for rows, reason in ((rows_of(values, reps=False), "state no rep"), (rows_of(values, drop=(("S1", "E0", 1),)), "have no plot")):
+        found = [k for k in claims(gxe(registry, [save(registry, rows)])) if k.transformation.startswith("share of the plot-level SS")]
+        assert len(found) == 5 and all(k.value is None and reason in k.missing_reason for k in found), reason
+
+
+def test_the_coordinators_view_keeps_the_plot_level_shares(registry):
+    """One gxe_partition call holds 30 claims and the coordinator sees 20 (coordination_runtime.VIEW_CLAIMS): the plot-level shares
+    are headline numbers, so all five are in view."""
+    import coordination_runtime as cr
+    shown = cr._view_claims(claims(gxe(registry, [save(registry, rows_of(trial(r=3)))])), set())
+    assert sum(1 for k in shown if k.transformation.startswith("share of the plot-level SS")) == 5
+
+
+def test_the_answer_and_the_prompts_name_the_plot_level_shares(tmp_path):
+    ctx = synthetic_context(cache_dir=tmp_path / "cache", out_dir=tmp_path / "out", run_id="run_gxe_plot_shares")
+    shown = answer(ctx, claims(gxe(ctx.registry, per_study(ctx.registry, rows_of(trial(r=3))))))
+    assert "Shares of the plot-level sum of squares: environment " in shown and ", reps within environment " in shown and ", error " in shown
+    no_reps = answer(ctx, claims(gxe(ctx.registry, per_study(ctx.registry, rows_of(trial(r=3), reps=False)))))
+    assert "plot-level" not in no_reps                                        # not available: the variance components' reason says why
+    assert "plot-level shares" in " ".join(an.ANALYST_SYSTEM_PROMPT.split()) and "plot-level shares" in " ".join(co.COORDINATOR_SYSTEM_PROMPT.split())

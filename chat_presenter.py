@@ -505,6 +505,11 @@ def _gxe_block(claims: list[Claim], source_labels: dict[tuple[str, ...], str]) -
                   (("environment", "environment"), ("entry", "entry"), ("entry x environment", "entry × environment"))]
         if all(claim is not None and claim.value is not None for _, claim in shares):
             lines.append("Shares of the means-table sum of squares: " + ", ".join(f"{text} {_anova_number(claim.value)} %" for text, claim in shares) + ".")
+        plot_shares = [(text, named.get(f"share of the plot-level SS: {source}")) for source, text in
+                       (("environment", "environment"), ("entry", "entry"), ("entry x environment", "entry × environment"),
+                        ("reps within environment", "reps within environment"), ("error (pooled within trials)", "error"))]
+        if all(claim is not None and claim.value is not None for _, claim in plot_shares):             # balanced r-rep sets (D16.3)
+            lines.append("Shares of the plot-level sum of squares: " + ", ".join(f"{text} {_anova_number(claim.value)} %" for text, claim in plot_shares) + ".")
         lines.append("F for entries is tested against entry × environment (environments random).")
         grand = named.get("grand mean of the entry means")
         if grand is not None and grand.value is not None:

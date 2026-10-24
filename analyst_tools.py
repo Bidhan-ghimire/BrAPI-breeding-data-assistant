@@ -2463,6 +2463,7 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
 # E17.3 and E17.5 need it.
 GXE_NOTE = "descriptive partition of recorded entry means across trials, not a recommendation"
 GXE_SOURCES = ("environment", "entry", "entry x environment")
+GXE_PLOT_SOURCES = (*GXE_SOURCES, "reps within environment", "error (pooled within trials)")   # the plot-level shares (D16.3)
 GXE_ZERO = "the entry x environment mean square is 0: the entry means are exactly additive, so F is undefined"
 GXE_H2_TEXT = ("across-environment entry-mean heritability H2 = 1 - MS entry x environment / MS entry of the means table (on balanced "
                "data, and when no variance component is set to 0, equal to sigma2 g / (sigma2 g + sigma2 ge / e + sigma2 e / (r e))); "
@@ -2504,7 +2505,9 @@ def tool_gxe_partition(registry: ArtifactRegistry, a: GxePartitionArgs) -> ToolR
     (plot_design's tables) and every study is a complete RCBD of the kept entries with the same r: the pooled within-trial
     error mean square and the variance components on the means scale, sigma2 e (pooled), sigma2 ge = MS entry x environment -
     sigma2 e / r, sigma2 g = (MS entry - MS entry x environment) / studies (each set to 0 and flagged when negative), and
-    r_B = sigma2 g / (sigma2 g + sigma2 ge); otherwise they are not available, with the reason (a mixed model would be needed).
+    r_B = sigma2 g / (sigma2 g + sigma2 ge), and the shares of the plot values' total sum of squares: environment, entry and entry
+    x environment (r x the means-table sums), reps within environment and the pooled error; otherwise they are not available,
+    with the reason (a mixed model would be needed).
     Input: one table per study, or one table holding several studies (concat_tables). Refused, never guessed: fewer than 2
     studies, fewer than 2 entries with a mean in every study, more than one variable, the same table twice, a plot in two
     tables, several values of one plot unless duplicate_policy='mean_per_unit'. Descriptive numbers of recorded values, never
@@ -2647,7 +2650,7 @@ def tool_gxe_partition(registry: ArtifactRegistry, a: GxePartitionArgs) -> ToolR
     h2 = 0.0 if h2_set_to_zero else h2_raw
 
     vc: dict[str, Any] = {"available": False, "reason": None, "r": None, "df_error": None, "sigma2_e": None, "sigma2_ge": None, "sigma2_g": None,
-                          "r_b": None, "h2_long_form": None, "sigma2_g_set_to_zero": False, "sigma2_ge_set_to_zero": False}
+                          "r_b": None, "h2_long_form": None, "sigma2_g_set_to_zero": False, "sigma2_ge_set_to_zero": False, "plot_ss": None}
     kept_set = set(kept)
     in_partition = [p for p in plots if p[1] in kept_set]
     if not all(a.rep in table.manifest.columns for table in tables) or any(not plot[4] for plot in in_partition):
@@ -2689,11 +2692,15 @@ def tool_gxe_partition(registry: ArtifactRegistry, a: GxePartitionArgs) -> ToolR
                             f"{'; ...' if len(missing) > 10 else ''}): the variance components need a mixed model (REML); {stands}")
         else:
             r = len(reps_of[studies[0]])
-            ss_e = df_e = 0.0
+            ss_e = df_e = ss_rep = 0.0
             for study in studies:
                 result = _anova([(entry, rep, value) for entry, rep, value in per_study[study]])
                 ss_e += next(row["ss"] for row in result.rows if row["source"] == "error")
+                ss_rep += next(row["ss"] for row in result.rows if row["source"] == "rep")
                 df_e += result.df_error
+            # the plot values' total sum of squares, balanced: r x each means-table sum, the reps within each study and the error
+            vc["plot_ss"] = {**{source: r * ss[source] for source in GXE_SOURCES}, "reps within environment": ss_rep,
+                             "error (pooled within trials)": ss_e}
             s2e = ss_e / df_e
             s2ge_raw = ms["entry x environment"] - s2e / r
             s2g_raw = (ms["entry"] - ms["entry x environment"]) / e
@@ -2733,6 +2740,25 @@ def tool_gxe_partition(registry: ArtifactRegistry, a: GxePartitionArgs) -> ToolR
         claims.append(Claim(claim_id=_claim_id(aid, "ratio", "share", source, namespace=namespace), kind="ratio", value=shares[source], unit="%",
                             missing_reason=None if shares[source] is not None else "all entry means are equal: no sum of squares to share",
                             transformation=f"share of the means-table SS: {source}{tail}", **common))
+    # the five parts must add up to the plot values' own total sum of squares: a means-table sum the residue rule set to 0, or squares
+    # at the edge of the float range, break that, and then the shares are not given; a source that is exactly 0 keeps them (review 2)
+    parts_total = math.fsum(vc["plot_ss"].values()) if vc["plot_ss"] else 0.0
+    if vc["plot_ss"]:
+        plot_centre = math.fsum(plot[3] for plot in in_partition) / len(in_partition)
+        own_total = math.fsum((plot[3] - plot_centre) ** 2 for plot in in_partition)
+        adds_up = abs(parts_total - own_total) <= 1e-5 * own_total
+    plot_reason = (vc["reason"] if not vc["plot_ss"] else None if adds_up else
+                   "the five parts do not add up to the plot values' total sum of squares (float residue at this scale): the plot-level "
+                   "shares are not given")
+    plot_total = parts_total if vc["plot_ss"] and adds_up else 0.0
+    plots_in = {**common, "denominator": Denominator(name="plots in the partition (entries x studies x reps)", n=len(in_partition))}
+    for source in GXE_PLOT_SOURCES:
+        value = 100 * vc["plot_ss"][source] / plot_total if plot_total > 0 else None
+        claims.append(Claim(claim_id=_claim_id(aid, "ratio", "plot-share", source, namespace=namespace), kind="ratio", value=value, unit="%",
+                            missing_reason=None if value is not None else (plot_reason or "all plot values are equal: no sum of squares to share"),
+                            transformation=f"share of the plot-level SS: {source}{tail}" + (f" | r = {vc['r']}" if vc["available"] else "")
+                                           + (f" | {vc['note']}" if vc.get("note") else ""),
+                            **plots_in))
     claims.append(Claim(claim_id=_claim_id(aid, "mean", "grand", namespace=namespace), kind="mean", value=grand, unit=unit,
                         transformation=f"grand mean of the entry means{tail}", **common))
     flag = " | MS entry is below MS entry x environment: set to 0" if h2_set_to_zero else ""
@@ -2761,8 +2787,10 @@ def tool_gxe_partition(registry: ArtifactRegistry, a: GxePartitionArgs) -> ToolR
         "across-environment entry-mean heritability H2", "genotype variance sigma2 g", "genotype x environment variance sigma2 ge",
         "error variance sigma2 e (pooled within trials)", "type-B genetic correlation r_B = sigma2 g / (sigma2 g + sigma2 ge)",
         *(f"share of the means-table SS: {source}" for source in GXE_SOURCES), "means-table ANOVA: f of entry", "means-table ANOVA: p of entry",
-        "means-table ANOVA: ms of entry", "means-table ANOVA: ms of entry x environment", "grand mean of the entry means"))}
-    claims.sort(key=lambda claim: headline.get(claim.transformation.split(" | ")[0], len(headline)))
+        "means-table ANOVA: ms of entry", "means-table ANOVA: ms of entry x environment", "grand mean of the entry means",
+        *(f"share of the plot-level SS: {source}" for source in GXE_PLOT_SOURCES)))}    # after the older headline numbers (review)
+    claims.sort(key=lambda claim: len(headline) if claim.value is None and claim.transformation.startswith("share of the plot-level SS")
+                else headline.get(claim.transformation.split(" | ")[0], len(headline)))       # not available: last
 
     left = dict(dropped)
     result_rows = [{"entry": entry, "label": "; ".join(sorted(labels.get(entry, ()))), "study": study,
@@ -2784,6 +2812,8 @@ def tool_gxe_partition(registry: ArtifactRegistry, a: GxePartitionArgs) -> ToolR
         warnings.append(f"variance components not given: {vc['reason']}")
     elif vc.get("note"):
         warnings.append(vc["note"])
+    if vc["plot_ss"] and plot_reason:
+        warnings.append(f"plot-level shares not given: {plot_reason}")
     if h2_set_to_zero:
         warnings.append("MS entry is below MS entry x environment: the across-environment heritability is set to 0")
     if not units_known:

@@ -57,8 +57,8 @@ Rules:
    them (a name not in their words is refused), never entries you choose; it refuses an entry with several plots in one rep:
    only when the person's own words state the rule pass cells="mean" (the mean of the cell's plots) or cells="single_only" (only
    the entries with exactly one plot in every rep), never choose one yourself; for the genotype x environment partition of one trait across several
-   studies call gxe_partition(artifact_ids=[each study's table]) (plot_design's tables add the pooled error and the variance
-   components); for the change of one trait between two studies on the entries in both (the two trial means, the
+   studies call gxe_partition(artifact_ids=[each study's table]) (plot_design's tables add the pooled error, the variance
+   components and the plot-level shares); for the change of one trait between two studies on the entries in both (the two trial means, the
    difference, the percent change or reduction, the paired t, Welch's t, the correlation between the trials) call
    compare_trials_paired(base_artifact_id=<the reference study's table>, other_artifact_id=<the other study's table>,
    percent="change" (other - base) or "reduction" (base - other) as the question words it; a t-test asked as "A vs B" or "A

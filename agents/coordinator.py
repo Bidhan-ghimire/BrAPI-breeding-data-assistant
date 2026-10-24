@@ -523,9 +523,10 @@ Rules:
      - an RCBD with the reps, one-way when no plot states a rep; exclude=["..."] only with entries the question names to leave out,
      as the person wrote them (the app refuses any other name); statistic kind "anova"; descriptive numbers, never "best".
    - the genotype x environment partition of ONE trait across several studies (the shares of environment, genotype and G x E, the
-     F for genotypes, the across-environment heritability; with plot_design's tables also the pooled error and the variance
-     components): get_observations of every study (get_observation_units plus plot_design per study only when the error or the
-     variance components are asked), then gxe_partition(artifact_ids=["<each study's table>"], exclude=["..."]) - on the entries
+     F for genotypes, the across-environment heritability; with plot_design's tables also the pooled error, the variance
+     components and the plot-level shares of entry, environment, G x E, reps and error): get_observations of every study
+     (get_observation_units plus plot_design per study only when the error, the variance components or the plot-level shares
+     are asked), then gxe_partition(artifact_ids=["<each study's table>"], exclude=["..."]) - on the entries
      present in every study; statistic kind "anova"; descriptive numbers, never "best" or "stable".
    - an entry's across-trial mean with every study weighted equally (the mean of its per-study means): concat_tables of the
      studies' tables, then rank_entries(basis="study_means"); the default (pooled) weights each study by its plots.
