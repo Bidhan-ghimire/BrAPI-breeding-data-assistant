@@ -119,6 +119,12 @@ _LABEL_KEYS = {"study": "studyName", "variable": "observationVariableName", "loc
 _INSTRUCTION_LIKE = re.compile(r"ignore (all |the )?(previous|prior|above) instructions|system prompt|you are now|disregard", re.IGNORECASE)
 
 
+def empty_table_note(study: str, variable: str) -> str:
+    """The report's line for a planned variable whose measurement table was read in full and holds no value (Bidhan, 2026-10-24,
+    item 21: ApprovedTools.accept_empty); the chat names such a table with this line only (chat_presenter._empty_tables)."""
+    return f"Study {study}, variable {variable}: 0 values recorded (the table was read in full)."
+
+
 @dataclass(frozen=True)
 class PlannedFetches:
     """What the approved plan asks the Retriever to fetch (plan_permissions.required_fetches, its catalog exports, and the retriever
@@ -142,6 +148,7 @@ class ApprovedTools:
         self.records: list[ToolRecord] = []
         self.fetched_studies: set[str] = set()
         self.seen: dict[str, dict[str, str | None]] = {kind: {} for kind in _ID_KEYS}   # kind -> id -> label
+        self.empty_planned: list[tuple[str, str]] = []     # (study, variable): planned, read in full, no value (item 21)
 
     async def schemas(self) -> list[dict[str, Any]]:
         return await self.inner.schemas()
@@ -182,7 +189,27 @@ class ApprovedTools:
         result = await self.inner.call(name, args)
         self.records.append(ToolRecord(name, args, result))
         self._harvest(name, result)
+        self.accept_empty(name, args, result)
         return result
+
+    def accept_empty(self, name: str, args: dict[str, Any], result: ToolResult) -> None:
+        """A variable with no value is in no row, so no tool returns its ID, and the guard refused a whole retrieval for it (E14.4:
+        iron by NIRS or by ICP, "whichever the study records"; 77012 had no value). Bidhan, 2026-10-24 (item 21): it counts as
+        returned only when the plan asked for this study's measurements of it and the table was read in full (every page;
+        brapi_client's status "empty") and is registered with no row; the report then names it (empty_table_note)."""
+        study, variable = args.get("study_db_id"), args.get("variable_db_id")
+        if (name != "get_observations" or self.planned is None or not isinstance(study, str) or not isinstance(variable, str)
+                or (study, variable) not in self.planned.observation_pairs or not result.ok or result.complete is not True):
+            return
+        registered = set(self.ctx.registry.artifact_ids())
+        for artifact_id in result.artifact_ids:
+            manifest = self.ctx.registry.manifest(artifact_id) if artifact_id in registered else None
+            if (manifest is not None and manifest.kind == "observations" and manifest.complete and manifest.row_count == 0
+                    and manifest.study_ids == [study] and manifest.variable_ids == [variable]):
+                self.seen["variable"].setdefault(variable, None)
+                if (study, variable) not in self.empty_planned:
+                    self.empty_planned.append((study, variable))
+                return
 
     def _harvest(self, name: str, result: ToolResult) -> None:
         """Remember every ID (with its label) that a tool actually returned. Labels are data."""
@@ -505,6 +532,9 @@ def build_report(agent: AgentResult, tools: ApprovedTools, ctx: ToolContext, *, 
         remainder = f"; and {len(missing_fetches) - 20} more" if len(missing_fetches) > 20 else ""
         warnings.append(f"planned fetches lack complete evidence ({len(missing_fetches)}): {shown}{remainder}")
         return finish("incomplete", resolved, False)
+    # item 21: a completed retrieval names each planned table read in full with no value; a failed, blocked or incomplete one does
+    # not list it among its reasons (review of item 21)
+    warnings.extend(empty_table_note(study, variable) for study, variable in getattr(tools, "empty_planned", ()))
     return finish("completed", resolved, True)
 
 

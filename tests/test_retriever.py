@@ -277,6 +277,68 @@ def test_model_cannot_smuggle_an_approval_through_tool_arguments(tmp_path):
 
 # --- 8. invented IDs and malformed payloads fail the run --------------------------------------
 
+EMPTY_NOTE = "Study S1, variable 77012: 0 values recorded (the table was read in full)."
+
+
+def run_iron_plan(tmp_path, pairs, *, empty_reply, declared=()):
+    """E14.4's shape (item 21): the plan fetches S1's V1 (with values) and 77012 (no value); the Retriever names both variables
+    (and the `declared` entries too). pairs=None: a run without a plan."""
+    ctx = make_ctx(tmp_path, "run_retr")
+    put_reply(tmp_path, *empty_reply)
+    resolved = [{"kind": "study", "id": "S1"}, {"kind": "variable", "id": "V1"}, {"kind": "variable", "id": "77012"}, *declared]
+    model = FakeModelClient([
+        reply_tools([("get_observations", json.dumps({"study_db_id": "S1", "variable_db_id": "V1"}))]),
+        reply_tools([("get_observations", json.dumps({"study_db_id": "S1", "variable_db_id": "77012"}))]),
+        reply_text(json.dumps({"status": "completed", "payload": {"resolved": resolved, "studies": ["S1"], "notes": []}})),
+    ], reported_model="mock-model")
+    plan = None if pairs is None else rt.PlannedFetches(observation_pairs=frozenset(pairs), actions=frozenset({"get_observations"}))
+
+    async def go():
+        return await rt.run_retriever("Fetch S1 V1 and 77012.", model=model, ctx=ctx,
+                                      approval=synthetic_approval(run_id="run_retr", variables=["V1", "77012"]), budget=Budget(),
+                                      run_id="run_retr", log_dir=tmp_path / "out", planned=plan)
+
+    report, _agent = anyio.run(go)
+    return report
+
+
+def test_a_planned_variable_with_0_values_in_a_fully_read_table_counts_as_returned(tmp_path):
+    """Item 21 (E14.4: iron "by NIRS or by ICP, whichever the study records"; 77012 had no value in either study, so no tool
+    returned its ID and the guard refused the whole retrieval). Planned and read in full: it counts, and the report says so."""
+    report = run_iron_plan(tmp_path, {("S1", "V1"), ("S1", "77012")}, empty_reply=empty_observations("S1", "77012"))
+    assert report.status == "completed" and report.complete, report.warnings
+    assert [(r.kind, r.id) for r in report.resolved] == [("study", "S1"), ("variable", "V1"), ("variable", "77012")]
+    assert [w for w in report.warnings if "0 values recorded" in w] == [EMPTY_NOTE]      # V1 has values: not named
+    assert [a.row_count for a in report.artifacts if a.variable_ids == ["77012"]] == [0]
+
+
+def test_an_empty_table_not_read_in_full_or_not_planned_is_still_refused(tmp_path):
+    """The guard is otherwise unchanged: an empty first page of a larger table, or an empty table of a variable the plan did not
+    ask for, does not count as returned."""
+    params = {"studyDbId": "S1", "observationVariableDbId": "77012", "page": 0, "pageSize": 1000}
+    partial = ("/observations", params, {"_synthetic": True, "metadata": {"synthetic": True, "pagination": {
+        "currentPage": 0, "pageSize": 1000, "totalCount": 5000, "totalPages": 5}}, "result": {"data": []}})
+    for pairs, reply, case in (({("S1", "V1"), ("S1", "77012")}, partial, "not read in full"),
+                               ({("S1", "V1")}, empty_observations("S1", "77012"), "not planned"),
+                               (None, empty_observations("S1", "77012"), "no plan")):
+        report = run_iron_plan(tmp_path / case.replace(" ", "_"), pairs, empty_reply=reply)
+        assert report.status == "failed", case
+        assert "model declared IDs that no tool returned: ['variable 77012']" in report.warnings, case
+        assert EMPTY_NOTE not in report.warnings, case
+
+
+def test_the_0_values_line_is_written_for_a_completed_retrieval_only(tmp_path):
+    """Review of item 21 (M9, NIT 3): the line names the table in a completed retrieval's answer; a run the guard fails for another
+    ID, or a retrieval left incomplete by another planned fetch, does not list it among its reasons."""
+    planned_pairs = {("S1", "V1"), ("S1", "77012")}
+    failed = run_iron_plan(tmp_path / "failed", planned_pairs, empty_reply=empty_observations("S1", "77012"),
+                           declared=[{"kind": "variable", "id": "V999"}])
+    assert failed.status == "failed" and "model declared IDs that no tool returned: ['variable V999']" in failed.warnings
+    unfetched = run_iron_plan(tmp_path / "incomplete", planned_pairs | {("S1", "V2")}, empty_reply=empty_observations("S1", "77012"))
+    assert unfetched.status == "incomplete" and any("planned fetches lack complete evidence" in w for w in unfetched.warnings)
+    assert EMPTY_NOTE not in failed.warnings and EMPTY_NOTE not in unfetched.warnings
+
+
 def test_invented_id_fails_the_run(tmp_path):
     model = FakeModelClient([
         reply_tools([("search_studies", json.dumps({"name_contains": "S1"}))]),

@@ -181,3 +181,32 @@ def test_catalog_approval_does_not_imply_observation_permission():
     assert "no observation requests" in shown and "prepared during this question" in shown
     assert "Matched studies: 12" in shown and "2 additional matched IDs are not shown here" in shown
     assert "0 observation studies" in shown and "**Observation scope**" not in shown
+
+
+def test_an_empty_table_named_by_the_retriever_is_said_once():
+    """Item 21: the Retriever's "0 values recorded" line names a planned empty table read in full; the empty-table line of code
+    leaves that table out, so the answer says it once."""
+    from types import SimpleNamespace as NS
+
+    table = NS(kind="observations", row_count=0, study_ids=["S1"], variable_ids=["77012"], complete=True)
+    same_variable = NS(kind="observations", row_count=0, study_ids=["S2"], variable_ids=["77012"], complete=True)
+    same_study = NS(kind="observations", row_count=0, study_ids=["S1"], variable_ids=["V1"], complete=True)
+    view = NS(retrieval=NS(artifacts=[table, same_variable, same_study],
+                           warnings=["Study S1, variable 77012: 0 values recorded (the table was read in full)."]))
+    assert cp._empty_tables(view) == [cp._text("Study S2, variable 77012: no rows were returned."),     # the line names one table:
+                                      cp._text("Study S1, variable V1: no rows were returned.")]       # its study AND its variable
+
+
+def test_the_answer_names_a_planned_empty_table_once(tmp_path):
+    """Review of item 21 (SHOULD-FIX 2): the answer the person reads, from a real Retriever report of E14.4's shape, shows the
+    "0 values recorded" line once and no "no rows were returned" line for that table."""
+    from test_retriever import EMPTY_NOTE, empty_observations, run_iron_plan
+
+    report = run_iron_plan(tmp_path, {("S1", "V1"), ("S1", "77012")}, empty_reply=empty_observations("S1", "77012"))
+    view = SimpleNamespace(execution_status="completed", analysis=AnalysisReport(status="completed", claims=[numeric_claim()], caveats=[]),
+                           retrieval=report, plan=SimpleNamespace(question="What is the mean of V1 in study S1?",
+                                                                  statistic=SimpleNamespace(kind="mean")),
+                           ctx=None, notes=[], base_url="https://synthetic.invalid/brapi/v2")
+    shown = cp.answer_summary(view)
+    assert report.status == "completed" and shown.count(cp._text(EMPTY_NOTE)) == 1
+    assert "variable 77012: no rows were returned" not in shown

@@ -13,6 +13,7 @@ from catalog_answers import plain_reason as catalog_plain
 from contracts import Claim
 from metadata_answers import plain_reason as metadata_plain, render_metadata_facts
 from agents.coordinator import person_words
+from agents.retriever import empty_table_note
 from run import approval_lead, carried_over_line, required_fetches, scope_needs_a_check, source_host
 
 
@@ -983,11 +984,17 @@ def _ledger_reasons(controller: Any) -> list[str]:
 
 
 def _empty_tables(controller: Any) -> list[str]:
-    """Each saved measurement table with no rows: complete-empty is complete evidence, so no warning is written for it."""
+    """Each saved measurement table with no rows: complete-empty is complete evidence, so no warning is written for it. A table
+    the Retriever's "0 values recorded" line already names (a planned variable, item 21) is left out: the answer says it once."""
     lines = []
-    for artifact in getattr(getattr(controller, "retrieval", None), "artifacts", None) or []:
+    retrieval = getattr(controller, "retrieval", None)
+    named = set(getattr(retrieval, "warnings", None) or [])
+    for artifact in getattr(retrieval, "artifacts", None) or []:
         kind = getattr(artifact, "kind", None)
         if kind not in ("observations", "observation_units") or getattr(artifact, "row_count", None) != 0:
+            continue
+        studies, variable_ids = getattr(artifact, "study_ids", None) or [], getattr(artifact, "variable_ids", None) or []
+        if kind == "observations" and len(studies) == len(variable_ids) == 1 and empty_table_note(studies[0], variable_ids[0]) in named:
             continue
         variables = ", ".join(getattr(artifact, "variable_ids", None) or [])
         what = f"Study {', '.join(getattr(artifact, 'study_ids', None) or []) or '(not stated)'}" + (f", variable {variables}" if variables else "")
