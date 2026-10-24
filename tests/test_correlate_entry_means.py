@@ -201,7 +201,7 @@ def test_the_answer_shows_the_correlation_table_the_tables_and_the_descriptive_s
     assert "| Method | Correlation | n |" in shown and "| Pearson r | 0.7359 | 5 |" in shown and "| Spearman rho | 0.9 | 5 |" in shown
     assert "x: SYNTHETIC yield \\(t/ha\\) in study S1; 6 entries with a mean; y: SYNTHETIC yield \\(t/ha\\) in study S2; 7 entries with a mean; " \
            "entries: in every study of each table." in shown                                      # which tables, which rule
-    assert "Left out: only in x 1; only in y 2." in shown
+    assert "Left out: only in x \\(Only-x\\) 1; only in y \\(Only-y, Only-y-too\\) 2." in shown    # the entries named (GAP 2)
     assert "Descriptive numbers only: a correlation of recorded entry means, not a recommendation." in shown
     assert "| Statistic | Result |" not in shown                                                 # not shown again as plain statistics
 
@@ -416,10 +416,10 @@ def test_excluded_names_without_a_mean_are_named_but_not_counted_as_removed(regi
     rows = [row("u1", "A", "A", "1"), row("u2", "B", "B", "2"), row("u3", "C", "C", "3"), row("u4", "D", "D", "4"), row("u5", "Z", "Zed", "NA")]
     r = correlate(registry, save_rows(registry, rows, ["S1"]), save(registry, Y, study="S2"), exclude=["Zed"])
     assert r.ok and r.data["left_out"]["excluded"] == 0 and r.data["excluded_named"] == ["Z"]
-    assert not any(e.reason == "entries left out: excluded" for e in claims(r)[0].exclusions)              # the claim agrees: none removed
+    assert not any(e.reason.startswith("entries left out: excluded") for e in claims(r)[0].exclusions)    # the claim agrees: none removed
     only_y = correlate(registry, save(registry, X), save(registry, Y, study="S2"), exclude=["Only-y"])      # G has a mean in y only
     assert only_y.ok and only_y.data["left_out"]["excluded"] == 1 and only_y.data["unpaired"] == {"only in x": 1, "only in y": 1}
-    assert any(e.reason == "entries left out: excluded" and e.count == 1 for e in claims(only_y)[0].exclusions)
+    assert any(e.reason == "entries left out: excluded (Only-y)" and e.count == 1 for e in claims(only_y)[0].exclusions)   # named (GAP 2)
 
 
 def test_the_dropped_reason_names_the_table_that_lacks_the_entry(registry):

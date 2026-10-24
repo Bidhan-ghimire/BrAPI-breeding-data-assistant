@@ -254,10 +254,57 @@ def _classify(table: Table, value_col: str) -> Classified:
     return Classified(valid, n_missing, n_invalid, len(table.rows), units_known, rep_obs, rep_meas, note)
 
 
-def _apply_duplicate_policy(table: Table, classified: Classified, policy: str) -> tuple[list[tuple[dict[str, str], float]], str]:
-    """Return (rows-with-values to analyse, transformation text). Refuses duplicates unless a rule is named."""
+ROWS_NOTE = "rows: "    # what one row of a derived table is (coach 2026-10-24 12:50 UTC, GAP 1): group_stats writes it, filter_rows
+                        # and concat_tables carry it, _row_unit reads it
+GROUP_VALUE_WORDS = {"mean": "means", "median": "medians", "min": "minima", "max": "maxima", "sd": "SDs"}
+NAMED_ENTRIES = 10      # GAP 2: an exclusion names up to ten entries; above that the first ten and "and N more"
+NAME_CHARS = 80         # ... each name cut to 80 characters (review: a 400-character name made every reason 450 long)
+_STACKED_GROUPS = re.compile(r"group_stats by ([^,\s]+), from (\d+) stacked tables")
+
+
+def _row_unit(table: Table, value: str | None = None, rows: list[dict[str, str]] | None = None) -> str:
+    """What one row of the table is, for the transformation text (Luna A42.4: a mean of 315 genotype means read "one row per
+    observation unit", and the coordinator stopped it as a mean over plot rows). A group_stats table, also filtered: "one row
+    per <by>; values are group means" (medians, ... by the value column); stacked from several such tables: "one row per <by>
+    in each of the N stacked tables" (review: two studies' tables of the same clones are 6 rows of 3 IDs); rows that are units:
+    "one row per observation unit", when no unit has several of the rows used (review: one plot measured twice); any other
+    table: not recorded, never units."""
+    noted = list(dict.fromkeys(n[len(ROWS_NOTE):] for n in table.manifest.quality_notes if n.startswith(ROWS_NOTE)))
+    if len(noted) == 1 and noted[0].startswith("group_stats by "):
+        stacked = _STACKED_GROUPS.fullmatch(noted[0])
+        by, word = (stacked[1] if stacked else noted[0][len("group_stats by "):]), GROUP_VALUE_WORDS.get(value or "")
+        values = f"values are group {word}" if word else "values are group statistics"
+        return f"one row per {by} in each of the {stacked[2]} stacked tables; {values}" if stacked else f"one row per {by}; {values}"
+    if noted:
+        return "; ".join(noted)
+    if UNIT_COL in table.manifest.columns:
+        units = [row.get(UNIT_COL, "") for row in rows] if rows is not None else []
+        if not all(units):                           # review 2: blank IDs are unknown units, not one unit
+            return "one row per observation; some rows name no observation unit"
+        if len(set(units)) < len(units):
+            return "one row per observation; some observation units have several"
+        return "one row per observation unit"
+    return "what one row stands for is not recorded"
+
+
+def _short(name: str) -> str:
+    return name if len(name) <= NAME_CHARS else name[:NAME_CHARS - 1] + "\u2026"
+
+
+def _named_reason(reason: str, entries: Iterable[str], label: dict[str, str]) -> str:
+    """An exclusion's reason with the entries it counts named, by their names in the tables (else their IDs), so the reader
+    can see which went (coach 2026-10-24 12:50 UTC, GAP 2; Luna E13.4: "entries only in y", 1 was the check CIP199062.1)."""
+    names = sorted(_short(label.get(entry) or entry) for entry in entries)
+    more = f" and {len(names) - NAMED_ENTRIES} more" if len(names) > NAMED_ENTRIES else ""
+    return f"{reason} ({', '.join(names[:NAMED_ENTRIES])}{more})"
+
+
+def _apply_duplicate_policy(table: Table, classified: Classified, policy: str,
+                            value: str | None = None) -> tuple[list[tuple[dict[str, str], float]], str]:
+    """Return (rows-with-values to analyse, transformation text). Refuses duplicates unless a rule is named. value: the value
+    column, which names what a group_stats table's values are."""
     if not (classified.repeated_observation_ids or classified.repeated_measurements):
-        return classified.valid, "valid values used as recorded (one row per observation unit)"
+        return classified.valid, f"valid values used as recorded ({_row_unit(table, value, [row for row, _ in classified.valid])})"
     if policy == "reject":
         raise AnalystError("unsupported", f"{table.manifest.artifact_id}: {classified.duplicate_note}")
     if not classified.units_known:
@@ -705,12 +752,14 @@ def tool_numeric_summary(registry: ArtifactRegistry, a: NumericSummaryArgs) -> T
     caveat = _completeness_gate(table, a.allow_incomplete)
     variable = _single_variable(table)
     classified = _classify(table, a.value)
-    used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy)
+    used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy, value=a.value)
     if caveat:
         transformation = f"{caveat}; {transformation}"
     unit = table.manifest.measurement.unit
     averaged = len(used) != len(classified.valid)                       # duplicate_policy=mean_per_unit merged rows
+    repeated_units = classified.units_known and len({row.get(UNIT_COL, "") for row, _ in used}) < len(used)    # review 2
     denominator_name = (f"observation units ({PER_UNIT})" if averaged else
+                        "valid numeric values (rows; some observation units have several)" if repeated_units else
                         "valid numeric values, one per observation unit" if classified.units_known else "valid numeric values (rows; independence unknown)")
     filters_note = _filters_applied(table.manifest)
     if filters_note:
@@ -802,7 +851,7 @@ def tool_group_stats(registry: ArtifactRegistry, a: GroupStatsArgs) -> ToolResul
     caveat = _completeness_gate(table, a.allow_incomplete)
     variable = _single_variable(table)
     classified = _classify(table, a.value)
-    used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy)
+    used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy, value=a.value)
     if caveat:
         transformation = f"{caveat}; {transformation}"
     unit = table.manifest.measurement.unit
@@ -820,6 +869,7 @@ def tool_group_stats(registry: ArtifactRegistry, a: GroupStatsArgs) -> ToolResul
     ties = [t for t in tie_groups if len(t) > 1]
 
     lineage = [f"lineage: group_stats by {a.by} on {table.manifest.artifact_id} sha256={table.manifest.sha256}",
+               f"{ROWS_NOTE}group_stats by {a.by}",                             # GAP 1: one row per group
                f"transformation: {transformation}", f"min_independent_n={a.min_independent_n} (exclusion threshold)",
                f"rows with an empty {a.by}: {no_group_rows} (excluded, not dropped silently)", f"analysis target: {ANALYSIS_TARGET}"]
     text_rows = [{**g, "included": "true" if g["included"] else "false",
@@ -913,7 +963,8 @@ def tool_filter_rows(registry: ArtifactRegistry, a: FilterRowsArgs) -> ToolResul
     description = f"filter_rows: {a.column} {a.op} {needle!r}"
     earlier = [note for note in table.manifest.quality_notes if _FILTER_LINEAGE.fullmatch(note)]   # a filter on a filtered table
     lineage = [*earlier, f"lineage: {description} on {table.manifest.artifact_id} sha256={table.manifest.sha256}",
-               f"rows in: {len(table.rows)}, rows kept: {len(kept)}, rows without a valid number to compare: {dropped_non_numeric}"]
+               f"rows in: {len(table.rows)}, rows kept: {len(kept)}, rows without a valid number to compare: {dropped_non_numeric}",
+               *[note for note in table.manifest.quality_notes if note.startswith(ROWS_NOTE)]]      # GAP 1: the same row unit
     membership_incomplete = bool(unknown_cells and a.column in {"programDbId", "programName"})
     warnings = ([f"{unknown_cells} of {len(table.rows)} catalog rows have no {a.column}; {len(kept)} known matches were found, "
                  "but the full matching count is unknown. Counts describe recorded matches only."
@@ -966,6 +1017,14 @@ def tool_concat_tables(registry: ArtifactRegistry, a: ConcatTablesArgs) -> ToolR
     study_ids = list(dict.fromkeys(s for t in tables for s in t.manifest.study_ids))
     request_ids = list(dict.fromkeys(r for t in tables for r in t.manifest.source_request_ids))
     lineage = [f"lineage: concat_tables of {t.manifest.artifact_id} sha256={t.manifest.sha256} rows={t.manifest.row_count} complete={t.manifest.complete}" for t in tables]
+    kinds = [tuple(n for n in t.manifest.quality_notes if n.startswith(ROWS_NOTE)) for t in tables]
+    if len(set(kinds)) == 1:                         # GAP 1: one row unit in every table (none written: the columns say it)
+        lineage += [f"{note}, from {len(tables)} stacked tables" if note.startswith(f"{ROWS_NOTE}group_stats by ") and len(tables) > 1
+                    else note for note in kinds[0]]  # review: per-table group rows of the same clones repeat their IDs
+    else:
+        described = [" / ".join(n[len(ROWS_NOTE):] for n in k) or ("observation units" if UNIT_COL in t.manifest.columns else "rows not recorded")
+                     for t, k in zip(tables, kinds)]
+        lineage.append(f"{ROWS_NOTE}stacked rows of different kinds ({' | '.join(dict.fromkeys(described))})")
     repeated = 0
     if OBS_ID_COL in columns:
         counts = Counter(r.get(OBS_ID_COL, "") for r in rows if r.get(OBS_ID_COL, ""))
@@ -1225,7 +1284,7 @@ def tool_rank_entries(registry: ArtifactRegistry, a: RankEntriesArgs) -> ToolRes
     if both:
         raise AnalystError("invalid_argument", f"{both} are both named and left out; an entry is either ranked or left out")
     classified = _classify(table, a.value)
-    used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy)
+    used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy, value=a.value)
     if caveat:
         transformation = f"{caveat}; {transformation}"
     unit = table.manifest.measurement.unit
@@ -1391,7 +1450,7 @@ def tool_threshold_count(registry: ArtifactRegistry, a: ThresholdCountArgs) -> T
     if both:
         raise AnalystError("invalid_argument", f"{both} are both threshold entries and left out; give each entry one role")
     classified = _classify(table, a.value)
-    used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy)
+    used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy, value=a.value)
     if caveat:
         transformation = f"{caveat}; {transformation}"
     unit = table.manifest.measurement.unit
@@ -1581,7 +1640,7 @@ def _entry_means(table: Table, a: CorrelateEntryMeansArgs, label_col: str | None
     if big >= 1e200:                                      # review: sums of such values overflow inside a mean (also when duplicates are averaged); refuse, never crash
         raise AnalystError("unsupported", f"{table.manifest.artifact_id} holds a value of 1e200 or more in absolute value ({big!r}); "
                                           "entry means of such values are not computed")
-    used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy)
+    used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy, value=a.value)
     if caveat:
         transformation = f"{caveat}; {transformation}"
     labels: dict[str, set[str]] = {}
@@ -1740,12 +1799,15 @@ def tool_correlate_entry_means(registry: ArtifactRegistry, a: CorrelateEntryMean
         if e.no_entry_values:                                 # T4 review F2: a valid value without an entry ID is counted
             exclusions.append(Exclusion(reason=f"{side}: rows with an empty {a.by}", count=e.no_entry_values))
         if e.not_in_every_study:
-            exclusions.append(Exclusion(reason=f"entries not in every study of {side}", count=e.not_in_every_study))
+            exclusions.append(Exclusion(reason=_named_reason(f"entries not in every study of {side}", e.dropped, label),
+                                        count=e.not_in_every_study))
     removed = sum(1 for e in excluded if e in x.means or e in y.means)              # named entries that had a mean to lose (review)
-    for reason, n in (("entries only in x", only_x), ("entries only in y", only_y), ("entries left out: excluded", removed),
-                      ("entries left out: outside the name prefix", len(outside))):
-        if n:
-            exclusions.append(Exclusion(reason=reason, count=n))
+    for reason, entries in (("entries only in x", [e for e in kept if e in x.means and e not in y.means]),
+                            ("entries only in y", [e for e in kept if e in y.means and e not in x.means]),
+                            ("entries left out: excluded", [e for e in excluded if e in x.means or e in y.means]),
+                            ("entries left out: outside the name prefix", sorted(outside))):
+        if entries:                                  # GAP 2: the entries named, not only counted
+            exclusions.append(Exclusion(reason=_named_reason(reason, entries, label), count=len(entries)))
     rule = "over the entries present in every study of the table" if a.entries == "in_every_study" else "over the studies where the entry has a value"
     rule_text = "entries: in every study of each table" if a.entries == "in_every_study" else "entries: in any study"
     basis = (f"entry mean = the mean of the entry's valid values per study, then the unweighted mean over its studies ({rule}); "
@@ -2310,7 +2372,7 @@ def tool_anova_trial(registry: ArtifactRegistry, a: AnovaTrialArgs) -> ToolResul
     _require_column(table, a.entry, "entry column")
     gate = _completeness_gate(table, a.allow_incomplete)
     classified = _classify(table, a.value)
-    used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy)
+    used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy, value=a.value)
     exclusions = _exclusions(classified)
     no_entry = sum(1 for row, _ in used if not row.get(a.entry, "").strip())
     if no_entry:
@@ -2679,7 +2741,7 @@ def tool_gxe_partition(registry: ArtifactRegistry, a: GxePartitionArgs) -> ToolR
         for row, number in classified.valid:                  # the raw values, before any averaging (T4's residue rule)
             if row.get(a.by, "").strip():
                 entry_peak[row[a.by].strip()] = max(entry_peak.get(row[a.by].strip(), 0.0), abs(number))
-        used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy)
+        used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy, value=a.value)
         notes.append(transformation)
         exclusions += _exclusions(classified)
         if label_col:
@@ -3175,6 +3237,13 @@ def _names_label(given: list[str]) -> str:
     return " / ".join(name.replace(" | ", " / ") for name in given)
 
 
+def _unpaired(p: _Pairing) -> tuple[list[str], list[str], list[str]]:
+    """The entries behind p.only_base, p.only_other and p.removed, to name them in the exclusions (GAP 2)."""
+    kept = [e for e in p.candidates if e not in p.excluded and e not in p.outside]
+    return ([e for e in kept if e in p.base.means and e not in p.other.means], [e for e in kept if e in p.other.means and e not in p.base.means],
+            sorted(e for e in p.excluded if e in p.base.means or e in p.other.means))
+
+
 def _left_out_by_name(p: _Pairing) -> list[str]:
     """anova_trial's words for the entries the person left out, with the count (Luna C27.1, 2026-10-23: the coordinator saw
     "excluded 3" and could not verify the restriction the question asked for, so it stopped a right answer)."""
@@ -3217,6 +3286,7 @@ def tool_compare_trials_paired(registry: ArtifactRegistry, a: CompareTrialsPaire
     base_table, other_table, base, other, label_col = p.base_table, p.other_table, p.base, p.other, p.label_col
     names, excluded, outside, candidates, paired = p.names, p.excluded, p.outside, p.candidates, p.paired
     only_base, only_other, removed = p.only_base, p.only_other, p.removed
+    unpaired_base, unpaired_other, removed_entries = _unpaired(p)
     left_out_named = [*_left_out_by_name(p), *_left_out_by_prefix(p, a.name_prefix)]   # before p is reused for the paired t's p-value
     plot_lists = p.plot_lists
 
@@ -3276,10 +3346,11 @@ def tool_compare_trials_paired(registry: ArtifactRegistry, a: CompareTrialsPaire
             exclusions.append(Exclusion(reason=f"{side}: rows with an empty studyDbId", count=e.no_study_rows))
         if e.no_entry_values:                                 # review F2: a valid value without an entry ID is counted
             exclusions.append(Exclusion(reason=f"{side}: rows with an empty {a.by}", count=e.no_entry_values))
-    for reason, n in (("entries only in the base trial", only_base), ("entries only in the other trial", only_other),
-                      ("entries left out: excluded", removed), ("entries left out: outside the name prefix", len(outside))):
-        if n:
-            exclusions.append(Exclusion(reason=reason, count=n))
+    entry_label = {entry: "; ".join(sorted(found)) for entry, found in names.items()}
+    for reason, entries in (("entries only in the base trial", unpaired_base), ("entries only in the other trial", unpaired_other),
+                            ("entries left out: excluded", removed_entries), ("entries left out: outside the name prefix", sorted(outside))):
+        if entries:                                  # GAP 2: the entries named, not only counted
+            exclusions.append(Exclusion(reason=_named_reason(reason, entries, entry_label), count=len(entries)))
     unit = base_table.manifest.measurement.unit
     trait = base_table.manifest.measurement.trait or base.variable
     tail = " | " + " | ".join([f"base: {trait}{f' ({unit})' if unit else ''} in study {base.studies[0]}; other: study {other.studies[0]}",
@@ -3477,11 +3548,13 @@ def tool_stress_indices(registry: ArtifactRegistry, a: StressIndicesArgs) -> Too
             exclusions.append(Exclusion(reason=f"{side}: rows with an empty studyDbId", count=e.no_study_rows))
         if e.no_entry_values:
             exclusions.append(Exclusion(reason=f"{side}: rows with an empty {a.by}", count=e.no_entry_values))
-    for reason, n in (("entries only in the non-stress trial", p.only_base), ("entries only in the stress trial", p.only_other),
-                      ("entries left out: excluded", p.removed), ("entries left out: outside the name prefix", len(p.outside)),
-                      (f"entries not ranked: {a.rank_by} undefined", len(not_ranked))):
-        if n:
-            exclusions.append(Exclusion(reason=reason, count=n))
+    unpaired_base, unpaired_other, removed_entries = _unpaired(p)
+    for reason, entries in (("entries only in the non-stress trial", unpaired_base), ("entries only in the stress trial", unpaired_other),
+                            ("entries left out: excluded", removed_entries), ("entries left out: outside the name prefix", sorted(p.outside))):
+        if entries:                                  # GAP 2: the entries named, not only counted
+            exclusions.append(Exclusion(reason=_named_reason(reason, entries, label), count=len(entries)))
+    if not_ranked:
+        exclusions.append(Exclusion(reason=_named_reason(f"entries not ranked: {a.rank_by} undefined", not_ranked, label), count=len(not_ranked)))
     unit = p.base_table.manifest.measurement.unit
     trait = p.base_table.manifest.measurement.trait or p.base.variable
     first = "highest first" if a.order == "highest" else "lowest first"
@@ -3680,7 +3753,7 @@ def tool_heterosis_population(registry: ArtifactRegistry, a: HeterosisPopulation
         if big >= 1e200:
             raise AnalystError("unsupported", f"{table.manifest.artifact_id} holds a value of 1e200 or more in absolute value ({big!r}); "
                                               "group means of such values are not computed")
-        used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy)
+        used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy, value=a.value)
         notes.append(transformation)
         exclusions += _exclusions(classified)
         for row in table.rows:
@@ -3946,7 +4019,7 @@ def tool_plot_basis_h2(registry: ArtifactRegistry, a: PlotBasisH2Args) -> ToolRe
         if big >= 1e200:
             raise AnalystError("unsupported", f"{table.manifest.artifact_id} holds a value of 1e200 or more in absolute value ({big!r}); its "
                                               "variances are not computed")
-        used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy)
+        used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy, value=a.value)
         notes.append(transformation)
         exclusions += _exclusions(classified)
         for row in table.rows:
@@ -4131,7 +4204,7 @@ def tool_compare_means(registry: ArtifactRegistry, a: CompareMeansArgs) -> ToolR
         _require_column(table, a.value, "value column")
         caveat = _completeness_gate(table, a.allow_incomplete)
         classified = _classify(table, a.value)
-        used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy)
+        used, transformation = _apply_duplicate_policy(table, classified, a.duplicate_policy, value=a.value)
         label_col = LABEL_FOR.get(a.by)
         label_col = label_col if label_col in table.manifest.columns else None
         results, no_group_rows = _group_results(table, a.by, a.value, classified, used, a.min_independent_n, label_col)
@@ -4191,7 +4264,7 @@ def tool_compare_means(registry: ArtifactRegistry, a: CompareMeansArgs) -> ToolR
         values = [number for row, number in s["used"] if row.get(a.by, "") in mine]
         averaged = len(values) != valid_mine                # mean_per_unit merged duplicates among these entries' rows
         rule = (f"duplicate_policy=mean_per_unit: {valid_mine} valid rows averaged within {len(values)} observation units before "
-                "pooling" if averaged else "valid values used as recorded (one row per observation unit)")
+                "pooling" if averaged else f"valid values used as recorded ({_row_unit(s['table'], a.value, [r for r, _ in s['classified'].valid if r.get(a.by, '') in mine])})")
         if a.mean_of == "entry_means":
             means[side] = statistics.fmean(s["results"][e]["mean"] for e in sorted(mine))
             n, method = len(mine), f"mean of entry means over the {len(mine)} entries {which}; entry mean of valid values"

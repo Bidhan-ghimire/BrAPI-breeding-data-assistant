@@ -184,7 +184,7 @@ def test_only_entries_in_both_trials_are_paired_and_the_rest_are_counted(registr
     assert r.data["n_pairs"] == 6 and x["g"] == 6 and r.data["paired"]["t"] == pytest.approx(x["t"], rel=1e-12)
     assert r.data["unpaired"] == {"only in base": 1, "only in other": 1}
     reasons = {e.reason: e.count for e in claims(r)[0].exclusions}
-    assert reasons["entries only in the base trial"] == 1 and reasons["entries only in the other trial"] == 1
+    assert reasons["entries only in the base trial (clone E0)"] == 1 and reasons["entries only in the other trial (clone E7)"] == 1   # named (GAP 2)
     rows = per_entry(registry, r)
     assert rows["E0"]["paired"] == "false" and rows["E0"]["left_out"] == "only in base" and rows["E0"]["other_mean"] == ""
     a3, b3 = sum(a["E3"]) / 2, sum(b["E3"]) / 2

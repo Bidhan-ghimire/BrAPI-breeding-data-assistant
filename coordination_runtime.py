@@ -158,6 +158,16 @@ def _with_names(claim: Any, names: dict[tuple[str, str], set[str]]) -> dict[str,
     return view
 
 
+def _not_shown(analysis: Any, omitted: int) -> dict[str, str]:
+    """The claims the view leaves out, in words (coach 2026-10-24 12:50 UTC, GAP 3; Luna A38.2: "claims_omitted": 3273 was read
+    as results the analysis omitted, and a right count was stopped)."""
+    if omitted <= 0:
+        return {}
+    where = ("the analysis is complete and all claims are in the saved result" if analysis.status == "completed"
+             else "all claims are in the saved result")
+    return {"claims_not_shown": f"{omitted} further claim{'' if omitted == 1 else 's'} not shown in this view; {where}"}
+
+
 def _state(c: Any, stage: str) -> dict[str, Any]:
     """Only bounded evidence summaries; never authority supplied by model text."""
     retrieval = c.retrieval
@@ -179,6 +189,7 @@ def _state(c: Any, stage: str) -> dict[str, Any]:
             "status": analysis.status,
             "claims": [_with_names(claim, names) for claim in shown],
             "claims_omitted": len(analysis.claims) - len(shown),
+            **_not_shown(analysis, len(analysis.claims) - len(shown)),
             "caveats": [v[:400] for v in analysis.caveats[:10]],
             "metadata_facts": _view_facts(list(getattr(analysis, "metadata_facts", None) or [])),
             "metadata_facts_omitted": max(0, len(getattr(analysis, "metadata_facts", None) or []) - VIEW_FACTS),

@@ -145,7 +145,8 @@ def _without_quotes(text: str) -> str:
 
 def claim_numbers(claims: Iterable[dict[str, Any]]) -> list[float]:
     """Every number a run's claims carry: values, denominators, units, exclusion counts, and numbers in their filters,
-    grouping, method, missing-reason and denominator texts (a reason the answer shows is claim text; T3 review 2)."""
+    grouping, method, missing-reason, denominator and exclusion-reason texts (a reason the answer shows is claim text; T3
+    review 2; an exclusion names its entries and says "and N more", coach 2026-10-24 12:50 UTC, NEXT 3)."""
     found: list[float] = []
     for c in claims:
         denominator = c.get("denominator") or {}
@@ -154,7 +155,7 @@ def claim_numbers(claims: Iterable[dict[str, Any]]) -> list[float]:
             if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
                 found.append(float(v))
         for text in (*(c.get("filters") or {}).values(), *(c.get("grouping") or []), c.get("transformation") or "",
-                     c.get("missing_reason") or "", denominator.get("name") or ""):
+                     c.get("missing_reason") or "", denominator.get("name") or "", *(e.get("reason") or "" for e in c.get("exclusions") or [])):
             found += [n for n, *_ in _numbers(str(text))]
     return found
 

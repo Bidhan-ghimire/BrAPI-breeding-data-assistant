@@ -993,7 +993,7 @@ def render_numeric_table(analysis: AnalysisReport, retrieval: RetrievalReport | 
     lines = ["| claim | kind | value | unit | denominator (n) | independent units | scope | exclusions |", "|---|---|---|---|---|---|---|---|"]
     for c in sorted(analysis.claims, key=lambda x: x.claim_id):
         scope = ", ".join(f"{k}={v}" for k, v in sorted(c.filters.items())) or "all rows"
-        exclusions = "; ".join(f"{e.reason} x{e.count}" for e in c.exclusions) or "none"
+        exclusions = "; ".join(f"{e.reason} x{e.count}" for e in c.exclusions).replace("|", "\\|") or "none"   # a name may hold a bar
         units = "unknown" if c.n_independent_units is None else str(c.n_independent_units)
         lines.append(f"| {c.claim_id} | {c.kind} | {_fmt(c.value, c.missing_reason)} | {c.unit or 'not stated'} | {c.denominator.name} ({c.denominator.n}) | {units} | {scope} | {exclusions} |")
     if not analysis.claims:
