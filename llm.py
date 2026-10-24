@@ -58,6 +58,10 @@ What is here:
   results (never from the model's words); the caller's own checks still decide
   whether the retrieval is complete. Run 20261016T150345 asked for
   the same 140-row table six times, until the fetch budget stopped the run.
+  The Analyst's GuardedAnalystTools is one too (coach 2026-10-24 05:48 UTC,
+  (A)): an exact repeat of an analysis call (the same tool, arguments and
+  tables) gets its saved result, counted per call; the second ends the
+  analysis step with the claims the tools made (Luna E15.3, D16.3).
 * --smoke --mock-model: a fake model asks add(2,3), receives 5, answers.
   --smoke --local: the same round trip with the configured local model (never
   BrAPI). Not run automatically.
@@ -901,7 +905,10 @@ class RepeatGuard(Protocol):
     saved_result: for an exact repeat of such a call, the result the model is shown instead of sending it again; None
     for anything else. payload_from_evidence: the final answer code writes when the second repeat ends the loop. An optional
     plan_complete(name): True when every planned fetch is complete and the plan does not name this call, which then ends the loop
-    unsent (coach 2026-10-23 09:51 UTC, (b)); a guard without it never ends the loop that way."""
+    unsent (coach 2026-10-23 09:51 UTC, (b)); a guard without it never ends the loop that way. An optional repeat_key(name, args):
+    what a repeat is counted by (the Analyst's: the call itself; without it, the tool and the saved table's IDs), an optional
+    repeat_ended_text(count): the error text when the second repeat ends the loop, and an optional may_end(): False keeps the
+    loop going after a second repeat (the Analyst's, until a tool made a claim)."""
 
     def saved_result(self, name: str, args: Mapping[str, Any]) -> ToolResult | None: ...
     def payload_from_evidence(self) -> dict[str, Any]: ...
@@ -983,7 +990,7 @@ async def run_agent_loop(
     schemas = await tools.schemas()
     schema_by_name = {s["name"]: s["inputSchema"] for s in schemas}
     model_tools = _to_model_tools([s for s in schemas if allowed_tools is None or s["name"] in allowed_tools])
-    repeats: dict[tuple[str, ...], int] = {}                         # exact repeats per saved table (repeat_guard)
+    repeats: dict[tuple[Any, ...], int] = {}                         # exact repeats per saved table or call (repeat_guard)
     asked_again = False                                              # check_completed's one question was sent
     emit("start", run_id=run_id, tools=[t["function"]["name"] for t in model_tools], budget=dataclass_public(budget),
          max_tokens=max_tokens,                                      # the reply limit this run used, so a log says what actually ran
@@ -1092,7 +1099,8 @@ async def run_agent_loop(
                     args = outcome
                     saved = repeat_guard.saved_result(call.name, args) if repeat_guard is not None else None
                     if saved is not None:                          # an exact repeat of a complete table: not sent again,
-                        key = (call.name, *saved.artifact_ids)     # and no fetch is used
+                        repeat_key = getattr(repeat_guard, "repeat_key", None)            # and no fetch is used; the Analyst
+                        key = (repeat_key(call.name, args) if repeat_key is not None else None) or (call.name, *saved.artifact_ids)
                         repeats[key] = repeats.get(key, 0) + 1
                         ended = ended or repeats[key] >= MAX_REPEATS
                         emit("repeat_not_sent", correlation_id=tcorr, name=call.name, repeat=repeats[key],
@@ -1124,9 +1132,12 @@ async def run_agent_loop(
                         add_error("tool_transport", str(exc))
                         return finish("failed", None)
                     _append_tool_message(state, call, result, tcorr, emit)
-                if ended:                                          # the second repeat for one table: code ends this step;
-                    add_error(REPEAT_ENDED, f"a complete table this run already saved was asked for again ({max(repeats.values())} "
-                                            "exact repeats of one request, none sent); the fetching step was ended by code")
+                may_end = getattr(repeat_guard, "may_end", None)
+                if ended and (may_end is None or may_end()):        # the second repeat for one table: code ends this step;
+                    ended_text = getattr(repeat_guard, "repeat_ended_text", None)
+                    add_error(REPEAT_ENDED, ended_text(max(repeats.values())) if ended_text is not None else
+                              f"a complete table this run already saved was asked for again ({max(repeats.values())} "
+                              "exact repeats of one request, none sent); the fetching step was ended by code")
                     return finish("completed", repeat_guard.payload_from_evidence())   # the caller's checks decide
                 continue
 

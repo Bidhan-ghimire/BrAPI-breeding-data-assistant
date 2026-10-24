@@ -21,7 +21,7 @@ import agents.analyst as an
 import analyst_tools as at
 import brapi_mcp_server as srv
 from contracts import AnalysisReport, MeasurementMeta, ToolResult
-from llm import Budget, FakeModelClient, reply_text, reply_tools
+from llm import REPEAT_ENDED, Budget, FakeModelClient, reply_text, reply_tools
 from part2_support import synthetic_context
 
 PART2 = Path(__file__).resolve().parents[1]
@@ -379,3 +379,159 @@ def test_catalog_question_counts_complete_metadata(tmp_path):
 
 
 # --- 7. the harness CLI ------------------------------------------------------------------------
+
+
+# --- coach 2026-10-24 05:48 UTC, (A): an exact repeat of an analysis call is not run again; the second ends the analysis --------
+# Luna 2026-10-24: E15.3 ran one plot_basis_h2 computation three times (6 exact repeats among 13 tables) and D16.3 one gxe_partition
+# computation in four spellings ({}, {"rep": "rep"}, ...), each until the run's 30 model calls, with no answer.
+
+FINAL_NO_PROSE = {"status": "completed", "payload": {"methods": [], "caveats": [], "narrative": "", "key_claim_ids": []}}
+
+
+def scripted(arts: list[str], *calls) -> FakeModelClient:
+    """table_info of every supplied table, then one call per model turn, then the final answer."""
+    return FakeModelClient([reply_tools([("table_info", json.dumps({"artifact_id": a})) for a in arts]),
+                            *(reply_tools([(name, json.dumps(args))]) for name, args in calls),
+                            reply_text(json.dumps(FINAL_NO_PROSE))], reported_model="mock-model")
+
+
+def calls_run(report) -> list[str]:
+    """The tools that ran, in order: the report's method lines without code's own ("code:") and the repeats not run again."""
+    return [m.split("(")[0] for m in report.methods if not m.startswith(("model:", "code:")) and not m.endswith("not run again")]
+
+
+def test_an_exact_repeat_gets_its_saved_result_and_the_second_ends_the_analysis(tmp_path):
+    """The first exact repeat (the same tool, arguments and tables) is answered from the saved result and not run again; at the
+    second, code ends the analysis step with the claims the tools made, as the Retriever's repeat stop does. Arguments are
+    compared as the tool reads them: a default spelled out ("value": "value") is the same call."""
+    ctx = make_ctx(tmp_path)
+    inputs = s1_inputs(ctx, "calc_before_inspect.json")
+    art = inputs.artifact_ids[0]
+    model = scripted(inputs.artifact_ids, ("numeric_summary", {"artifact_id": art}), ("numeric_summary", {"artifact_id": art}),
+                     ("numeric_summary", {"artifact_id": art, "value": "value"}),
+                     ("group_stats", {"artifact_id": art, "by": "germplasmDbId"}))
+    report, agent, narrative, _ = run(ctx, inputs, model=model)
+    assert calls_run(report) == ["table_info", "table_info", "numeric_summary"]                # computed once
+    assert len(model.requests) == 4 and [e.code for e in agent.errors] == [REPEAT_ENDED]       # the group_stats turn never came
+    assert "the analysis step" in agent.errors[0].message                                     # the Analyst's words, not the Retriever's
+    first_repeat = tool_messages(agent)[3][1]
+    assert first_repeat["ok"] and first_repeat["data"]["not_run_again"] is True and "second exact repeat" in first_repeat["warnings"][0]
+    assert report.status == "completed" and report.claims and narrative == ""                 # tool-backed only, no prose
+    assert any(m.startswith("code: ") and "second exact repeat" in m for m in report.methods)
+
+
+def test_the_answer_says_code_ended_the_analysis(tmp_path):
+    """Review of A, SHOULD-FIX 1: the answer the person reads says code ended the analysis (a model would otherwise have
+    finished, or asked); a normal finish says nothing of the kind."""
+    import chat_presenter as cp
+    from types import SimpleNamespace
+
+    def shown(model):
+        ctx = make_ctx(tmp_path / str(len(list(tmp_path.iterdir()))))
+        inputs = s1_inputs(ctx, "calc_before_inspect.json")
+        report, *_ = run(ctx, inputs, model=model(inputs.artifact_ids))
+        view = SimpleNamespace(execution_status="completed", analysis=report, ctx=ctx, notes=[],
+                               retrieval=SimpleNamespace(status="completed", warnings=[], artifacts=[]),
+                               plan=SimpleNamespace(question="Mean fresh root yield in S1?", statistic=SimpleNamespace(kind="mean")))
+        return cp.answer_summary(view)
+
+    ended = shown(lambda arts: scripted(arts, *[("numeric_summary", {"artifact_id": arts[0]})] * 3))
+    normal = shown(lambda arts: scripted(arts, ("numeric_summary", {"artifact_id": arts[0]})))
+    assert "Code ended the analysis" in ended and "Code ended the analysis" not in normal
+
+
+def test_a_repeat_before_any_claim_does_not_end_the_analysis(tmp_path):
+    """Review of A, SHOULD-FIX 2: the stop ends the step only once a tool made a claim; repeated table_info calls before any
+    calculation get their saved result, and the analysis goes on to compute, as before."""
+    ctx = make_ctx(tmp_path)
+    inputs = s1_inputs(ctx, "calc_before_inspect.json")
+    art = inputs.artifact_ids[0]
+    model = scripted(inputs.artifact_ids, ("table_info", {"artifact_id": art}), ("table_info", {"artifact_id": art}),
+                     ("numeric_summary", {"artifact_id": art}))
+    report, agent, _, _ = run(ctx, inputs, model=model)
+    assert calls_run(report) == ["table_info", "table_info", "numeric_summary"]                # the two repeats were not run
+    assert agent.errors == [] and report.status == "completed" and report.claims               # the model's own final answer
+
+
+def test_other_arguments_are_other_calls(tmp_path):
+    """Each call is counted on its own: two calls repeated once each do not end the step (the loop's count per saved table
+    would have added them up: numeric_summary names the same table both times)."""
+    ctx = make_ctx(tmp_path)
+    inputs = s1_inputs(ctx, "calc_before_inspect.json")
+    art = inputs.artifact_ids[0]
+    a, b = {"artifact_id": art}, {"artifact_id": art, "duplicate_policy": "mean_per_unit"}
+    model = scripted(inputs.artifact_ids, ("numeric_summary", a), ("numeric_summary", b), ("numeric_summary", a), ("numeric_summary", b))
+    report, agent, _, _ = run(ctx, inputs, model=model)
+    assert calls_run(report) == ["table_info", "table_info", "numeric_summary", "numeric_summary"]   # repeats not run again
+    assert len(model.requests) == 6 and agent.errors == [] and report.status == "completed"   # the model's own final answer
+
+
+def test_the_same_call_on_another_table_is_another_call_and_a_table_is_not_made_twice(tmp_path):
+    """Review of A, SHOULD-FIX 3: the table is part of the call (a key without it would give numeric_summary of table B the
+    saved result of table A); and an exact repeat of a call that makes a table makes no second table."""
+    ctx = make_ctx(tmp_path)
+    inputs = s1_inputs(ctx, "calc_before_inspect.json")
+    art = inputs.artifact_ids[0]
+    kept = f"art_{an.registry_prefix(art)}_0003"                                                # the table filter_rows makes
+    cut = {"artifact_id": art, "column": "value", "op": "gt", "value": "0"}
+    model = scripted(inputs.artifact_ids, ("numeric_summary", {"artifact_id": art}), ("filter_rows", cut), ("filter_rows", cut),
+                     ("numeric_summary", {"artifact_id": kept}))
+    report, agent, _, _ = run(ctx, inputs, model=model)
+    assert calls_run(report) == ["table_info", "table_info", "numeric_summary", "filter_rows", "numeric_summary"]
+    assert agent.errors == [] and len(ctx.registry.artifact_ids()) == 3                         # obs, plot list, one kept table
+    assert {c.source_artifact_hashes[0] for c in report.claims} == {ctx.registry.manifest(a).sha256 for a in (art, kept)}
+
+
+def test_the_run_record_names_every_call_with_the_arguments_the_tool_read(tmp_path):
+    """Review of A, SHOULD-FIX 4 (coach: "so a replay no longer needs defaults"): each method line holds the arguments as the
+    tool read them, defaults filled in, and the repeats answered from a saved result are listed too."""
+    ctx = make_ctx(tmp_path)
+    inputs = s1_inputs(ctx, "calc_before_inspect.json")
+    art = inputs.artifact_ids[0]
+    model = scripted(inputs.artifact_ids, *[("numeric_summary", {"artifact_id": art})] * 3)
+    report, _, _, _ = run(ctx, inputs, model=model)
+    ran = [m for m in report.methods if m.startswith("numeric_summary(")]
+    assert len(ran) == 3 and all('"duplicate_policy": "reject"' in m and '"value": "value"' in m for m in ran)
+    assert ran[0].endswith("-> ok") and all(m.endswith("not run again") for m in ran[1:])
+
+
+def test_a_call_that_failed_is_run_again(tmp_path):
+    """Only a call that succeeded is saved: a failed one runs again, and is no repeat."""
+    ctx = make_ctx(tmp_path)
+    inputs = s1_inputs(ctx, "calc_before_inspect.json")
+    art = inputs.artifact_ids[0]
+    wrong = {"artifact_id": art, "value": "no_such_column"}
+    model = scripted(inputs.artifact_ids, ("numeric_summary", wrong), ("numeric_summary", wrong), ("numeric_summary", wrong),
+                     ("numeric_summary", {"artifact_id": art}))
+    report, agent, _, _ = run(ctx, inputs, model=model)
+    assert calls_run(report) == ["table_info", "table_info", *["numeric_summary"] * 4] and agent.errors == [] and report.status == "completed"
+
+
+def test_without_a_registry_nothing_is_saved(tmp_path):
+    """Inside the MCP server the guard has no registry: a call that succeeded is not saved, so every call runs, as before."""
+    ctx = make_ctx(tmp_path)
+    inputs = s1_inputs(ctx, "calc_before_inspect.json")
+    art = inputs.artifact_ids[0]
+    for registry, saved in ((ctx.registry, True), (None, False)):
+        tools = an.GuardedAnalystTools(an.AnalystTools(ctx.registry), list(inputs.artifact_ids), registry=registry)
+        anyio.run(tools.call, "table_info", {"artifact_id": art})
+        assert (tools.saved_result("table_info", {"artifact_id": art}) is not None) is saved
+
+
+def test_the_note_does_not_push_the_model_to_stop():
+    """Review of A, SHOULD-FIX 6: the repeat's note says the result is saved and what a second repeat does; it does not tell a
+    model with another computation left to finish now."""
+    assert "second exact repeat" in an.ANALYST_REPEAT_NOTE and "final JSON answer" not in an.ANALYST_REPEAT_NOTE
+
+
+# --- coach 2026-10-24 05:48 UTC, (B): the person's own "either method" ------------------------------------------------------
+
+def test_the_prompt_takes_the_recorded_method_only_when_the_question_names_both():
+    """E14.4: the Analyst asked which iron method to use though the question said "by NIRS or by ICP, whichever the study
+    records". Only when the question itself names both methods and accepts either does it use the one with recorded values,
+    and says so where the person reads it (its caveats; the chat shows no narrative); otherwise it asks, as before (rule 2)."""
+    prompt = " ".join(an.ANALYST_SYSTEM_PROMPT.split())                # the prompt's own line breaks are not part of a rule
+    line = ("Only when the question itself names two methods for one trait and accepts either (as in \"by NIRS or by ICP, "
+            "whichever the study records\")")
+    assert line in prompt and "use the method whose table has recorded values" in prompt and "otherwise ask" in prompt
+    assert "say in your caveats which one it is" in prompt and prompt.index("Never guess a value.") < prompt.index(line)

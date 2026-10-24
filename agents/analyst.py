@@ -18,11 +18,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from agents.coordinator import person_words
-from analyst_tools import ANALYSIS_TARGET, ANALYST_TOOL_NAMES, AnalystTools
+from analyst_tools import ANALYSIS_TARGET, ANALYST_TOOL_NAMES, ANALYST_TOOLS, AnalystTools
 from brapi_client import PART2_DIR
 from brapi_mcp_server import ToolContext, dispatch
 from contracts import AgentResult, AnalysisReport, Claim, Exclusion, TerminalStatus, ToolError, ToolResult
-from llm import Budget, FakeModelClient, ModelClient, ToolInterface, reply_text, reply_tools, run_agent_loop
+from llm import REPEAT_ENDED, Budget, FakeModelClient, ModelClient, ToolInterface, reply_text, reply_tools, run_agent_loop
 
 __all__ = [
     "ANALYST_SYSTEM_PROMPT", "NO_CLAIM_NUDGE", "AnalysisInput", "AnalystPayload", "GuardedAnalystTools", "run_analyst", "build_report",
@@ -45,6 +45,8 @@ Rules:
    question is about (trait, unit, timepoint), and whether duplicates or unknown independence are reported.
 2. If the artifacts do not contain what the question asks for (a different trait, an incomplete fetch, an unclear
    grouping), finish with needs_clarification and say exactly what is missing. Never guess a value.
+   Only when the question itself names two methods for one trait and accepts either (as in "by NIRS or by ICP, whichever the
+   study records"), use the method whose table has recorded values and say in your caveats which one it is; otherwise ask.
 3. For numbers call numeric_summary / group_stats (numeric_summary also gives the CV of the values - not the trial's error CV,
    which is anova_trial's - and Percent missing when you pass the study's plot list as roster_artifact_id, on the measurements
    table of ONE study as fetched, not a filtered, stacked or joined table); for an order (the highest, the lowest, the top k, where a named entry
@@ -256,6 +258,29 @@ class ToolRecord:
     refused_here: bool = False
 
 
+# Coach 2026-10-24 05:48 UTC, (A): Luna E15.3 ran one plot_basis_h2 computation three times and D16.3 one gxe_partition
+# computation in four spellings, each until the run's 30 model calls with no answer. As the Retriever's repeat stop does (llm.py),
+# an exact repeat gets its saved result and is not run again; the second ends the analysis step with the claims already made.
+ANALYST_REPEAT_NOTE = ("This exact call (the same tool, arguments and tables) already ran in this run; its result is shown again "
+                       "and was not computed again. Use it and do not ask for it again: a second exact repeat of one call ends "
+                       "the analysis with the claims the tools have made.")
+# What the person reads when code ended the step (review of A: a model might still have finished, or asked); no digits.
+CODE_ENDED_CAVEAT = ("Code ended the analysis when one calculation was asked for a third time (the same tool, arguments and "
+                     "tables); the numbers are the tools' own, without the Analyst's final check or summary.")
+
+
+def effective_arguments(name: str, args: Mapping[str, Any]) -> dict[str, Any]:
+    """A call's arguments as the tool reads them: its own argument model with the defaults filled in, for the run record (coach
+    2026-10-24 05:48 UTC, (A): "so a replay no longer needs defaults"); the arguments as sent when the tool would refuse them."""
+    spec = ANALYST_TOOLS.get(name)
+    try:
+        return spec.args_model.model_validate(dict(args)).model_dump(mode="json") if spec is not None else dict(args)
+    except Exception:  # noqa: BLE001 - the tool refuses them too; the record keeps what was sent
+        return dict(args)
+ANALYST_REPEAT_ENDED = ("an analysis call already made in this run was asked for again ({count} exact repeats of one call: the same "
+                        "tool, arguments and tables, none run again); code ended the analysis step with the claims the tools had made")
+
+
 @dataclass
 class GuardedAnalystTools:
     """Guards a local or MCP tool interface before execution; canonical evidence stays in records."""
@@ -269,14 +294,57 @@ class GuardedAnalystTools:
     question: str | None = None    # the question the controller holds (F4, F5); None inside the MCP server, which has none
     # (base_study_db_id, percent) of each planned compare_means step; None = no plan to bind (the MCP server's own guard).
     planned_comparisons: list[tuple[str, str]] | None = None
+    registry: Any = None           # the run's ArtifactRegistry, for the repeat stop (A); None inside the MCP server: every call runs
     claim_refs: dict[str, str] = field(default_factory=dict, init=False)  # model reference -> canonical ID
     _refs_by_id: dict[str, str] = field(default_factory=dict, init=False)
+    _saved: dict[tuple[Any, ...], ToolResult] = field(default_factory=dict, init=False)  # repeat key -> the result the model saw
+    repeats: list[tuple[int, str, dict[str, Any]]] = field(default_factory=list, init=False)  # (calls run before it, tool, args)
 
     def __post_init__(self) -> None:
         self.allowed = set(self.supplied)
 
     async def schemas(self) -> list[dict[str, Any]]:
         return await self.inner.schemas()
+
+    def repeat_key(self, name: str, args: Mapping[str, Any]) -> tuple[Any, ...] | None:
+        """What makes two calls one (A): the tool, its arguments as the tool reads them (its own argument model with the defaults
+        filled in: {} and {"rep": "rep"} are one gxe_partition call, as on D16.3) and the hashes of the tables they name. None
+        without a registry, for arguments the tool would refuse, or for a table the registry does not hold: such a call runs."""
+        spec = ANALYST_TOOLS.get(name)
+        if self.registry is None or spec is None:
+            return None
+        try:
+            effective = spec.args_model.model_validate(dict(args)).model_dump(mode="json")
+            handles = [h for key, value in sorted(args.items()) if key.endswith(("artifact_id", "artifact_ids"))
+                       for h in (value if isinstance(value, list) else [value]) if isinstance(h, str)]
+            hashes = tuple(self.registry.manifest(h).sha256 for h in handles)
+        except Exception:  # noqa: BLE001 - no key: the call is run as before
+            return None
+        return name, json.dumps(effective, sort_keys=True), hashes
+
+    def saved_result(self, name: str, args: Mapping[str, Any]) -> ToolResult | None:
+        """For an exact repeat of a call that succeeded in this run: its result as the model saw it, with the note, not run
+        again (llm.run_agent_loop counts it; the second repeat ends the step). None for anything else."""
+        key = self.repeat_key(name, args)
+        saved = self._saved.get(key) if key is not None else None
+        if saved is None:
+            return None
+        self.repeats.append((len(self.records), name, dict(args)))   # the run record lists it (build_report)
+        data = {"not_run_again": True, **saved.data} if isinstance(saved.data, dict) else {"not_run_again": True}
+        return saved.model_copy(update={"data": data, "warnings": [ANALYST_REPEAT_NOTE, *saved.warnings]})
+
+    def payload_from_evidence(self) -> dict[str, Any]:
+        """The final answer when code ends the step at the second exact repeat: no prose and no selection, so build_report keeps
+        every claim the tools made (tool-backed only, as for key_claim_ids [])."""
+        return {"methods": [], "caveats": [], "narrative": "", "key_claim_ids": []}
+
+    def repeat_ended_text(self, count: int) -> str:
+        return ANALYST_REPEAT_ENDED.format(count=count)
+
+    def may_end(self) -> bool:
+        """The stop ends the step only once a tool made a claim (review of A: repeated table_info calls before any calculation
+        would otherwise end an analysis with nothing, where the model goes on to compute)."""
+        return _claims_made(self)
 
     def _refuse(self, name: str, args: dict[str, Any], code: str, message: str) -> ToolResult:
         result = ToolResult(ok=False, error=ToolError(code=code, message=message))   # type: ignore[arg-type]
@@ -315,6 +383,7 @@ class GuardedAnalystTools:
             self.inspected.add(args["artifact_id"])
         if result.ok:
             self.allowed.update(result.artifact_ids)              # tables this run produced may be used next
+        shown = result
         if self.model_claim_refs and result.ok and name in NUMERIC_TOOLS and isinstance(result.data, dict):
             # Keep full canonical evidence in records. Only the model-facing copy uses
             # short references, so long exact-text labels never have to be recopied.
@@ -330,8 +399,11 @@ class GuardedAnalystTools:
             data["claim_count"] = len(model_claims)
             data["claim_selection_note"] = ("Claim IDs are exact short selection references. The preview may omit claims; "
                                             "all original tool claims are retained in the report. key_claim_ids may be [].")
-            return result.model_copy(update={"data": data})
-        return result
+            shown = result.model_copy(update={"data": data})
+        key = self.repeat_key(name, args) if result.ok else None
+        if key is not None:
+            self._saved.setdefault(key, shown)                  # an exact repeat gets this back (saved_result)
+        return shown
 
 
 # --------------------------------------------------------------------------
@@ -379,11 +451,12 @@ async def run_analyst(
         return report, None, ""
     inner = raw_tools if raw_tools is not None else AnalystTools(ctx.registry)
     tools = GuardedAnalystTools(inner, list(inputs.artifact_ids), question=inputs.question,
-                                planned_comparisons=[(c.base_study_db_id, c.percent) for c in inputs.planned_comparisons])
+                                planned_comparisons=[(c.base_study_db_id, c.percent) for c in inputs.planned_comparisons],
+                                registry=ctx.registry)
     agent = await run_agent_loop(
         model, tools, agent_name="analyst", system_prompt=ANALYST_SYSTEM_PROMPT, user_message=_user_message(inputs),
         budget=budget, allowed_tools=set(ANALYST_TOOL_NAMES), log_dir=log_dir, run_id=run_id, model_requested=model_requested,
-        check_completed=lambda _payload: None if _claims_made(tools) else NO_CLAIM_NUDGE,
+        check_completed=lambda _payload: None if _claims_made(tools) else NO_CLAIM_NUDGE, repeat_guard=tools,
     )
     report, narrative = build_report(agent, tools, inputs)
     return report, agent, narrative
@@ -435,14 +508,21 @@ def _harvest(tools: GuardedAnalystTools, supplied: set[str]) -> tuple[list[Claim
 def build_report(agent: AgentResult, tools: GuardedAnalystTools, inputs: AnalysisInput) -> tuple[AnalysisReport, str]:
     supplied = set(inputs.artifact_ids)
     claims, exclusions, caveats, results, incomplete = _harvest(tools, supplied)
-    methods = [f"{r.name}({json.dumps(r.args, sort_keys=True)}) -> {'ok' if r.result.ok else 'refused: ' + (r.result.error.code if r.result.error else '?')}"
-               for r in tools.records]
+    methods = [f"{r.name}({json.dumps(effective_arguments(r.name, r.args), sort_keys=True)}) -> "
+               f"{'ok' if r.result.ok else 'refused: ' + (r.result.error.code if r.result.error else '?')}" for r in tools.records]
+    for position, name, args in reversed(getattr(tools, "repeats", ())):   # each repeat after the calls run before it (A)
+        methods.insert(position, f"{name}({json.dumps(effective_arguments(name, args), sort_keys=True)}) -> repeat: the saved "
+                                 "result of an earlier call, not run again")
     refused = [r for r in tools.records if r.refused_here]
     if refused:
         caveats.append(f"{len(refused)} tool call(s) refused by the runtime guards: " + "; ".join(sorted({r.result.error.message for r in refused if r.result.error})))
     log_refs = [agent.log_path] if agent.log_path else []
     if claims:
         caveats.append(f"analysis target: {ANALYSIS_TARGET}")
+    if any(e.code == REPEAT_ENDED for e in agent.errors):           # the stop needs a claim first (may_end), so there is one
+        methods.append("code: the analysis step was ended at the second exact repeat of one call (the same tool, arguments and "
+                       "tables); the answer keeps the claims the tools had made")
+        caveats.append(CODE_ENDED_CAVEAT)
 
     def finish(status: TerminalStatus, chosen: list[Claim], narrative: str) -> tuple[AnalysisReport, str]:
         return AnalysisReport(status=status, claims=chosen, methods=methods, exclusions=exclusions, caveats=caveats,
