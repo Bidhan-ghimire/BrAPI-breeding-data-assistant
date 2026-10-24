@@ -85,11 +85,11 @@ class ContractError(ValueError):
 CollectionStatus = Literal["complete", "empty", "incomplete", "unsupported", "failed", "unknown"]
 # The per-study ledger adds "blocked": the fetch was refused by the approval guard.
 StudyFetchStatus = Literal["complete", "empty", "incomplete", "unsupported", "failed", "unknown", "blocked"]
-UNKNOWN_METADATA = frozenset({"", "[]", "{}", "na", "null"})
+UNKNOWN_METADATA = frozenset({"", "[]", "{}", "na", "n/a", "none", "null"})   # "N/A", "none": no SweetPotatoBase program is named so
 
 
 def unknown_metadata(value: Any) -> bool:
-    """A catalog field that names nothing: no value, no text, an empty JSON list or object, "NA" or "null" (any case, spaces
+    """A catalog field that names nothing: no value, no text, an empty JSON list or object, "NA", "N/A", "none" or "null" (any case, spaces
     ignored). A JSON number is a value (review 2: {"programDbId": 5017}). One rule for the study export, the planner's metadata,
     the offline catalog filter, filter_rows and count_records on program fields (coach 2026-10-24 14:49 UTC, NEXT 4)."""
     return value is None or str(value).strip().lower() in UNKNOWN_METADATA

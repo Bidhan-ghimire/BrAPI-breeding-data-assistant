@@ -254,29 +254,55 @@ def _classify(table: Table, value_col: str) -> Classified:
     return Classified(valid, n_missing, n_invalid, len(table.rows), units_known, rep_obs, rep_meas, note)
 
 
-ROWS_NOTE = "rows: "    # what one row of a derived table is (coach 2026-10-24 12:50 UTC, GAP 1): group_stats writes it, filter_rows
-                        # and concat_tables carry it, _row_unit reads it
+ROWS_NOTE = "rows: "    # what one row of a derived table is (coach 2026-10-24 12:50 UTC, GAP 1): group_stats, rank_entries and
+                        # threshold_count write it (15:49 UTC), filter_rows and concat_tables carry it, _row_unit reads it
 GROUP_VALUE_WORDS = {"mean": "means", "median": "medians", "min": "minima", "max": "maxima", "sd": "SDs"}
 NAMED_ENTRIES = 10      # GAP 2: an exclusion names up to ten entries; above that the first ten and "and N more"
 NAME_CHARS = 80         # ... each name cut to 80 characters (review: a 400-character name made every reason 450 long)
-_STACKED_GROUPS = re.compile(r"group_stats by ([^,\s]+), from (\d+) stacked tables")
+_GROUP_ROWS = re.compile(r"(?:group_stats|rank_entries) by ([^,\s]+)(?:, basis (pooled|study_means))?(?:, from (\d+) stacked tables)?")
+_STACKED_NOTE = re.compile(r"(.+), from (\d+) stacked tables")      # another rows note of a stack (threshold_count's; review 2)
+
+
+def _in_stacked(table: Table, stacked: str) -> str:
+    """Which of the N stacked tables a stack's rows are in, read from every row's source_artifact_id, not only the rows with a
+    valid value (coach 2026-10-24 15:49 UTC; reviews 1 and 2 of 2026-10-24: a filter keeps the rows of one source, of some, or
+    of none)."""
+    sources = {row.get("source_artifact_id", "") for row in table.rows}
+    named = sorted(sources - {""})
+    if "" in sources:                                # a row naming no source table: which tables the rows are in is unknown
+        return "in each stacked table; some rows name no source table"
+    if not named:                                    # a filter that keeps no row (review 2)
+        return f"in none of the {stacked} stacked tables: no row is left"
+    if len(named) == 1:                              # a stack filtered down to one source (coach 2026-10-24 15:49 UTC)
+        return f"in the one table from {named[0]}"
+    if len(named) < int(stacked):                    # ... or to some of them (review 1)
+        return f"in each of {len(named)} of the {stacked} stacked tables"
+    return f"in each of the {stacked} stacked tables"
 
 
 def _row_unit(table: Table, value: str | None = None, rows: list[dict[str, str]] | None = None) -> str:
     """What one row of the table is, for the transformation text (Luna A42.4: a mean of 315 genotype means read "one row per
-    observation unit", and the coordinator stopped it as a mean over plot rows). A group_stats table, also filtered: "one row
-    per <by>; values are group means" (medians, ... by the value column); stacked from several such tables: "one row per <by>
-    in each of the N stacked tables" (review: two studies' tables of the same clones are 6 rows of 3 IDs); rows that are units:
-    "one row per observation unit", when no unit has several of the rows used (review: one plot measured twice); any other
-    table: not recorded, never units."""
+    observation unit", and the coordinator stopped it as a mean over plot rows). A group_stats or rank_entries table, also
+    filtered: "one row per <by>; values are group means" (medians, ... by the value column; on rank_entries' basis study_means
+    a mean is the unweighted mean of the group's per-study means and the rest are pooled: review 2026-10-24); stacked from
+    several such tables: "one row per <by> in each of the N stacked tables" (review: two studies' tables of the same clones are
+    6 rows of 3 IDs), or which of them its rows are in (_in_stacked); another note (threshold_count's) as written, a stack's
+    with which of its tables; rows that are units: "one row per observation unit", when no unit has several of the rows used
+    (review: one plot measured twice); any other table: not recorded, never units."""
     noted = list(dict.fromkeys(n[len(ROWS_NOTE):] for n in table.manifest.quality_notes if n.startswith(ROWS_NOTE)))
-    if len(noted) == 1 and noted[0].startswith("group_stats by "):
-        stacked = _STACKED_GROUPS.fullmatch(noted[0])
-        by, word = (stacked[1] if stacked else noted[0][len("group_stats by "):]), GROUP_VALUE_WORDS.get(value or "")
-        values = f"values are group {word}" if word else "values are group statistics"
-        return f"one row per {by} in each of the {stacked[2]} stacked tables; {values}" if stacked else f"one row per {by}; {values}"
-    if noted:
-        return "; ".join(noted)
+    group = _GROUP_ROWS.fullmatch(noted[0]) if len(noted) == 1 else None
+    if group:
+        by, basis, stacked, word = group[1], group[2], group[3], GROUP_VALUE_WORDS.get(value or "")
+        if basis == "study_means":                   # only mean is per study; median, min, max and sd are pooled (review)
+            values = ("values are the unweighted means of each group's per-study means" if value == "mean"
+                      else f"values are group {word}, pooled over the studies" if word
+                      else "values are group statistics (on basis study_means, mean is the unweighted mean of per-study means)")
+        else:
+            values = f"values are group {word}" if word else "values are group statistics"
+        return f"one row per {by} {_in_stacked(table, stacked)}; {values}" if stacked else f"one row per {by}; {values}"
+    if noted:                                        # another note as written; a stack's says which of its tables (review 2)
+        stacks = [_STACKED_NOTE.fullmatch(note) for note in noted]
+        return "; ".join(f"{s[1]}, {_in_stacked(table, s[2])}" if s else note for note, s in zip(noted, stacks))
     if UNIT_COL in table.manifest.columns:
         units = [row.get(UNIT_COL, "") for row in rows] if rows is not None else []
         if not all(units):                           # review 2: blank IDs are unknown units, not one unit
@@ -304,8 +330,8 @@ PROGRAM_COLUMNS = ("programDbId", "programName", "additionalInfoProgramDbId", "a
 
 def _unknown_cell(column: str, cell: str) -> bool:
     """A catalog cell that names nothing. Program columns use the shared rule (contracts.unknown_metadata: "", "[]", "{}", "NA",
-    "null"; coach 2026-10-24 14:49 UTC, NEXT 4); every other column keeps "" and "[]" (review 2: SweetPotatoBase's location 120 is
-    named "NA")."""
+    "N/A", "none", "null"; coach 2026-10-24 14:49 / 15:49 UTC, NEXT 4); every other column keeps "" and "[]" (review 2:
+    SweetPotatoBase's location 120 is named "NA")."""
     return unknown_metadata(cell) if column in PROGRAM_COLUMNS else (not cell.strip() or cell.strip() == "[]")
 
 
@@ -1028,8 +1054,8 @@ def tool_concat_tables(registry: ArtifactRegistry, a: ConcatTablesArgs) -> ToolR
     lineage = [f"lineage: concat_tables of {t.manifest.artifact_id} sha256={t.manifest.sha256} rows={t.manifest.row_count} complete={t.manifest.complete}" for t in tables]
     kinds = [tuple(n for n in t.manifest.quality_notes if n.startswith(ROWS_NOTE)) for t in tables]
     if len(set(kinds)) == 1:                         # GAP 1: one row unit in every table (none written: the columns say it)
-        lineage += [f"{note}, from {len(tables)} stacked tables" if note.startswith(f"{ROWS_NOTE}group_stats by ") and len(tables) > 1
-                    else note for note in kinds[0]]  # review: per-table group rows of the same clones repeat their IDs
+        lineage += [f"{note}, from {len(tables)} stacked tables" if len(tables) > 1 else note
+                    for note in kinds[0]]            # review: per-table rows of the same entries repeat their IDs
     else:
         described = [" / ".join(n[len(ROWS_NOTE):] for n in k) or ("observation units" if UNIT_COL in t.manifest.columns else "rows not recorded")
                      for t, k in zip(tables, kinds)]
@@ -1341,6 +1367,7 @@ def tool_rank_entries(registry: ArtifactRegistry, a: RankEntriesArgs) -> ToolRes
     not_ranked = [g for g in results if not g["included"] and g["group_id"] not in left_out]
 
     lineage = [f"lineage: rank_entries by {a.by} on {table.manifest.artifact_id} sha256={table.manifest.sha256}",
+               f"{ROWS_NOTE}rank_entries by {a.by}, basis {a.basis}",         # one row per entry; the basis says what mean is (review)
                f"transformation: {transformation}", f"order: {first} {measure} first; ties share a rank", f"basis: {a.basis}",
                f"left out before ranking: {sorted(left_out) or 'none'}", f"min_independent_n={a.min_independent_n} (exclusion threshold)",
                f"rows with an empty {a.by}: {no_group_rows} (excluded, not dropped silently)", f"analysis target: {ANALYSIS_TARGET}"]
@@ -1592,7 +1619,10 @@ def tool_threshold_count(registry: ArtifactRegistry, a: ThresholdCountArgs) -> T
                "threshold: " + (f"the number {a.threshold!r}" if a.threshold is not None else f"the mean of the entries {threshold_ids}, per study"),
                f"left out: threshold entries {threshold_ids}, excluded {sorted(excluded)}, name_prefix {a.name_prefix!r}",
                f"rows with an empty studyDbId: {no_study_rows}; rows with an empty {a.by}: {no_entry_rows} (excluded, not dropped silently)",
-               f"analysis target: {ANALYSIS_TARGET}"]
+               f"analysis target: {ANALYSIS_TARGET}",
+               f"{ROWS_NOTE}threshold_count result: one row per studyDbId and {a.by} (value: the entry mean)"   # coach 15:49 UTC
+               + (", but a counted entry has one row per value used (its plot in unit; a value with no plot ID is not counted)"
+                  if a.count == "plots" else "")]
     manifest = registry.save_table(result_rows, kind="analysis_result", columns=THRESHOLD_RESULT_COLUMNS, complete=table.manifest.complete,
                                    source_request_ids=list(table.manifest.source_request_ids), study_ids=list(table.manifest.study_ids),
                                    variable_ids=list(table.manifest.variable_ids), measurement=table.manifest.measurement, quality_notes=lineage)

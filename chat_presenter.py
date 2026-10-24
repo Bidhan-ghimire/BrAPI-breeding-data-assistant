@@ -352,6 +352,13 @@ def _correlation(value: float | int | None) -> str:
 _COR_CALL = re.compile(r"^clm_v2_[0-9a-f]{6}_[0-9]{4,}_cor-[0-9a-f]{10}_")
 
 
+def _left_out_text(reason: str) -> str:
+    """An exclusion reason for the "Left out:" line: without its "entries " and its own "left out: ", once, at the start; a name
+    that holds those words stays whole (coach 2026-10-24 15:49 UTC: "Gamma left out: z" read "Gamma z")."""
+    text = reason[len("entries "):] if reason.startswith("entries ") else reason
+    return text[len("left out: "):] if text.startswith("left out: ") else text
+
+
 def _correlation_block(claims: list[Claim], source_labels: dict[tuple[str, ...], str]) -> tuple[list[str], set[str]]:
     """R2 (2026-10-22): the correlation claims of one correlate_entry_means call as one table (Method, Correlation, n), the two
     tables it correlated and what was left out, then the descriptive sentence. Returns the lines and the IDs of the claims shown."""
@@ -370,7 +377,7 @@ def _correlation_block(claims: list[Claim], source_labels: dict[tuple[str, ...],
         first = group[0]
         parts = first.transformation.split(" | ")
         about = [part for part in parts if part.startswith(("x: ", "y: ", "entries: "))]
-        left = "; ".join(f"{item.reason[len('entries '):].replace('left out: ', '')} {item.count}" for item in first.exclusions
+        left = "; ".join(f"{_left_out_text(item.reason)} {item.count}" for item in first.exclusions
                          if item.reason.startswith("entries "))
         label = source_labels.get(tuple(sorted(first.source_artifact_hashes)), "")
         lines += [f"**Correlation of entry means, {first.denominator.n} entries in both tables{label}**", "",
@@ -597,7 +604,7 @@ def _pair_block(claims: list[Claim], source_labels: dict[tuple[str, ...], str]) 
         sd, se = named.get("SD of the differences"), named.get("SE of the mean difference")
         if sd is not None and se is not None and sd.value is not None and se.value is not None:
             lines.append(f"SD of the differences {_anova_number(sd.value)}{unit}; SE of the mean difference {_anova_number(se.value)}{unit}.")
-        left = "; ".join(f"{item.reason[len('entries '):].replace('left out: ', '')} {item.count}" for item in base.exclusions
+        left = "; ".join(f"{_left_out_text(item.reason)} {item.count}" for item in base.exclusions
                          if item.reason.startswith("entries "))
         if left:
             lines.append(_text(f"Left out: {left}."))
@@ -662,7 +669,7 @@ def _stress_block(claims: list[Claim], sources: _Sources, source_labels: dict[tu
                         f"stress intensity SI not available ({_text(si.missing_reason if si is not None and si.missing_reason else 'reason not provided')})."))
         if formula:
             lines.append(f"{formula}.")
-        left = "; ".join(f"{item.reason[len('entries '):].replace('left out: ', '')} {item.count}" for item in mean_p.exclusions
+        left = "; ".join(f"{_left_out_text(item.reason)} {item.count}" for item in mean_p.exclusions
                          if item.reason.startswith("entries "))
         if left:
             lines.append(_text(f"Left out: {left}."))
