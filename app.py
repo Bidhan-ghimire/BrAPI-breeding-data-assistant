@@ -148,7 +148,8 @@ def _app_flag(name: str) -> bool:
 
 def live_config(question: str) -> RunConfig:
     return RunConfig(question=question, offline=False, mock_model=False, direct=False, auto=False,
-                     max_fetches=5, max_http_attempts=_app_number("APP_MAX_HTTP_ATTEMPTS", "10", 1, 100, integer=True),
+                     # 15 = 5 fetches x 2 pages + 5 lookups (Bidhan, 2026-10-24, item 23; it was 10)
+                     max_fetches=5, max_http_attempts=_app_number("APP_MAX_HTTP_ATTEMPTS", "15", 1, 100, integer=True),
                      max_clarification_rounds=CHAT_CLARIFICATION_ROUNDS,
                      read_timeout=_app_number("APP_READ_TIMEOUT", "90", 1, 600), max_elapsed_seconds=600,
                      bootstrap_catalogs=True, catalog_standing_approval=_app_flag("APP_CATALOG_STANDING_APPROVAL"),

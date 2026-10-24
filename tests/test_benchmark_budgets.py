@@ -32,10 +32,12 @@ NOW = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
 
 # --- 1. the app keeps its own limits; the benchmark passes its budgets -------------------------------------------
 
-def test_the_apps_own_limits_are_5_2_12():
+def test_the_apps_own_limits_are_5_2_12(monkeypatch):
     """Bidhan, 2026-10-23 (coach's DECISION entry 14:01 UTC, item 14): the app's own pages per plot-record fetch 1 -> 2 (the app,
     the Space and every run that names none); fetches and plan steps unchanged."""
     import app_space
+
+    monkeypatch.delenv("APP_MAX_HTTP_ATTEMPTS", raising=False)                 # the default, whatever the shell sets (review of 23)
 
     live = app.live_config("How many plots does study S1 have?")
     assert (live.max_fetches, live.max_observation_pages, live.max_plan_steps) == (5, 2, 12)
@@ -43,7 +45,24 @@ def test_the_apps_own_limits_are_5_2_12():
     assert (hosted.max_fetches, hosted.max_observation_pages, hosted.max_plan_steps) == (5, 2, 12)
     default = ctl.RunConfig(question="q")
     assert (default.max_fetches, default.max_observation_pages, default.max_plan_steps) == (5, 2, 12)
-    assert live.max_http_attempts == 10                                                  # the app's attempt cap is not raised
+    # Bidhan, 2026-10-24 (coach's DECISION entry 03:43 UTC, item 23): the app's HTTP attempts 10 -> 15 = 5 fetches x 2 pages +
+    # 5 lookups (the review of item 14: two-page fetches used the whole cap of 10); the Space takes the same default
+    assert live.max_http_attempts == 15 and hosted.max_http_attempts == 15
+    # its reason too (review of item 23): every fetch's pages and the 5 lookups fit, so a change of pages or fetches raises it
+    assert live.max_http_attempts >= live.max_fetches * live.max_observation_pages + 5
+
+
+def test_a_valid_attempt_setting_is_read(monkeypatch):
+    """Review of item 23: only bad values (0, text) were tried; a valid APP_MAX_HTTP_ATTEMPTS is the cap of the app and the Space,
+    from 1 to 100."""
+    import app_space
+
+    for value in (12, 40):
+        monkeypatch.setenv("APP_MAX_HTTP_ATTEMPTS", str(value))
+        assert app.live_config("q").max_http_attempts == value and app_space.space_config("q").max_http_attempts == value
+    monkeypatch.setenv("APP_MAX_HTTP_ATTEMPTS", "101")
+    with pytest.raises(ValueError):
+        app.live_config("q")
 
 
 def test_the_benchmark_passes_its_budgets_per_run_and_only_when_asked():
@@ -57,11 +76,11 @@ def test_the_benchmark_passes_its_budgets_per_run_and_only_when_asked():
     assert budget_problems == []
     assert config.max_elapsed_seconds == app.live_config(question).max_elapsed_seconds   # the time budget is not raised
     steps_only = bench.budgeted(app.live_config, max_plan_steps=30)(question)                 # review: one budget moves only itself
-    assert (steps_only.max_fetches, steps_only.max_observation_pages, steps_only.max_http_attempts) == (5, 2, 10)
-    pages_only = bench.budgeted(app.live_config, max_pages=3)(question)
-    assert (pages_only.max_fetches, pages_only.max_observation_pages, pages_only.max_http_attempts) == (5, 3, 15)
-    assert app.live_config(question).max_fetches == 5 and app.live_config(question).max_http_attempts == 10
-    assert bench.budgeted(app.live_config, max_fetches=3)(question).max_http_attempts == 10      # never below the app's own (3 x 2 = 6)
+    assert (steps_only.max_fetches, steps_only.max_observation_pages, steps_only.max_http_attempts) == (5, 2, 15)
+    pages_only = bench.budgeted(app.live_config, max_pages=4)(question)           # 5 x 4 = 20 is above the app's own 15
+    assert (pages_only.max_fetches, pages_only.max_observation_pages, pages_only.max_http_attempts) == (5, 4, 20)
+    assert app.live_config(question).max_fetches == 5 and app.live_config(question).max_http_attempts == 15
+    assert bench.budgeted(app.live_config, max_fetches=3)(question).max_http_attempts == 15      # never below the app's own (3 x 2 = 6)
 
 
 def test_twenty_pages_pass_the_harness_and_the_runs_own_check():
