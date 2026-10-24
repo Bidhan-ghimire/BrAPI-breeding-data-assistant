@@ -1,7 +1,7 @@
 """The benchmark cache (eval/benchmark_cache.py; coach Task 1 step 3): built ONCE, through the app's own data tools
 (get_observation_units / get_observations -> BrapiClient -> the cache), under one approval made by code for exactly the
 studies and variables the sub-questions name. It records each study's unit count and whether the app's limits hold it
-(one page per fetch; RunConfig.max_fetches fetch calls per question). It changes no limit and never the source cache."""
+(the app's pages per fetch; RunConfig.max_fetches fetch calls per question). It changes no limit and never the source cache."""
 import importlib.util
 import sys
 from pathlib import Path
@@ -58,7 +58,7 @@ def test_built_once_through_the_apps_tools_with_counts_and_limits(live, tmp_path
     assert sorted(server.calls) == ["/observations", "/observationunits", "/studies/S1"]
     study = report["studies"]["S1"]
     assert study["units"] == {"status": "complete", "complete": True, "returned": 6, "reported_total": 6}
-    assert study["one_page"] is True and study["observations"]["V1"]["returned"] == 6 and study["study_record"] == "ok"
+    assert study["app_pages"] is True and study["observations"]["V1"]["returned"] == 6 and study["study_record"] == "ok"
     assert study["seconds"] >= 0                                                  # request time, against the run's budget
     rows = report["subquestions"]
     # run.required_fetches: one fetch per (study, variable); a roster only for a design question (review 10)
@@ -83,9 +83,9 @@ def test_no_catalog_in_the_source_is_refused(live, tmp_path):
         cache_mod.build(SUBS, source=tmp_path / "empty", dest=tmp_path / "bench2", out_dir=tmp_path / "out", max_fetches=5)
 
 
-def test_over_the_fetch_limit_and_over_one_page_are_listed(live, tmp_path, monkeypatch):
+def test_over_the_fetch_limit_and_over_the_apps_pages_are_listed(live, tmp_path, monkeypatch):
     """A sub-question needing more fetch calls than one question allows is listed; so is a study whose observations do
-    not come back complete within one page (review 10: one_page looked at the roster only)."""
+    not come back complete within the app's pages per fetch (review 10: the check looked at the roster only)."""
     source, _server = live
     two = [sub("S1.4", ["S1"], [("fresh root yield", None), ("dry matter content", None)])]
     report = cache_mod.build(two, source=source, dest=tmp_path / "bench", out_dir=tmp_path / "out", max_fetches=1)
@@ -99,7 +99,7 @@ def test_over_the_fetch_limit_and_over_one_page_are_listed(live, tmp_path, monke
         return result
     monkeypatch.setattr(cache_mod.srv, "dispatch", short_page)
     again = cache_mod.build(two, source=source, dest=tmp_path / "bench2", out_dir=tmp_path / "out2", max_fetches=5)
-    assert again["studies"]["S1"]["one_page"] is False and again["over_one_page"] == ["S1"]
+    assert again["studies"]["S1"]["app_pages"] is False and again["over_app_pages"] == ["S1"]
 
 
 def test_the_fetches_use_the_apps_own_run_settings(live, tmp_path, monkeypatch):
@@ -114,3 +114,57 @@ def test_the_fetches_use_the_apps_own_run_settings(live, tmp_path, monkeypatch):
     row = report["subquestions"]["S1.1"]
     assert row["fetch_seconds"] >= 0 and row["over_time_budget"] is False
     assert report["studies"]["S1"]["observations"]["V1"]["seconds"] >= 0
+
+
+class TwoPageStudyServer(StudyServer):
+    """The measurements and the plot list as 3 + 3 rows over two pages, as a study larger than one page; the rest as StudyServer."""
+
+    def __call__(self, req):
+        import json
+
+        from brapi_client import TransportResponse
+        from part2_support import load_fixture
+
+        endpoint = req.url[len(LIVE_BASE):]
+        if endpoint not in ("/observations", "/observationunits"):
+            return super().__call__(req)
+        page = int(req.params.get("page", 0))
+        self.calls.append(f"{endpoint} page {page}")
+        _, body = load_fixture(self.REPLIES[endpoint])
+        payload = json.loads(body)
+        rows = payload["result"]["data"]
+        payload["result"]["data"] = rows[:3] if page == 0 else rows[3:]
+        payload["metadata"]["pagination"].update(currentPage=page, pageSize=3, totalCount=len(rows), totalPages=2)
+        return TransportResponse(200, {"Content-Type": "application/json"}, json.dumps(payload).encode("utf-8"))
+
+
+def test_the_cache_holds_both_pages_a_run_reads(live, tmp_path, monkeypatch):
+    """Item 14 (coach 2026-10-23 21:48 UTC) and its review: the cache is filled as a run reads - the app's own pages per fetch
+    (app.live_config, RunConfig's default 2, never a literal) - so a study over one page is saved whole and counted as held; the
+    report names the number; the code-made approval allows three attempts per request and 3 hours per page at that many pages."""
+    from datetime import timedelta
+
+    import app
+    import brapi_client as bc
+    import run
+
+    server = TwoPageStudyServer()
+    monkeypatch.setattr(bc, "RequestsTransport", lambda: server)
+    source, _ = live
+    built = []
+    real = cache_mod.srv.build_context
+
+    def recording(*args, **kwargs):
+        built.append(real(*args, **kwargs))
+        return built[-1]
+
+    monkeypatch.setattr(cache_mod.srv, "build_context", recording)
+    two = [sub("S1.4", ["S1"], [("fresh root yield", None), ("dry matter content", None)])]
+    report = cache_mod.build(two, source=source, dest=tmp_path / "bench", out_dir=tmp_path / "out", max_fetches=5)
+    pages = app.live_config("q").max_observation_pages
+    assert pages == run.RunConfig(question="q").max_observation_pages == 2 and report["pages_per_fetch"] == pages
+    assert {"/observationunits page 1", "/observations page 1"} <= set(server.calls)
+    assert report["studies"]["S1"]["app_pages"] is True and report["over_app_pages"] == []
+    approval = built[0].approval
+    assert approval.max_http_attempts == 3 * (1 + pages * (1 + 2))                   # one study record; a roster and two variables
+    assert approval.expires_at_utc - approval.issued_at_utc == timedelta(hours=3 * pages, seconds=1)

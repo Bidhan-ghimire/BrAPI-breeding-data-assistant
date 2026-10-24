@@ -1,7 +1,8 @@
 """
 tests/test_benchmark_budgets.py - the benchmark-only budgets (Bidhan, 2026-10-21 ~17:58 UTC, answering Q1-Q3 of the baseline
 report): the harness passes 24 fetches, 10 pages and 30 plan steps per run; the app's own defaults stay 5 / 1 / 12. Pages may
-go to 20 since Bidhan's decision of 2026-10-23 (item 19), benchmark only.
+go to 20 since Bidhan's decision of 2026-10-23 (item 19), benchmark only; the app's own pages are 2 since the same decision
+(item 14), so its defaults are 5 / 2 / 12.
 
 The fetch count was already a run setting (RunConfig.max_fetches). Pages per plot-record fetch and steps per plan were fixed
 numbers (one page; the plan contract's 12 steps), so they become run settings with the old values as defaults; the plan
@@ -31,15 +32,18 @@ NOW = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
 
 # --- 1. the app keeps its own limits; the benchmark passes its budgets -------------------------------------------
 
-def test_the_apps_own_limits_stay_5_1_12():
+def test_the_apps_own_limits_are_5_2_12():
+    """Bidhan, 2026-10-23 (coach's DECISION entry 14:01 UTC, item 14): the app's own pages per plot-record fetch 1 -> 2 (the app,
+    the Space and every run that names none); fetches and plan steps unchanged."""
     import app_space
 
     live = app.live_config("How many plots does study S1 have?")
-    assert (live.max_fetches, live.max_observation_pages, live.max_plan_steps) == (5, 1, 12)
+    assert (live.max_fetches, live.max_observation_pages, live.max_plan_steps) == (5, 2, 12)
     hosted = app_space.space_config("How many plots does study S1 have?")                   # the Space (review: unpinned)
-    assert (hosted.max_fetches, hosted.max_observation_pages, hosted.max_plan_steps) == (5, 1, 12)
+    assert (hosted.max_fetches, hosted.max_observation_pages, hosted.max_plan_steps) == (5, 2, 12)
     default = ctl.RunConfig(question="q")
-    assert (default.max_fetches, default.max_observation_pages, default.max_plan_steps) == (5, 1, 12)
+    assert (default.max_fetches, default.max_observation_pages, default.max_plan_steps) == (5, 2, 12)
+    assert live.max_http_attempts == 10                                                  # the app's attempt cap is not raised
 
 
 def test_the_benchmark_passes_its_budgets_per_run_and_only_when_asked():
@@ -53,10 +57,11 @@ def test_the_benchmark_passes_its_budgets_per_run_and_only_when_asked():
     assert budget_problems == []
     assert config.max_elapsed_seconds == app.live_config(question).max_elapsed_seconds   # the time budget is not raised
     steps_only = bench.budgeted(app.live_config, max_plan_steps=30)(question)                 # review: one budget moves only itself
-    assert (steps_only.max_fetches, steps_only.max_observation_pages, steps_only.max_http_attempts) == (5, 1, 10)
+    assert (steps_only.max_fetches, steps_only.max_observation_pages, steps_only.max_http_attempts) == (5, 2, 10)
     pages_only = bench.budgeted(app.live_config, max_pages=3)(question)
     assert (pages_only.max_fetches, pages_only.max_observation_pages, pages_only.max_http_attempts) == (5, 3, 15)
     assert app.live_config(question).max_fetches == 5 and app.live_config(question).max_http_attempts == 10
+    assert bench.budgeted(app.live_config, max_fetches=3)(question).max_http_attempts == 10      # never below the app's own (3 x 2 = 6)
 
 
 def test_twenty_pages_pass_the_harness_and_the_runs_own_check():
@@ -68,7 +73,7 @@ def test_twenty_pages_pass_the_harness_and_the_runs_own_check():
     assert config.max_http_attempts == 480                                        # 24 fetches x 20 pages
     assert [p for p in config.validate() if "max_observation_pages" in p or "max_http_attempts" in p] == []
     assert bench.parse_args(["--cache", "x", "--max-pages", "20"]).max_pages == 20
-    assert app.live_config(question).max_observation_pages == 1 and ctl.RunConfig(question="q").max_observation_pages == 1
+    assert app.live_config(question).max_observation_pages == 2 and ctl.RunConfig(question="q").max_observation_pages == 2   # (14)
 
 
 @pytest.mark.parametrize("budget", [{"max_fetches": 25}, {"max_pages": 21}, {"max_plan_steps": 31}, {"max_fetches": 0},
@@ -177,7 +182,7 @@ def test_the_controller_gives_its_tools_the_runs_page_limit(tmp_path):
 
     default = ctl.Controller(cfg(tmp_path))._build_ctx(tmp_path / "o1")
     paged = ctl.Controller(cfg(tmp_path, max_observation_pages=10))._build_ctx(tmp_path / "o2")
-    assert (default.observation_max_pages, paged.observation_max_pages) == (1, 10)
+    assert (default.observation_max_pages, paged.observation_max_pages) == (2, 10)                 # the app's own 2 (item 14)
 
 
 def test_main_runs_every_question_with_the_budgets_and_writes_them_down(tmp_path, monkeypatch):

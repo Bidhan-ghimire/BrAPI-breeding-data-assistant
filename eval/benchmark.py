@@ -382,7 +382,7 @@ def results_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-# The budgets the benchmark may pass per run, above the app's own (5 fetches, 1 page per plot-record fetch, 12 plan steps).
+# The budgets the benchmark may pass per run, above the app's own (5 fetches, 2 pages per plot-record fetch, 12 plan steps).
 # Bidhan, 2026-10-21 ~17:58 UTC (answering Q1-Q3 of the baseline report): "yes, as benchmark-only settings the harness passes per
 # run (24 fetches, 10 pages, 30 steps); the app's defaults stay 5 / 1 / 12". Pages 10 -> 20: Bidhan, 2026-10-23 (coach's DECISION
 # entry 14:01 UTC, item 19), benchmark only. The HTTP attempt cap of the approval follows them: fetches x pages, never below the
@@ -421,7 +421,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--allow-live", action="store_true", help="let the app fetch what the copy lacks, after the scripted approval")
     parser.add_argument("--confirm", action="store_true", help="really run (uses the configured model; costs model calls)")
     parser.add_argument("--max-fetches", type=int, default=None, help="benchmark budget: fetch calls per question (app: 5; at most 24)")
-    parser.add_argument("--max-pages", type=int, default=None, help="benchmark budget: pages per plot-record fetch (app: 1; at most 20)")
+    parser.add_argument("--max-pages", type=int, default=None, help="benchmark budget: pages per plot-record fetch (app: 2; at most 20)")
     parser.add_argument("--max-plan-steps", type=int, default=None, help="benchmark budget: steps per plan (app: 12; at most 30)")
     return parser.parse_args(argv)
 

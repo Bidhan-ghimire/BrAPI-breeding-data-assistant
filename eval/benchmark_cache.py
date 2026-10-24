@@ -7,9 +7,9 @@ sub-question names with that study, its observations (get_observations) are fetc
 BrapiClient -> the new cache), under one approval made by code for exactly those studies and variables, exactly as a
 run's Retriever would request them. Benchmark runs then use a copy of this cache (eval/benchmark.py --cache).
 
-It records each study's unit count, its request time, and whether the app's limits hold it: one page per fetch (a
-roster or a variable the server reports as larger comes back incomplete, as in a run) and RunConfig.max_fetches fetch
-calls per question, counted as run.required_fetches counts them (one per study and variable; a roster per study only for
+It records each study's unit count, its request time, and whether the app's limits hold it: the app's pages per fetch
+(app.live_config; a roster or a variable the server reports as larger comes back incomplete, as in a run) and
+RunConfig.max_fetches fetch calls per question, counted as run.required_fetches counts them (one per study and variable; a roster per study only for
 a question without a variable, a design question). It changes no limit.
 """
 from __future__ import annotations
@@ -57,6 +57,7 @@ def build(subs: list[dict[str, Any]], *, source: Path, dest: Path, out_dir: Path
     while a run gets them in about 40 s."""
     cfg = harness.app.live_config("benchmark cache")
     max_fetches = cfg.max_fetches if max_fetches is None else max_fetches
+    pages = cfg.max_observation_pages                         # the app's own pages per fetch, as a run reads them (item 14)
     if dest.exists() and any(dest.iterdir()):
         raise ValueError(f"{dest} is already built; a benchmark cache is built once")
     catalog = harness.read_catalog(source) if source.is_dir() else None
@@ -89,9 +90,12 @@ def build(subs: list[dict[str, Any]], *, source: Path, dest: Path, out_dir: Path
     approval = FetchApproval(
         approval_id=f"appr_{run_id}_human_{uuid.uuid4().hex[:6]}", run_id=run_id, base_url=settings.base_url,
         endpoint_families=["observations", "observationunits", "studies"], observation_study_ids=sorted(pairs),
-        observation_variable_ids=variables, max_http_attempts=max(1, 3 * (2 * len(pairs) + sum(len(v) for v in pairs.values()))),
-        max_observation_studies=len(pairs), issued_at_utc=now - timedelta(seconds=1), expires_at_utc=now + timedelta(hours=3))
+        observation_variable_ids=variables,
+        # three attempts per request: a study record, and each roster and variable at that many pages; 3 hours per page
+        max_http_attempts=max(1, 3 * (len(pairs) + pages * (len(pairs) + sum(len(v) for v in pairs.values())))),
+        max_observation_studies=len(pairs), issued_at_utc=now - timedelta(seconds=1), expires_at_utc=now + timedelta(hours=3 * pages))
     ctx = srv.build_context(offline=False, cache_dir=dest, out_dir=out_dir, run_id=run_id, approval=approval, settings=settings)
+    ctx.observation_max_pages = pages                          # as a run's tools read (run.Controller._build_ctx)
     studies_report: dict[str, Any] = {}
     for study in sorted(pairs):
         before = len(list(ctx.client.provenance()))
@@ -108,8 +112,8 @@ def build(subs: list[dict[str, Any]], *, source: Path, dest: Path, out_dir: Path
             row["observations"][variable] = {**{k: (got.data or {}).get(k) for k in _FIELDS},
                                              "seconds": round(time.monotonic() - started, 3),
                                              "error": None if got.ok else str(got.error)}
-        # one page holds the study only when its roster and every variable came back complete (review 10)
-        row["one_page"] = bool(row["units"]["complete"]) and all(o["complete"] for o in row["observations"].values())
+        # the app's pages hold the study only when its roster and every variable came back complete (review 10)
+        row["app_pages"] = bool(row["units"]["complete"]) and all(o["complete"] for o in row["observations"].values())
         records = list(ctx.client.provenance())[before:]
         row["seconds"] = round(sum(r.duration_seconds or 0.0 for r in records), 3)    # request time, vs the run's budget
         studies_report[study] = row
@@ -121,11 +125,11 @@ def build(subs: list[dict[str, Any]], *, source: Path, dest: Path, out_dir: Path
         row["fetch_seconds"] = round(sum(seconds), 1)
         row["over_time_budget"] = row["fetch_seconds"] > cfg.max_elapsed_seconds
     return {"built_utc": now.isoformat(), "source": str(source), "dest": str(dest), "base_url": settings.base_url,
-            "catalog_fetched": catalog.fetched_at, "max_fetches": max_fetches, "page_size": settings.page_size,
+            "catalog_fetched": catalog.fetched_at, "max_fetches": max_fetches, "page_size": settings.page_size, "pages_per_fetch": pages,
             "read_timeout": settings.read_timeout, "time_budget_seconds": cfg.max_elapsed_seconds,
             "over_time_budget": sorted(k for k, r in per_sub.items() if r["over_time_budget"]),
             "studies": studies_report, "subquestions": per_sub, "unresolved_variables": unresolved,
-            "over_one_page": sorted(s for s, r in studies_report.items() if not r["one_page"]),
+            "over_app_pages": sorted(s for s, r in studies_report.items() if not r["app_pages"]),
             "over_max_fetches": sorted(k for k, r in per_sub.items() if r["over_max_fetches"])}
 
 
@@ -146,7 +150,8 @@ def main(argv: list[str] | None = None) -> int:
     report = build(subs, source=args.source, dest=args.dest, out_dir=args.report.parent / "build_out")
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
-    print(f"{len(report['studies'])} studies; over one page: {report['over_one_page'] or 'none'}; over {report['max_fetches']} "
+    print(f"{len(report['studies'])} studies; over {report['pages_per_fetch']} pages per fetch: {report['over_app_pages'] or 'none'}; "
+          f"over {report['max_fetches']} "
           f"fetch calls: {len(report['over_max_fetches'])} sub-questions; unresolved variables: {len(report['unresolved_variables'])}")
     return 0
 

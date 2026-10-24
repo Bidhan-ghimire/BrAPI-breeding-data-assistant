@@ -52,7 +52,7 @@ class ToolContext:
     approval: FetchApproval | None = None     # set ONLY by controller code, never from a tool argument
     search_max_pages: int = 5                 # bounded paging for metadata searches
     export_max_pages: int = 20                # bounded paging for full metadata exports
-    observation_max_pages: int = 1            # pages per plot-record fetch: 1 in the app, up to 20 in the benchmark (run setting)
+    observation_max_pages: int = 1            # pages per plot-record fetch: a run sets it (the app's own 2, up to 20 in the benchmark)
     preview_rows: int = 5
     # Controller-owned metadata, keyed by the exact validated variable ID. Never a tool argument.
     variable_measurements: dict[str, MeasurementMeta] = field(default_factory=dict)

@@ -106,7 +106,7 @@ DATA_REVIEW_PROMPT = "continue to analysis / cancel: "
 _ASKED = "clarification needed: "            # how agents.analyst records the Analyst's question in the report's caveats
 _clock = time.monotonic                      # the clock the budget uses (llm.run_agent_loop's default); tests replace it
 MAX_CLARIFICATION_ROUNDS = 5       # an upper bound for any caller; the command line uses 1, the chat 3
-MAX_OBSERVATION_PAGES = 20         # pages per plot-record fetch any run may ask for (the benchmark's budget; the app's own is 1)
+MAX_OBSERVATION_PAGES = 20         # pages per plot-record fetch any run may ask for (the benchmark's budget; the app's own is 2)
 STATES = ("supervise", "config", "plan", "clarify", "metadata", "catalog_list", "catalog_setup", "resolve", "approve", "retrieve", "review_data", "analyze",
           "render", "accept", "record")
 AnswerFn = Callable[[str], str]
@@ -125,9 +125,10 @@ class RunConfig:
     auto: bool = False
     max_fetches: int = 5
     max_http_attempts: int = 20
-    # Pages per plot-record fetch (observations, the plot list) and steps per plan. The app keeps 1 and 12; the benchmark may
-    # pass up to 10 and 30 (Bidhan, 2026-10-21: benchmark-only settings passed per run).
-    max_observation_pages: int = 1
+    # Pages per plot-record fetch (observations, the plot list) and steps per plan. The app keeps 2 and 12 (pages 1 -> 2: Bidhan,
+    # 2026-10-23, item 14); the benchmark may pass up to 20 and 30 (Bidhan, 2026-10-21 and 2026-10-23: benchmark-only settings
+    # passed per run).
+    max_observation_pages: int = 2
     max_plan_steps: int = DEFAULT_PLAN_STEPS
     out_dir: Path = PART2_DIR / "out"
     cache_dir: Path | None = None
@@ -675,7 +676,7 @@ class Controller:
             settings = replace(settings, mode="offline")
         ctx = build_context(cache_dir=self.cache_dir, out_dir=out_dir, run_id=run_id or self.run_id,
                             offline=offline, settings=settings)
-        ctx.observation_max_pages = self.config.max_observation_pages      # pages per plot-record fetch; the app's own is 1
+        ctx.observation_max_pages = self.config.max_observation_pages      # pages per plot-record fetch; the app's own is 2
         return ctx
 
     @asynccontextmanager
