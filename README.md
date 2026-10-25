@@ -74,3 +74,15 @@ Suggested citation:
 GitHub's **Cite this repository** option provides a citation you can copy; add the release or commit used in your study.
 
 Also cite the original breeding database and datasets according to their citation requirements. Citing this software does not replace crediting the people who generated the data.
+
+## Update: version 1.1 (October 2026)
+
+This version keeps the same website and the same way of working. What changed:
+
+- **A newer AI model.** The assistant now uses OpenAI's Luna model (gpt-6-luna) in place of gpt-4.1. The page itself names no model.
+- **One path for every message.** Small talk gets a short plain reply. A catalog question (for example, "Which studies have a 2026 season?") is answered at once from the saved catalog, with no database run.
+- **No made-up numbers in results.** Results are worked out by code from the records the assistant fetched. The model's own notes are labelled unverified, and a note that holds a number nothing backs is left out of the answer; the Full report keeps it, marked.
+- **Eleven new statistics.** Analysis of variance, genotype × environment, heritability, heterosis, correlations between entry means, stress indices, rankings, mean comparisons and more, each computed in plain Python from the fetched records, with p-values where they apply.
+- **Zero values are kept.** The database's observations service leaves out values recorded as 0. The assistant now reads the plot records, so zeros count. Counts are shown first, with exact labels.
+
+How well it answers: on 164 single-statistic questions against SweetPotatoBase, graded by code, Luna gives the right number in 82, a wrong number in 8, no number in 36 (asking a question back counts here), and stops without an answer in 38. In that run it showed no made-up number. (24 Oct 2026 run; the release check of 14 questions passed 14 of 14.)
