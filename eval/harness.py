@@ -269,10 +269,12 @@ def plain(markdown: str) -> str:
     return _MARKDOWN_ESCAPE.sub(r"\1", html.unescape(markdown or "")).replace("**", "")
 
 
-def code_written(markdown: str) -> str:
-    """The answer as a reader sees it (plain), without what the app marks as model text: the "Additional model notes
-    (unverified)" heading with the bullet lines under it, and every paragraph that starts "Unverified model note:"."""
+def _model_text_split(markdown: str) -> tuple[list[str], list[str]]:
+    """(kept, notes): the plain answer's lines, split where the app marks model text. The "Additional model notes
+    (unverified)" heading opens a block of bullet lines, which blank lines do not end and the first other line does; every
+    paragraph that starts "Unverified model note:" is a note too. The heading and the block's blank lines are in neither."""
     kept: list[str] = []
+    notes: list[str] = []
     in_notes = False
     for line in plain(markdown).split("\n"):        # as chat_presenter writes lines (not splitlines: U+2028 is no new line)
         text = line.strip()
@@ -280,11 +282,23 @@ def code_written(markdown: str) -> str:
             in_notes = True
             continue
         if in_notes and (not text or text.startswith("- ")):
+            if text:
+                notes.append(line)
             continue
         in_notes = False
-        if not text.startswith(_MODEL_NOTE):
-            kept.append(line)
-    return "\n".join(kept)
+        (notes if text.startswith(_MODEL_NOTE) else kept).append(line)
+    return kept, notes
+
+
+def code_written(markdown: str) -> str:
+    """The answer as a reader sees it (plain), without what the app marks as model text: the "Additional model notes
+    (unverified)" heading with the bullet lines under it, and every paragraph that starts "Unverified model note:"."""
+    return "\n".join(_model_text_split(markdown)[0])
+
+
+def model_notes(markdown: str) -> list[str]:
+    """The lines code_written leaves out as model text, in order (_model_text_split)."""
+    return _model_text_split(markdown)[1]
 
 
 def no_answer(markdown: str) -> str | None:

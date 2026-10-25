@@ -143,10 +143,9 @@ def _without_quotes(text: str) -> str:
     return "\n".join(line for line in text.split("\n") if not line.lstrip().startswith(">"))
 
 
-def claim_numbers(claims: Iterable[dict[str, Any]]) -> list[float]:
-    """Every number a run's claims carry: values, denominators, units, exclusion counts, and numbers in their filters,
-    grouping, method, missing-reason, denominator and exclusion-reason texts (a reason the answer shows is claim text; T3
-    review 2; an exclusion names its entries and says "and N more", coach 2026-10-24 12:50 UTC, NEXT 3)."""
+def claim_values(claims: Iterable[dict[str, Any]]) -> list[float]:
+    """The numbers a run's claims hold as numbers: values, denominators, independent units and exclusion counts (claim_numbers
+    without the numbers in the claims' texts): the second reading of a note number (note_numbers)."""
     found: list[float] = []
     for c in claims:
         denominator = c.get("denominator") or {}
@@ -154,6 +153,17 @@ def claim_numbers(claims: Iterable[dict[str, Any]]) -> list[float]:
                   *[e.get("count") for e in c.get("exclusions") or []]):
             if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
                 found.append(float(v))
+    return found
+
+
+def claim_numbers(claims: Iterable[dict[str, Any]]) -> list[float]:
+    """Every number a run's claims carry: values, denominators, units, exclusion counts, and numbers in their filters,
+    grouping, method, missing-reason, denominator and exclusion-reason texts (a reason the answer shows is claim text; T3
+    review 2; an exclusion names its entries and says "and N more", coach 2026-10-24 12:50 UTC, NEXT 3)."""
+    claims = list(claims)
+    found = claim_values(claims)
+    for c in claims:
+        denominator = c.get("denominator") or {}
         for text in (*(c.get("filters") or {}).values(), *(c.get("grouping") or []), c.get("transformation") or "",
                      c.get("missing_reason") or "", denominator.get("name") or "", *(e.get("reason") or "" for e in c.get("exclusions") or [])):
             found += [n for n, *_ in _numbers(str(text))]
@@ -273,6 +283,65 @@ def code_written_texts() -> tuple[str, ...]:
     return (triage.out_of_scope_line(harness.app._source_name()),)
 
 
+def note_numbers(sub: dict[str, Any], *, shown: str, claims: list[dict[str, Any]], backed_extra: Iterable[float] = (),
+                 run: bool = True) -> dict[str, Any]:
+    """Every number in what the app marks as model text (harness.model_notes: the "Additional model notes (unverified)" bullets
+    and the "Unverified model note:" paragraphs, which grade leaves out), read with grade's reader (_numbers: the app's own
+    phrases, "80 groups" or "source 3", are the model's words in a note, so they are read too), each with its backing under
+    two readings at the precision written (_backed): "today", what the invented check backs a number of the checked reply with
+    (claim_numbers, the question's numbers and backed_extra: the run's own tables and code-written fields; with no run, the
+    question's alone), and "claim_value", the claims' numeric fields alone (claim_values). A measurement while Bidhan's rule
+    for note numbers is open (coach 2026-10-25 02:52 UTC, NEXT 2; item (31)): no bucket, grade or shown text depends on it."""
+    claims = list(claims)
+    asked = [n for n, *_ in _numbers(sub.get("question", ""))]
+    today = claim_numbers(claims) + asked + [float(x) for x in backed_extra] if run else asked
+    values = claim_values(claims)
+    numbers = []
+    lines = harness.model_notes(shown)
+    for line in lines:
+        for v, d, start, end in _numbers(line):
+            numbers.append({"value": int(v) if float(v).is_integer() else v, "context": harness._around(line, start, end, 60),
+                            "today": _backed(v, d, today), "claim_value": _backed(v, d, values)})
+    return {"lines": len(lines), "numbers": numbers, "count": len(numbers), "today_unbacked": sum(not n["today"] for n in numbers),
+            "claim_unbacked": sum(not n["claim_value"] for n in numbers)}
+
+
+def listed_notes(sub: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    """note_numbers that never stops a run: a number the reader cannot hold ("0E0326" overflows _backed's precision) makes this
+    row's listing an error, and the run goes on, since results.json is written only when a run ends (review 2026-10-25, S2)."""
+    try:
+        return note_numbers(sub, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - a measurement must not end a paid run
+        return {"lines": len(harness.model_notes(str(kwargs.get("shown") or ""))), "numbers": [], "count": 0, "today_unbacked": 0,
+                "claim_unbacked": 0, "error": " ".join(f"{type(exc).__name__}: {exc}".split())[:200]}
+
+
+def note_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """The listing's totals over a report's rows (a row without a listing counts as none)."""
+    listed = [(r["sub_id"], r.get("note_numbers") or {}) for r in rows]
+    return {"count": sum(n.get("count", 0) for _, n in listed), "rows_with_notes": sum(1 for _, n in listed if n.get("lines")),
+            "rows_with_numbers": sum(1 for _, n in listed if n.get("count")),
+            "today_unbacked": sum(n.get("today_unbacked", 0) for _, n in listed),
+            "claim_unbacked": sum(n.get("claim_unbacked", 0) for _, n in listed),
+            "rows_today_unbacked": [sid for sid, n in listed if n.get("today_unbacked")],
+            "rows_claim_unbacked": [sid for sid, n in listed if n.get("claim_unbacked")],
+            "rows_error": [sid for sid, n in listed if n.get("error")]}
+
+
+def _rows(n: int) -> str:
+    return f"{n} row" if n == 1 else f"{n} rows"
+
+
+def note_line(summary: dict[str, Any]) -> str:
+    """The listing's line in results.md and note_numbers.md."""
+    return (f"- Note numbers (the model's notes; listed, not graded): {summary['count']} in {_rows(summary['rows_with_numbers'])}, "
+            f"of {_rows(summary.get('rows_with_notes', 0))} with notes; "
+            f"no backing under today's checked-reply rule: {summary['today_unbacked']}"
+            + (f" ({', '.join(summary['rows_today_unbacked'])})" if summary["rows_today_unbacked"] else "")
+            + f"; no claim value: {summary['claim_unbacked']} (in {_rows(len(summary['rows_claim_unbacked']))})"
+            + (f"; listing failed: {', '.join(summary['rows_error'])}" if summary.get("rows_error") else ""))
+
+
 def invented_summary(report: dict[str, Any]) -> str:
     """Both counts, always (coach 2026-10-24 12:50 UTC): the invented rows, then the code-written replies not graded."""
     code = report.get("code_written_replies") or []
@@ -355,9 +424,9 @@ def run_subquestions(subs: list[dict[str, Any]], *, cache_copy: Path, out_dir: P
             claims = [c.model_dump(mode="json") for r in outcome.results if r.analysis for c in r.analysis.claims]
             ran = bool(outcome.results)
             catalog_run = any(step.action in CATALOG_ACTIONS for r in outcome.results if r.plan for step in r.plan.steps)
-            graded = grade(s, shown=outcome.shown, status=outcome.status, claims=claims,
-                           backed_extra=run_numbers(outcome.run_dirs) if ran else (), run=ran, code_catalog=catalog_run,
-                           code_replies=code_replies)
+            extra = run_numbers(outcome.run_dirs) if ran else ()
+            graded = grade(s, shown=outcome.shown, status=outcome.status, claims=claims, backed_extra=extra, run=ran,
+                           code_catalog=catalog_run, code_replies=code_replies)
             run_calls = sum(r.counts.model_calls for r in outcome.results)
             tokens = harness.tally((counter.replies if counter else []) + harness.run_replies(outcome.run_dirs),
                                    (counter.calls if counter else 0) + run_calls)
@@ -370,7 +439,8 @@ def run_subquestions(subs: list[dict[str, Any]], *, cache_copy: Path, out_dir: P
                          "live_attempts": sum(r.counts.live_attempts for r in outcome.results),
                          "refused_requests": 0 if allow_live else harness.RefusingTransport.refused,
                          "run_ids": [r.run_id for r in outcome.results], "tokens": tokens, "seconds": round(seconds, 2),
-                         "caveat": s.get("caveat")})
+                         "caveat": s.get("caveat"),
+                         "note_numbers": listed_notes(s, shown=outcome.shown, claims=claims, backed_extra=extra, run=ran)})
             say(f"{s['sub_id']:8} {s['tier']} {graded['bucket']:9} {seconds:6.1f}s  {graded['why'][:80]}", flush=True)
     finally:
         harness.app.Job = saved_job
@@ -380,7 +450,8 @@ def run_subquestions(subs: list[dict[str, Any]], *, cache_copy: Path, out_dir: P
     by_tier = {t: {b: sum(1 for r in rows if r["tier"] == t and r["bucket"] == b) for b in BUCKETS} for t in TIERS}
     return {"cost_usd": None if None in costs else round(sum(costs), 6), "by_tier": by_tier,
             "invented": [r["sub_id"] for r in rows if r["bucket"] == "invented"],
-            "code_written_replies": [r["sub_id"] for r in rows if r.get("code_written_reply")], "subquestions": rows,
+            "code_written_replies": [r["sub_id"] for r in rows if r.get("code_written_reply")],
+            "note_numbers": note_summary(rows), "subquestions": rows,
             "requests": "allowed after the scripted approval" if allow_live else "none: cache copy only"}
 
 
@@ -388,7 +459,8 @@ def results_markdown(report: dict[str, Any]) -> str:
     lines = [f"# Benchmark run, {report['started_utc']}", "", f"- Models: {report['models']}",
              f"- Cache copy: `{report['cache_copy']}`; database requests: {report['requests']}",
              f"- Cost: {report['cost_usd']} US dollars at the prices in eval/harness.py PRICES (an upper bound for OpenAI)",
-             f"- INVENTED (red flag): {invented_summary(report)}", "",
+             f"- INVENTED (red flag): {invented_summary(report)}",
+             *([note_line(report["note_numbers"])] if report.get("note_numbers") else []), "",
              "| Tier | Sub-questions | pass | wrong | no number | blocked | invented |", "|---|---|---|---|---|---|---|"]
     for tier, counts in report["by_tier"].items():
         total = sum(counts.values())
@@ -441,7 +513,9 @@ def budgeted(base_config: Callable[[str], Any], *, max_fetches: int | None = Non
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the benchmark's sub-questions through the app and grade them by code.")
-    parser.add_argument("--cache", required=True, type=Path, help="the cache folder to copy (it is never changed)")
+    parser.add_argument("--cache", type=Path, help="the cache folder to copy (it is never changed); needed for a run")
+    parser.add_argument("--note-numbers", type=Path, metavar="FOLDER",
+                        help="no run: list the model-note numbers of a saved results folder into note_numbers.json and .md")
     parser.add_argument("--subquestions", type=Path, default=SUBQUESTIONS)
     parser.add_argument("--results", type=Path, default=RESULTS)
     parser.add_argument("--tiers", default="T1,T2,T3", help="comma-separated tiers, run in this order")
@@ -464,10 +538,62 @@ def budgets_record(args: argparse.Namespace, make_config: Callable[[str], Any]) 
             "max_plan_steps": config.max_plan_steps, "max_http_attempts": config.max_http_attempts}
 
 
+def list_note_numbers(folder: Path) -> int:
+    """--note-numbers: the listing for a saved results folder, from its own files (each row's question and full answer, the full
+    claims of its runs' answer.json, run_numbers of its run folders), written to note_numbers.json and note_numbers.md beside
+    results.json, which is left as it is. No run, no model call, no request. Each listing says what it read: "answer_source"
+    (an old row without answer_full has only the answer cut at harness.GOT_CHARS, and notes come last) and "runs_missing" (run
+    folders not found: their claims and tables cannot back anything) (review 2026-10-25, S3)."""
+    if not (folder / "results.json").is_file():
+        print(f"no results.json in {folder}")
+        return 2
+    report = json.loads((folder / "results.json").read_text(encoding="utf-8"))
+    if not isinstance(report, dict) or not isinstance(report.get("subquestions"), list):
+        print(f"no benchmark rows in {folder / 'results.json'}")
+        return 2
+    listed: dict[str, Any] = {}
+    for row in report["subquestions"]:
+        ids = row.get("run_ids") or []
+        run_dirs = [folder / "out" / rid for rid in ids if (folder / "out" / rid).is_dir()]
+        claims: list[dict[str, Any]] = []
+        answers = [run_dir / "answer.json" for run_dir in run_dirs if (run_dir / "answer.json").is_file()]
+        for answer in answers:
+            claims += (json.loads(answer.read_text(encoding="utf-8")).get("analysis") or {}).get("claims") or []
+        full, shown = row.get("answer_full"), row.get("answer") or ""
+        source = "answer_full" if full is not None else (f"answer (cut at {harness.GOT_CHARS} characters)"
+                                                         if len(shown) >= harness.GOT_CHARS else "answer")
+        sid = row["sub_id"]
+        key = sid if sid not in listed else f"{sid} #{sum(k.split(' #')[0] == sid for k in listed) + 1}"      # a repeated sub-question
+        listed[key] = {**listed_notes(row, shown=full if full is not None else shown, claims=claims,
+                                      backed_extra=run_numbers(run_dirs) if ids else (), run=bool(ids)),
+                       "answer_source": source, "runs_missing": len(ids) - len(run_dirs), "answers_missing": len(run_dirs) - len(answers)}
+    summary = {**note_summary([{"sub_id": sid, "note_numbers": n} for sid, n in listed.items()]),
+               "rows_cut_answer": [sid for sid, n in listed.items() if n["answer_source"].startswith("answer (cut")],
+               "rows_runs_missing": [sid for sid, n in listed.items() if n["runs_missing"]],
+               "rows_answers_missing": [sid for sid, n in listed.items() if n["answers_missing"]]}
+    (folder / "note_numbers.json").write_text(json.dumps({"summary": summary, "rows": listed}, indent=2, ensure_ascii=False) + "\n",
+                                              encoding="utf-8")
+    gaps = (summary["rows_cut_answer"], summary["rows_runs_missing"], summary["rows_answers_missing"])
+    warning = (f"- Read from a cut answer: {', '.join(gaps[0]) or 'none'}; run folders missing: {', '.join(gaps[1]) or 'none'}; "
+               f"runs without answer.json: {', '.join(gaps[2]) or 'none'}" if any(gaps) else "")
+    lines = [f"# Note numbers, {folder.resolve().name}", "", note_line(summary)] + ([warning] if warning else []) + [""]
+    lines += [f"- {sid}: {n['count']} number{'' if n['count'] == 1 else 's'}; no backing today: "
+              f"{', '.join(str(x['value']) for x in n['numbers'] if not x['today']) or 'none'}; no claim value: {n['claim_unbacked']}"
+              + (f"; listing failed: {n['error']}" if n.get("error") else "") for sid, n in listed.items() if n["count"] or n.get("error")]
+    (folder / "note_numbers.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"{note_line(summary)}{' ' + warning if warning else ''} -> {folder / 'note_numbers.md'}")
+    return 0
+
+
 def main(argv: list[str] | None = None, *, base_config: Callable[[str], Any] | None = None,
          make_models: Callable[[], Any] | None = None, triage_model: Callable[[], Any] | None = None,
          preflight: Callable[[str], list[str]] | None = None) -> int:
     args = parse_args(argv)
+    if args.note_numbers is not None:
+        return list_note_numbers(args.note_numbers)
+    if args.cache is None:
+        print("--cache is needed for a run")
+        return 2
     subs = load_subquestions(args.subquestions)
     tiers = [t.strip() for t in args.tiers.split(",") if t.strip()]
     not_checkable = [s["sub_id"] for s in subs if not s.get("checkable", True)]
