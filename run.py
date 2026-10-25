@@ -546,6 +546,43 @@ def scope_mismatches(manifest: FetchManifest, approval: FetchApproval) -> list[s
 # --------------------------------------------------------------------------
 
 
+def dropped_notes_record(controller: Any) -> dict[str, Any]:
+    """manifest.json's "dropped_note_lines" (decision (31)(b), rule (3); coach 2026-10-25 13:48 UTC): how many model-note lines
+    the answer leaves out, and each with the numbers nothing backs (chat_presenter.dropped_notes; None for a line the check
+    could not read), with "error" when part of the check failed (those lines are left out). chat_presenter imports this
+    module, so it is imported here, at the call. The record is always valid JSON and is written whatever the check meets: when
+    the answer itself cannot be made, count is None and error says why."""
+    try:
+        from chat_presenter import dropped_notes
+        found = dropped_notes(controller)
+        lines = [entry for entry in found if "error" not in entry]
+        errors = [entry["error"] for entry in found if "error" in entry]
+        record = {"count": len(lines), "lines": lines, **({"error": "; ".join(errors)} if errors else {})}
+        json.dumps(record, allow_nan=False)
+        return record
+    except Exception as exc:  # noqa: BLE001 - a run's record must not be lost for its notes
+        return {"count": None, "lines": [], "error": f"{type(exc).__name__}: {exc}"}
+
+
+def left_out_marks(controller: Any, raw_notes: list[str]) -> dict[str, str]:
+    """The Full report's marker on each raw model note the answer leaves out (decision (31)(b); option (b) of the builder's 14:50
+    entry, coach 2026-10-25 15:48 UTC): " (left out of the answer: <numbers> unbacked)". Nothing is removed from the report.
+    When the answer cannot be made, each raw note says that it could not be determined."""
+    try:
+        from chat_presenter import dropped_notes, note_line
+        left_out = {entry["line"]: entry["numbers"] for entry in dropped_notes(controller) if "line" in entry}
+        marks = {}
+        for raw in raw_notes:
+            line = note_line(raw.split(": ", 1)[-1])
+            if line in left_out:
+                numbers = left_out[line]
+                marks[raw] = (f" (left out of the answer: {', '.join(map(str, numbers))} unbacked)" if numbers
+                              else " (left out of the answer: its numbers could not be checked)")
+        return marks
+    except Exception:  # noqa: BLE001 - the report is written whatever the check meets
+        return {raw: " (whether the answer shows it could not be determined)" for raw in raw_notes}
+
+
 @dataclass
 class Controller:
     config: RunConfig
@@ -1501,9 +1538,10 @@ class Controller:
         if self.retrieval is not None:
             raw_model_notes += [f"Retriever note: {note}" for note in self.retrieval.warnings if note.lower().startswith("model note:")]
         if raw_model_notes:
+            marks = left_out_marks(self, raw_model_notes)       # each line the answer leaves out says so (decision (31)(b))
             lines += ["## Raw model notes (unverified)", "",
                       "These model-written statements are preserved for review; recorded tool actions do not verify their scientific interpretation.",
-                      *[f"- {note}" for note in raw_model_notes], ""]
+                      *[f"- {note}{marks.get(note, '')}" for note in raw_model_notes], ""]
         lines += ["## Notes", "", *[f"- {n}" for n in self.notes], ""]
         lines += ["## Evidence", "", f"- request records: {len(self.requests)} (see manifest.json)",
                   f"- artifacts: {', '.join(self.ctx.registry.artifact_ids()) if self.ctx else 'none'}", f"- state trace: {' -> '.join(self.trace)}", ""]
@@ -1511,12 +1549,14 @@ class Controller:
 
     def record(self) -> RunResult:
         self._enter("record")
+        dropped = dropped_notes_record(self)     # as the answer was shown: build_result may add its own note (a contract refusal)
         result = self.build_result()
         self.run_dir.mkdir(parents=True, exist_ok=True)
         (self.run_dir / "answer.json").write_text(dump_json(result), encoding="utf-8")
         (self.run_dir / "answer.md").write_text(self.answer_markdown(), encoding="utf-8")
         manifest = {
             "run_id": self.run_id, "execution_status": result.execution_status, "human_acceptance": result.human_acceptance,
+            "dropped_note_lines": dropped,
             "plan_id": result.plan.plan_id, "fetch_manifest_sha256": self.manifest.sha256() if self.manifest else None,
             "approval_id": result.approval_id, "approved_manifest_sha256": result.approved_manifest_sha256,
             "artifacts": [{"artifact_id": a.artifact_id, "sha256": a.sha256, "kind": a.kind, "row_count": a.row_count, "complete": a.complete} for a in result.artifacts],

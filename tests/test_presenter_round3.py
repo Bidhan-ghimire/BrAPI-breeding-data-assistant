@@ -65,13 +65,17 @@ def test_all_dates_missing_model_claim_is_not_suppressed_without_matching_code_c
         assert "1 of 140" in shown
 
 
-def test_unrecognized_analyst_warnings_and_signs_remain_visible_and_unverified():
+def test_unrecognized_analyst_warnings_remain_visible_and_unverified_unless_a_number_nothing_backs():
     notes = [CODE_STAGE, "model: Growth stage differs across sites by 120 days.",
              "model: Field damage may depress values below zero (-2).",
              "model: Source annotations require checking."]
-    shown = cp.answer_summary(view([mean()], notes, [MODEL_PROCESS + " A disease-rating warning needs review."]))
-    assert "Additional model notes (unverified)" in shown
-    assert "120 days" in shown and "-2" in shown and "Source annotations require checking" in shown
+    controller = view([mean()], notes, [MODEL_PROCESS + " A disease-rating warning needs review."])
+    shown = cp.answer_summary(controller)
+    assert "Additional model notes (unverified)" in shown and "Source annotations require checking" in shown
+    # Changed 2026-10-25 (decision (31)(b), rule (3), Bidhan via the coach 12:20 UTC): a note line with a number that no claim,
+    # the question, the run's tables or the rest of the answer backs is left out of the chat; 120 and -2 are such numbers here.
+    assert "120 days" not in shown and "below zero" not in shown
+    assert [entry["numbers"] for entry in cp.dropped_notes(controller)] == [[120], [-2]]
     # Changed 2026-10-16 (Retriever notes plan; test renamed from ..._unrecognized_warnings_...): an unfamiliar note of the
     # RETRIEVER no longer stays in the chat (test_full_report_... checks it is in the Full report). The Analyst's unfamiliar
     # notes above stay visible, as before.

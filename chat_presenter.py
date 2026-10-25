@@ -5,9 +5,10 @@ import html
 import json
 import re
 from collections import Counter, defaultdict
-from typing import Any
+from typing import Any, Callable
 
 import brapi_client
+import note_backing
 from analyst_tools import CV_OF_VALUES, MISSING_GROUP, PERCENT_MISSING
 from catalog_answers import plain_reason as catalog_plain
 from contracts import Claim
@@ -1042,9 +1043,69 @@ def _zeros_left_out(controller: Any) -> bool:
                     for artifact in artifacts))
 
 
+_UNVERIFIED = "Unverified model note: "
+
+
+def _shown_notes(controller: Any, notes: list[str], checked: list[str], dropped: list[dict[str, Any]] | None) -> list[str]:
+    """The model-note lines the answer shows (decision (31)(b), rule (3): note_backing). A line with a number that nothing backs
+    (the run's claims, the person's words in the question, the run's own tables and code-written fields, or the rest of this
+    answer: checked) is left out and added to dropped with those numbers. The run's own numbers are read only for a line the
+    rest does not back, as the answer is shown (_run_numbers). When part of the check cannot run, a line it cannot back is left
+    out (fail closed; "numbers": None when the line itself could not be read) and dropped records the error."""
+    if not notes:
+        return notes
+    errors: list[str] = []
+
+    def attempt(make: Callable[[], Any], fallback: Any) -> Any:
+        try:
+            return make()
+        except Exception as exc:  # noqa: BLE001 - recorded; a line the check cannot back is left out
+            errors.append(f"{type(exc).__name__}: {exc}")
+            return fallback
+
+    analysis = getattr(controller, "analysis", None)
+    backing = attempt(lambda: note_backing.sources(
+        claims=[c.model_dump(mode="json") if hasattr(c, "model_dump") else c for c in (getattr(analysis, "claims", None) or [])],
+        question=person_words(getattr(getattr(controller, "plan", None), "question", None) or ""), extra=[],
+        checked_text="\n".join(checked)), [])
+    with_run: list[float] | None = None
+    kept, left_out = [], []
+    for note in notes:
+        missing = attempt(lambda: note_backing.unbacked(note, backing), None)
+        if missing != []:
+            if with_run is None:                       # two attempts: an unreadable table leaves the report fields
+                with_run = (backing + attempt(lambda: note_backing.table_numbers(getattr(controller, "run_dir", None)), [])
+                            + attempt(lambda: _field_numbers(controller), []))
+            missing = attempt(lambda: note_backing.unbacked(note, with_run), None)
+        if missing == []:
+            kept.append(note)
+        else:
+            left_out.append({"line": attempt(lambda: note_backing.plain(note), note), "numbers": missing})
+    if dropped is not None:
+        dropped.extend(left_out)
+        dropped.extend({"error": error} for error in dict.fromkeys(errors))
+    return kept
+
+
+def _field_numbers(controller: Any) -> list[float]:
+    """The run's code-written report fields as the answer is shown, from memory (the grader reads them from answer.json, which
+    the run writes only when it is recorded, after the answer is shown)."""
+    analysis, retrieval = getattr(controller, "analysis", None), getattr(controller, "retrieval", None)
+    return note_backing.field_numbers(caveats=getattr(analysis, "caveats", None), warnings=getattr(retrieval, "warnings", None),
+                                      notes=getattr(controller, "notes", None), ledger=getattr(retrieval, "study_ledger", None))
+
+
+def _shown_paragraphs(controller: Any, paragraphs: list[str], dropped: list[dict[str, Any]] | None) -> str:
+    """An answer of paragraphs, its "Unverified model note:" paragraphs checked against the others (_shown_notes); a paragraph
+    left out leaves the rest as it was."""
+    notes = [p[len(_UNVERIFIED):] for p in paragraphs if p.startswith(_UNVERIFIED)]
+    kept = set(_shown_notes(controller, notes, [p for p in paragraphs if not p.startswith(_UNVERIFIED)], dropped))
+    return "\n\n".join(p for p in paragraphs if not p.startswith(_UNVERIFIED) or p[len(_UNVERIFIED):] in kept)
+
+
 def _caveats(controller: Any, claims: list[Claim]) -> list[str]:
     limits, model_notes = _caveat_groups(controller, claims)
-    return [*limits, *["Unverified model note: " + note for note in model_notes]]
+    return [*limits, *[_UNVERIFIED + note for note in model_notes]]
 
 
 def _limit_blocks(limits: list[str], model_notes: list[str]) -> list[str]:
@@ -1092,7 +1153,27 @@ _ROUND_NOTE = re.compile(r"(?:clarification \d+: |still not ready after )")
 
 
 def answer_summary(controller: Any) -> str:
-    """One compact answer from typed claims; no model narrative or internal evidence IDs."""
+    """One compact answer from typed claims; no model narrative or internal evidence IDs. A model-note line with a number that
+    nothing backs is left out (decision (31)(b), rule (3): _shown_notes)."""
+    return _answer(controller, None)
+
+
+def note_line(note: str) -> str:
+    """A raw model note ("model: ...") as the answer's notes give it, and as dropped_notes names it: its human form, as plain
+    text (run.left_out_marks matches the Full report's raw notes by it)."""
+    return note_backing.plain(_text(_human_note(note)))
+
+
+def dropped_notes(controller: Any) -> list[dict[str, Any]]:
+    """The model-note lines answer_summary leaves out, each with the numbers nothing backs (decision (31)(b)); run's record
+    writes them into manifest.json. An entry {"error": ...} names a part of the check that could not run (the lines it could
+    not back were left out)."""
+    dropped: list[dict[str, Any]] = []
+    _answer(controller, dropped)
+    return dropped
+
+
+def _answer(controller: Any, dropped: list[dict[str, Any]] | None) -> str:
     status = getattr(controller, "execution_status", "unknown")
     analysis = getattr(controller, "analysis", None)
     retrieval = getattr(controller, "retrieval", None)
@@ -1114,9 +1195,12 @@ def answer_summary(controller: Any) -> str:
                          "provider_rate_limit": "Wait before retrying this question.",
                          "provider_rate_limit_unknown": "Check the provider quota and rate limits before retrying; the cause of HTTP 429 is unknown."}.get(
                              code, "Resolve the model service issue before retrying.")
-            return "\n\n".join(["**Could not complete this question: Model service unavailable.**", _text(message.rstrip(".")) + ".", evidence,
-                                 "This failure does not establish that the database has no matching records.",
-                                 *reasons, next_step, "Full report keeps the exact failure and any completed retrieval evidence."])
+            return _shown_paragraphs(controller, ["**Could not complete this question: Model service unavailable.**",
+                                                  _text(message.rstrip(".")) + ".", evidence,
+                                                  "This failure does not establish that the database has no matching records.",
+                                                  *reasons, next_step,
+                                                  "Full report keeps the exact failure and any completed retrieval evidence."],
+                                     dropped)
         if not reasons:
             notes = getattr(controller, "notes", [])
             if status == "needs_clarification" and any(note.startswith("still not ready after ") for note in notes):
@@ -1130,13 +1214,16 @@ def answer_summary(controller: Any) -> str:
         if any("No complete data table was available" in reason for reason in reasons):
             retry = ["Retry the question, then review the proposed scope and approve its retrieval. "
                      "If the same step stops again, check Full report for the recorded retrieval reason."]
-        return "\n\n".join([f"**{shown}.**", *reasons, *retry, "See Full report for the complete reason and evidence."])
+        return _shown_paragraphs(controller, [f"**{shown}.**", *reasons, *retry, "See Full report for the complete reason and evidence."],
+                                 dropped)
     facts = getattr(analysis, "metadata_facts", [])
     if facts:
         lines = render_metadata_facts(facts)
         limits, model_notes = _caveat_groups(controller, [])
+        tail = "Full report contains the source records and evidence for these fields."
+        model_notes = _shown_notes(controller, model_notes, [*lines, *_limit_blocks(limits, []), tail], dropped)
         lines += ["", *_limit_blocks(limits, model_notes)]
-        lines += ["", "Full report contains the source records and evidence for these fields."]
+        lines += ["", tail]
         return "\n".join(lines)
     claims = list(analysis.claims)
     focus_mean = _mean_focus(controller, claims)
@@ -1192,11 +1279,11 @@ def answer_summary(controller: Any) -> str:
                 warning = _text("An additional statistic could not be calculated: " + claim.missing_reason)
                 if warning not in caveats:
                     caveats.append(warning)
+    tail = ("Other calculated statistics remain in Full report, together with the complete methods and evidence."
+            if focus_mean and len(displayed_claims) < len(claims) else "Full report contains the complete methods and evidence.")
+    model_notes = _shown_notes(controller, model_notes, [*lines, *_limit_blocks(caveats, []), tail], dropped)
     lines += _limit_blocks(caveats, model_notes)
-    if focus_mean and len(displayed_claims) < len(claims):
-        lines.append("Other calculated statistics remain in Full report, together with the complete methods and evidence.")
-    else:
-        lines.append("Full report contains the complete methods and evidence.")
+    lines.append(tail)
     return "\n".join(lines)
 
 
