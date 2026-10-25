@@ -6,8 +6,7 @@ import json
 import anyio
 import pytest
 
-from agents.coordinator import NoTools
-from agents.supervisor import SupervisorDecision, choose_next
+from agents.coordinator import NoTools, SupervisorDecision, choose_next
 from llm import Budget, FakeModelClient, ModelProviderError, reply_text, reply_tools
 
 
@@ -216,7 +215,7 @@ def payload_reply(payload):
     ({"action": "stop", "reason": ""}, "it has no reason.", {"action": "stop", "reason": "The data cannot answer this."}),
 ])
 def test_a_decision_missing_a_required_field_is_asked_once_naming_the_field(tmp_path, first, named, second):
-    from agents.supervisor import missing_field_question
+    from agents.coordinator import missing_field_question
 
     model, budget = FakeModelClient([payload_reply(first), payload_reply(second)]), Budget()
     result = choose(model, tmp_path, budget=budget)
@@ -301,6 +300,6 @@ def test_an_over_long_question_or_instruction_still_blocks(tmp_path, field, size
 
 
 def test_the_prompt_states_the_limits():
-    from agents.supervisor import SUPERVISOR_SYSTEM_PROMPT
+    from agents.coordinator import SUPERVISOR_SYSTEM_PROMPT
 
     assert "Limits: reason at most 600 characters, question at most 600, instruction at most 1000." in SUPERVISOR_SYSTEM_PROMPT

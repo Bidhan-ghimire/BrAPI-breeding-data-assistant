@@ -10,8 +10,7 @@ import json
 import re
 from typing import Any
 
-from agents.coordinator import add_clarification
-from agents.supervisor import choose_next
+from agents.coordinator import add_clarification, choose_next
 from analyst_tools import CV_OF_VALUES, PERCENT_MISSING
 from artifacts import ArtifactError
 from console import say

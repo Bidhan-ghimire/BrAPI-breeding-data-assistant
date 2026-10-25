@@ -10,7 +10,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import coordination_runtime as cr
-from agents.supervisor import SUPERVISOR_SYSTEM_PROMPT
+from agents.coordinator import SUPERVISOR_SYSTEM_PROMPT
 from contracts import AnalysisReport, MetadataFact
 
 DESCRIPTION = "Specialty trial with 200 genotypes and 2 replications, late season drought"
