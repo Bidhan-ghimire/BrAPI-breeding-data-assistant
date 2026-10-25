@@ -6,16 +6,18 @@ independently of this app). Each sub-question is asked as a new chat, exactly as
 same scripted approver: "approve" at the data request, "continue" at the data review, nothing else), on a copy of a
 cache folder; with --allow-live the app may fetch what the copy lacks.
 
-Grading is code-based, like the harness: only the code-written part of the chat's last message counts (harness.code_written:
-model notes are left out). Buckets:
+Grading is code-based, like the harness: only the code-written part of the chat's last message counts toward a pass
+(harness.code_written: model notes are left out); the model's notes are checked for invented numbers (decision (31)(a)). Buckets:
   pass       every expected value (and name) is found within its tolerance (or every value of one listed alternative)
   wrong      the answer shows backed numbers, but not the expected ones
   no_number  an honest answer without the number: "cannot compute", a question back, a lookup offer, a catalog summary
   blocked    a gate, a limit or an error stopped the question (blocked / limit / could not complete / the catalog
              approval the harness never gives / a harness error)
   invented   a number in the code-written part that no claim, no run text, no table of the run and not the question
-             backs: the red flag, reported first whatever else the answer holds (except on the app's question screens:
-             they answer nothing, so they are not checked)
+             backs, or a number in the model's notes that none of these and no number of the code-written part backs,
+             read at the precision written (rule (3), Bidhan, coach 2026-10-25 12:20 UTC): the red flag, reported first
+             whatever else the answer holds (except on the app's question screens: they answer nothing, so they are not
+             checked)
 """
 from __future__ import annotations
 
@@ -53,7 +55,7 @@ _STRUCTURAL = re.compile(r"source \d+|Showing \d+ of \d+ entries; \d+ additional
 # A full ISO timestamp ("2026-10-21T12:22:33.472516+00:00": a record's fetch time): no number (baseline 2026-10-21).
 _TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?")
 # A number in scientific notation, as the presenter writes a small value ("1.5e-05"; chat_presenter._number uses .12g).
-_SCIENTIFIC = re.compile(r"(?<![\w.])[+-]?\d+(?:\.\d+)?[eE][+-]?\d+(?![\w.])")
+_SCIENTIFIC = re.compile(r"(?<![\w.])[+-]?\d+(?:\.\d+)?[eE][+-]?\d+(?!\w|\.\w)")     # a full stop after it ends a sentence
 _ASKED_FIRST_LINES = ("More detail is needed.",)
 _ASKED_STATUS = ("stopped: the app asked a question", "no run: the app asked whether to look it up")
 _BLOCKED_STATUS = ("error", "stopped: the catalog setup needs an approval", "stopped at a step", "stopped after")
@@ -114,20 +116,26 @@ def load_subquestions(path: Path) -> list[dict[str, Any]]:
     return subs
 
 
-def _numbers(text: str) -> list[tuple[float, int, int, int]]:
+def _numbers(text: str, *, written: bool = False) -> list[tuple[float, int, int, int]]:
     """Every number in the text (harness.numbers_in), with numbers in scientific notation read whole and ontology terms
-    left out (blanked at the same length, so positions stay); full ISO timestamps are no numbers."""
+    left out (blanked at the same length, so positions stay); full ISO timestamps are no numbers. written=True reads a number
+    in scientific notation at the precision it is written with, as for a model's note ("5.6e-7" to two figures), not at the
+    four figures the app writes (rule (3), decision (31)(a))."""
     blank = lambda m: " " * len(m.group())                                              # noqa: E731
     text = _TIMESTAMP.sub(blank, text)
     found = []
     for match in _SCIENTIFIC.finditer(text):
+        mantissa, _, exponent = match.group(0).lower().partition("e")
+        digits = exponent.lstrip("+-")
+        if len(digits) > 3 or (not exponent.startswith("-") and int(digits) > 300):
+            continue          # "0E0326" (a plot code), "0e999": no number; their precision would overflow _backed (review 2026-10-25)
         value = float(match.group(0))
         if not math.isfinite(value):
             continue                                          # "92E0326" inside a name reads as inf: no number (T3 review 2)
-        mantissa, _, exponent = match.group(0).lower().partition("e")
         # read at 4 significant digits at least: the app writes .4g, which drops trailing zeros ("1e+07" is 1.000e+07), so the last
         # digit steps by 10^(exponent - 3); "1.9e-07" is read as 1.900e-07 (T3 reviews 1 and 2, 2026-10-23)
-        decimals = max(len(mantissa.split(".")[1]) if "." in mantissa else 0, 3) - int(exponent)
+        places = len(mantissa.split(".")[1]) if "." in mantissa else 0
+        decimals = (places if written else max(places, 3)) - int(exponent)
         found.append((value, decimals, match.start(), match.end()))
     found += harness.numbers_in(_ONTOLOGY.sub(blank, _SCIENTIFIC.sub(blank, text)))
     return sorted(found, key=lambda n: n[2])
@@ -215,6 +223,25 @@ def _found_all(expected: list[dict[str, Any]], names: list[str], tolerance: dict
     return where
 
 
+def _note_sources(sources: list[float], text: str) -> list[float]:
+    """Rule (3) (decision (31)(a)): a note number's sources are a checked-reply number's (sources) and the checked reply's own
+    numbers (text: the checked reply as grade reads it). grade and note_numbers both take them from here."""
+    return sources + [n for n, *_ in _numbers(text)]
+
+
+def note_invented(shown: str, sources: list[float]) -> list[dict[str, Any]]:
+    """The numbers of the model's notes (harness.model_notes, each line read at the precision written) that no source backs, as
+    grade reports an invented number, marked "in": "notes". Rule (3) (decision (31)(a)): grade gives as sources the checked
+    reply's own backing and the checked reply's numbers."""
+    found = []
+    for line in harness.model_notes(shown):
+        for v, d, start, end in _numbers(line, written=True):
+            if not _backed(v, d, sources):
+                found.append({"value": int(v) if float(v).is_integer() else v, "context": harness._around(line, start, end, 60),
+                              "in": "notes"})
+    return found
+
+
 def expected_label(e: dict[str, Any]) -> str:
     return f"{e['value']:g}" if isinstance(e["value"], float) else str(e["value"])
 
@@ -249,10 +276,14 @@ def grade(sub: dict[str, Any], *, shown: str, status: str, claims: list[dict[str
     # The app's question screens answer nothing: their hint and choices (catalog counts) are written by code from the saved
     # catalog, the model's question is quoted and left out (baseline 2026-10-21: 44 false flags on them).
     if run and not code_catalog and not question_back:
-        invented = flagged(_numbers_for_invention(text), claim_numbers(claims) + asked + [float(x) for x in backed_extra])
-        if invented:
-            return {**result, "bucket": "invented", "invented": invented,
-                    "why": f"{len(invented)} number(s) in the code-written answer that nothing backs"}
+        sources = claim_numbers(claims) + asked + [float(x) for x in backed_extra]
+        invented = flagged(_numbers_for_invention(text), sources)
+        noted = note_invented(shown, _note_sources(sources, text))          # rule (3): the notes too
+        if invented or noted:
+            why = (f"{len(invented)} number(s) in the code-written answer and {len(noted)} in the model's notes that nothing backs"
+                   if invented and noted else f"{len(noted)} number(s) in the model's notes that nothing backs" if noted
+                   else f"{len(invented)} number(s) in the code-written answer that nothing backs")
+            return {**result, "bucket": "invented", "invented": invented + noted, "why": why}
     if question_back:
         return {**result, "bucket": "no_number", "why": first or status}
     if status.startswith(_BLOCKED_STATUS) or first is not None:
@@ -269,7 +300,8 @@ def grade(sub: dict[str, Any], *, shown: str, status: str, claims: list[dict[str
                            alternative.get("tolerance") or tolerance, text, numbers)
         if where is not None:
             return {**result, "bucket": "pass", "why": f"alternative {n} from the grading notes found", "matched": where}
-    backed_shown = [v for v, d, *_ in numbers if _backed(v, d, claim_numbers(claims))] if run and not code_catalog else numbers
+    known = claim_numbers(claims) if run and not code_catalog else []                  # once, not once per shown number
+    backed_shown = [v for v, d, *_ in numbers if _backed(v, d, known)] if run and not code_catalog else numbers
     if backed_shown:
         return {**result, "bucket": "wrong", "why": "numbers shown, but not every expected value"}
     return {**result, "bucket": "no_number", "why": "no number for the statistic was shown"}
@@ -288,21 +320,23 @@ def note_numbers(sub: dict[str, Any], *, shown: str, claims: list[dict[str, Any]
     """Every number in what the app marks as model text (harness.model_notes: the "Additional model notes (unverified)" bullets
     and the "Unverified model note:" paragraphs, which grade leaves out), read with grade's reader (_numbers: the app's own
     phrases, "80 groups" or "source 3", are the model's words in a note, so they are read too), each with its backing under
-    two readings at the precision written (_backed): "today", what the invented check backs a number of the checked reply with
-    (claim_numbers, the question's numbers and backed_extra: the run's own tables and code-written fields; with no run, the
-    question's alone), and "claim_value", the claims' numeric fields alone (claim_values). A measurement while Bidhan's rule
-    for note numbers is open (coach 2026-10-25 02:52 UTC, NEXT 2; item (31)): no bucket, grade or shown text depends on it."""
+    two readings, both at the precision written: "rule3", rule (3) as grade applies it (decision (31)(a), Bidhan, coach
+    2026-10-25 12:20 UTC: _note_sources, the checked reply's backing (claim_numbers, the question's numbers and backed_extra,
+    the run's own tables and code-written fields; with no run, the question's alone) and the checked reply's own numbers), and
+    "claim_value", the claims' numeric fields alone (claim_values). A row grade does not check for invention (a question screen,
+    a catalog answer) is still listed."""
     claims = list(claims)
     asked = [n for n, *_ in _numbers(sub.get("question", ""))]
-    today = claim_numbers(claims) + asked + [float(x) for x in backed_extra] if run else asked
+    checked = claim_numbers(claims) + asked + [float(x) for x in backed_extra] if run else asked
+    rule3 = _note_sources(checked, _without_quotes(harness.code_written(shown)))
     values = claim_values(claims)
     numbers = []
     lines = harness.model_notes(shown)
     for line in lines:
-        for v, d, start, end in _numbers(line):
+        for v, d, start, end in _numbers(line, written=True):
             numbers.append({"value": int(v) if float(v).is_integer() else v, "context": harness._around(line, start, end, 60),
-                            "today": _backed(v, d, today), "claim_value": _backed(v, d, values)})
-    return {"lines": len(lines), "numbers": numbers, "count": len(numbers), "today_unbacked": sum(not n["today"] for n in numbers),
+                            "rule3": _backed(v, d, rule3), "claim_value": _backed(v, d, values)})
+    return {"lines": len(lines), "numbers": numbers, "count": len(numbers), "rule3_unbacked": sum(not n["rule3"] for n in numbers),
             "claim_unbacked": sum(not n["claim_value"] for n in numbers)}
 
 
@@ -312,7 +346,7 @@ def listed_notes(sub: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
     try:
         return note_numbers(sub, **kwargs)
     except Exception as exc:  # noqa: BLE001 - a measurement must not end a paid run
-        return {"lines": len(harness.model_notes(str(kwargs.get("shown") or ""))), "numbers": [], "count": 0, "today_unbacked": 0,
+        return {"lines": len(harness.model_notes(str(kwargs.get("shown") or ""))), "numbers": [], "count": 0, "rule3_unbacked": 0,
                 "claim_unbacked": 0, "error": " ".join(f"{type(exc).__name__}: {exc}".split())[:200]}
 
 
@@ -321,9 +355,9 @@ def note_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     listed = [(r["sub_id"], r.get("note_numbers") or {}) for r in rows]
     return {"count": sum(n.get("count", 0) for _, n in listed), "rows_with_notes": sum(1 for _, n in listed if n.get("lines")),
             "rows_with_numbers": sum(1 for _, n in listed if n.get("count")),
-            "today_unbacked": sum(n.get("today_unbacked", 0) for _, n in listed),
+            "rule3_unbacked": sum(n.get("rule3_unbacked", 0) for _, n in listed),
             "claim_unbacked": sum(n.get("claim_unbacked", 0) for _, n in listed),
-            "rows_today_unbacked": [sid for sid, n in listed if n.get("today_unbacked")],
+            "rows_rule3_unbacked": [sid for sid, n in listed if n.get("rule3_unbacked")],
             "rows_claim_unbacked": [sid for sid, n in listed if n.get("claim_unbacked")],
             "rows_error": [sid for sid, n in listed if n.get("error")]}
 
@@ -334,10 +368,9 @@ def _rows(n: int) -> str:
 
 def note_line(summary: dict[str, Any]) -> str:
     """The listing's line in results.md and note_numbers.md."""
-    return (f"- Note numbers (the model's notes; listed, not graded): {summary['count']} in {_rows(summary['rows_with_numbers'])}, "
-            f"of {_rows(summary.get('rows_with_notes', 0))} with notes; "
-            f"no backing under today's checked-reply rule: {summary['today_unbacked']}"
-            + (f" ({', '.join(summary['rows_today_unbacked'])})" if summary["rows_today_unbacked"] else "")
+    return (f"- Note numbers (the model's notes): {summary['count']} in {_rows(summary['rows_with_numbers'])}, "
+            f"of {_rows(summary.get('rows_with_notes', 0))} with notes; no backing under rule (3): {summary['rule3_unbacked']}"
+            + (f" ({', '.join(summary['rows_rule3_unbacked'])})" if summary["rows_rule3_unbacked"] else "")
             + f"; no claim value: {summary['claim_unbacked']} (in {_rows(len(summary['rows_claim_unbacked']))})"
             + (f"; listing failed: {', '.join(summary['rows_error'])}" if summary.get("rows_error") else ""))
 
@@ -577,8 +610,8 @@ def list_note_numbers(folder: Path) -> int:
     warning = (f"- Read from a cut answer: {', '.join(gaps[0]) or 'none'}; run folders missing: {', '.join(gaps[1]) or 'none'}; "
                f"runs without answer.json: {', '.join(gaps[2]) or 'none'}" if any(gaps) else "")
     lines = [f"# Note numbers, {folder.resolve().name}", "", note_line(summary)] + ([warning] if warning else []) + [""]
-    lines += [f"- {sid}: {n['count']} number{'' if n['count'] == 1 else 's'}; no backing today: "
-              f"{', '.join(str(x['value']) for x in n['numbers'] if not x['today']) or 'none'}; no claim value: {n['claim_unbacked']}"
+    lines += [f"- {sid}: {n['count']} number{'' if n['count'] == 1 else 's'}; no backing under rule (3): "
+              f"{', '.join(str(x['value']) for x in n['numbers'] if not x['rule3']) or 'none'}; no claim value: {n['claim_unbacked']}"
               + (f"; listing failed: {n['error']}" if n.get("error") else "") for sid, n in listed.items() if n["count"] or n.get("error")]
     (folder / "note_numbers.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"{note_line(summary)}{' ' + warning if warning else ''} -> {folder / 'note_numbers.md'}")

@@ -2,7 +2,7 @@
 number in what the app marks as model text (the "Additional model notes (unverified)" bullets and the "Unverified model note:"
 paragraphs, which the grader leaves out) is listed with its backing under two readings, and counted, for each row, in results.json
 and in results.md, and for a saved results folder. A measurement only: no bucket, grade or shown text depends on it. Real-looking
-inputs from the Sonnet runs of 24-25 Oct: B26.4's note, whose 40 is a real block code (backed today) but no claim's value, and
+inputs from the Sonnet runs of 24-25 Oct: B26.4's note, whose 40 is a real block code (backed under rule (3)) but no claim's value, and
 C30.1's p-value written to two figures."""
 import importlib.util
 import json
@@ -45,7 +45,7 @@ B264_CELLS = [float(b) for b in range(1, 81)] + [1.0, 2.0] + [float(p) for p in 
 
 
 def flags(listing):
-    return [(n["value"], n["today"], n["claim_value"]) for n in listing["numbers"]]
+    return [(n["value"], n["rule3"], n["claim_value"]) for n in listing["numbers"]]
 
 
 def test_model_notes_are_exactly_the_lines_code_written_leaves_out():
@@ -84,56 +84,66 @@ def test_every_number_of_a_note_is_read_the_apps_phrases_too():
     assert [n["value"] for n in listing["numbers"]] == [80, 4, 12, 3] and all(type(n["value"]) is int for n in listing["numbers"])
 
 
-def test_a_number_the_reader_cannot_hold_makes_an_error_not_a_stopped_run():
-    """Review 2026-10-25 S2: "0E0326" overflows _backed; the listing of that row is an error, the row and the run go on."""
-    note = "**Additional model notes (unverified)**\n\n- the plot code 0E0326 was not found in the table."
+def test_a_number_the_reader_cannot_hold_makes_an_error_not_a_stopped_run(monkeypatch):
+    """Review 2026-10-25 S2: a listing that raises is an error, and the row and the run go on. "0E0326", which overflowed
+    _backed, is no number since decision (31)(a) (the reader skips an exponent past 300), so a raising _backed stands in."""
+    note = "**Additional model notes (unverified)**\n\n- the plot code 0E0326 was not found in the table, 7 times."
+    assert [n["value"] for n in bench.listed_notes({"question": "x"}, shown=note, claims=[], backed_extra=[])["numbers"]] == [7]
+
+    def overflow(*args):
+        raise OverflowError("int too large to convert to float")
+    monkeypatch.setattr(bench, "_backed", overflow)
     listing = bench.listed_notes({"question": "x"}, shown=note, claims=[], backed_extra=[])
     assert listing["count"] == 0 and listing["error"].startswith("OverflowError")
     assert bench.note_summary([{"sub_id": "Z1.1", "note_numbers": listing}])["rows_error"] == ["Z1.1"]
-    huge = bench.listed_notes({"question": "x"}, shown=note.replace("0E0326", "0e" + "9" * 5000), claims=[], backed_extra=[])
-    assert huge["error"].startswith("ValueError") and "\n" not in huge["error"]       # any error, on one line
+
+    def unreadable(*args):
+        raise ValueError("Exceeds the limit (4300 digits)\nfor integer string conversion")
+    monkeypatch.setattr(bench, "_backed", unreadable)
+    huge = bench.listed_notes({"question": "x"}, shown=note, claims=[], backed_extra=[])
+    assert huge["error"] == "ValueError: Exceeds the limit (4300 digits) for integer string conversion"     # any error, on one line
 
 
-def test_b264_the_40_is_backed_today_but_by_no_claim_value():
+def test_b264_the_40_is_backed_under_rule3_but_by_no_claim_value():
     """B26.4 (Sonnet, 24 and 25 Oct): "40 blocks per replicate" is wrong (80 blocks of 4 in each rep), yet 40 is a real block code,
-    in a claim's filter and in the plot table: today's backing backs it; no claim has the value 40 (nor 80)."""
+    in a claim's filter and in the plot table: rule (3) backs it; no claim has the value 40 (nor 80)."""
     listing = bench.note_numbers(B264, shown=B264_ANSWER, claims=B264_CLAIMS, backed_extra=B264_CELLS)
     assert flags(listing) == [(40, True, False), (80, True, False), (8, True, True), (2, True, True), (320, True, True)]
-    assert (listing["lines"], listing["count"], listing["today_unbacked"], listing["claim_unbacked"]) == (2, 5, 0, 2)
+    assert (listing["lines"], listing["count"], listing["rule3_unbacked"], listing["claim_unbacked"]) == (2, 5, 0, 2)
     assert "40 blocks per replicate" in listing["numbers"][0]["context"]
 
 
-def test_today_reads_the_claims_texts_and_the_runs_tables():
-    """Without the per-block claims and the plot table nothing backs the 40, the 80 or the 8 today: today's reading is the
-    invented check's (claim_numbers, the question, backed_extra), and the table's cells back a number on their own."""
+def test_rule3_reads_the_claims_texts_the_runs_tables_and_the_checked_reply():
+    """Rule (3), as graded (decision (31)(a)): without the per-block claims and the plot table, the checked reply's own 80
+    ("block: 80 groups") and 8 (its table) still back the note's, and nothing backs the 40; the table's cells back a number on
+    their own."""
     bare = [c for c in B264_CLAIMS if "block" not in c["filters"]]
     listing = bench.note_numbers(B264, shown=B264_ANSWER, claims=bare, backed_extra=[])
-    assert flags(listing) == [(40, False, False), (80, False, False), (8, False, False), (2, True, True), (320, True, True)]
-    assert listing["today_unbacked"] == 3
-    assert flags(bench.note_numbers(B264, shown=B264_ANSWER, claims=bare, backed_extra=[40.0, 80.0]))[:3] == [
-        (40, True, False), (80, True, False), (8, False, False)]
+    assert flags(listing) == [(40, False, False), (80, True, False), (8, True, False), (2, True, True), (320, True, True)]
+    assert listing["rule3_unbacked"] == 1
+    assert flags(bench.note_numbers(B264, shown=B264_ANSWER, claims=bare, backed_extra=[40.0]))[:1] == [(40, True, False)]
 
 
-def test_c301_a_p_value_written_to_two_figures_is_read_at_the_graders_precision():
-    """C30.1 (Sonnet, 24 Oct): "p about 5.6e-7" is read at 4 significant digits, as the grader reads a scientific number, so the
-    claim's 5.603e-07 backs it under neither reading; 7.36, 19 and 0.066 are backed under both."""
+def test_c301_a_p_value_written_to_two_figures_is_read_at_the_precision_written():
+    """C30.1 (Sonnet, 24 Oct): "p about 5.6e-7" is read at the two figures it is written with (rule (3), as graded), so the
+    claim's 5.603e-07 backs it under both readings, as it backs 7.36, 19 and 0.066."""
     sub = {"question": "How do the 90-day and 120-day San Ramon trials compare?"}
     note = "- The comparison is descriptive. The paired t on entries is 7.36 (df 19, p about 5.6e-7), while Welch's p is 0.066."
     claims = [{"kind": "test", "value": v, "filters": {}, "transformation": t}
               for v, t in ((7.3644, "paired t"), (19, "paired t: df"), (5.603e-07, "paired t: p"), (0.0664, "Welch t: p"))]
     listing = bench.note_numbers(sub, shown="**Additional model notes (unverified)**\n\n" + note, claims=claims, backed_extra=[])
-    assert flags(listing) == [(7.36, True, True), (19, True, True), (5.6e-07, False, False), (0.066, True, True)]
-    assert (listing["count"], listing["today_unbacked"], listing["claim_unbacked"]) == (4, 1, 1)
+    assert flags(listing) == [(7.36, True, True), (19, True, True), (5.6e-07, True, True), (0.066, True, True)]
+    assert (listing["count"], listing["rule3_unbacked"], listing["claim_unbacked"]) == (4, 0, 0)
 
 
-def test_the_questions_numbers_back_today_only():
+def test_the_questions_numbers_back_rule3_only():
     sub = {"question": "Compare the 90-day and 120-day trials."}
     note = "**Additional model notes (unverified)**\n\n- The 90-day and 120-day labels come from the question, not from the metadata."
     assert flags(bench.note_numbers(sub, shown=note, claims=[], backed_extra=[])) == [(90, True, False), (120, True, False)]
 
 
 def test_a_reply_with_no_run_is_backed_by_the_question_alone():
-    """As in the invented check: with no run, only the question's numbers back a number today (the run's numbers are not read);
+    """As in the invented check: with no run, only the question's numbers back a number under rule (3) (the run's numbers are not read);
     the question's 4608 still does."""
     note = "**Additional model notes (unverified)**\n\n- 40 blocks in study 4608."
     assert flags(bench.note_numbers(B264, shown=note, claims=B264_CLAIMS, backed_extra=B264_CELLS, run=False)) == [
@@ -142,7 +152,7 @@ def test_a_reply_with_no_run_is_backed_by_the_question_alone():
 
 def test_no_notes_no_numbers():
     assert bench.note_numbers(B264, shown="Mean: 2.19 (unit not stated)", claims=B264_CLAIMS, backed_extra=B264_CELLS) == {
-        "lines": 0, "numbers": [], "count": 0, "today_unbacked": 0, "claim_unbacked": 0}
+        "lines": 0, "numbers": [], "count": 0, "rule3_unbacked": 0, "claim_unbacked": 0}
     notes_only = "**Additional model notes (unverified)**\n\n- The unit is not stated in the metadata."
     assert bench.note_numbers(B264, shown=notes_only, claims=[], backed_extra=[])["lines"] == 1
 
@@ -172,16 +182,16 @@ def test_the_grade_does_not_read_the_listing():
 
 
 def test_the_totals_count_rows_with_numbers_and_name_the_rows_with_unbacked_ones():
-    rows = [{"sub_id": "A1.1", "note_numbers": {"lines": 2, "count": 3, "today_unbacked": 1, "claim_unbacked": 2}},
-            {"sub_id": "A1.2", "note_numbers": {"lines": 1, "count": 0, "today_unbacked": 0, "claim_unbacked": 0}},
-            {"sub_id": "A1.3", "note_numbers": {"lines": 1, "count": 2, "today_unbacked": 0, "claim_unbacked": 1}}, {"sub_id": "A1.4"}]
+    rows = [{"sub_id": "A1.1", "note_numbers": {"lines": 2, "count": 3, "rule3_unbacked": 1, "claim_unbacked": 2}},
+            {"sub_id": "A1.2", "note_numbers": {"lines": 1, "count": 0, "rule3_unbacked": 0, "claim_unbacked": 0}},
+            {"sub_id": "A1.3", "note_numbers": {"lines": 1, "count": 2, "rule3_unbacked": 0, "claim_unbacked": 1}}, {"sub_id": "A1.4"}]
     summary = bench.note_summary(rows)
-    assert summary == {"count": 5, "rows_with_notes": 3, "rows_with_numbers": 2, "today_unbacked": 1, "claim_unbacked": 3,
-                       "rows_today_unbacked": ["A1.1"], "rows_claim_unbacked": ["A1.1", "A1.3"], "rows_error": []}
-    assert bench.note_line(summary) == ("- Note numbers (the model's notes; listed, not graded): 5 in 2 rows, of 3 rows with notes; "
-                                        "no backing under today's checked-reply rule: 1 (A1.1); no claim value: 3 (in 2 rows)")
+    assert summary == {"count": 5, "rows_with_notes": 3, "rows_with_numbers": 2, "rule3_unbacked": 1, "claim_unbacked": 3,
+                       "rows_rule3_unbacked": ["A1.1"], "rows_claim_unbacked": ["A1.1", "A1.3"], "rows_error": []}
+    assert bench.note_line(summary) == ("- Note numbers (the model's notes): 5 in 2 rows, of 3 rows with notes; no backing under "
+                                        "rule (3): 1 (A1.1); no claim value: 3 (in 2 rows)")
     one = bench.note_summary(rows[:1])
-    assert bench.note_line(one).endswith("3 in 1 row, of 1 row with notes; no backing under today's checked-reply rule: 1 (A1.1); "
+    assert bench.note_line(one).endswith("3 in 1 row, of 1 row with notes; no backing under rule (3): 1 (A1.1); "
                                          "no claim value: 2 (in 1 row)")
 
 
@@ -209,15 +219,15 @@ def test_the_runner_writes_the_listing_and_its_counts(place, monkeypatch):
     [folder] = list((place.root / "results").iterdir())
     report = json.loads((folder / "results.json").read_text(encoding="utf-8"))
     [row] = report["subquestions"]
-    assert row["bucket"] == "pass" and set(row["note_numbers"]) == {"lines", "numbers", "count", "today_unbacked", "claim_unbacked"}
+    assert row["bucket"] == "pass" and set(row["note_numbers"]) == {"lines", "numbers", "count", "rule3_unbacked", "claim_unbacked"}
     listing = row["note_numbers"]
-    assert listing["count"] == len(listing["numbers"]) and listing["today_unbacked"] == sum(not n["today"] for n in listing["numbers"])
+    assert listing["count"] == len(listing["numbers"]) and listing["rule3_unbacked"] == sum(not n["rule3"] for n in listing["numbers"])
     assert report["note_numbers"] == {"count": listing["count"], "rows_with_notes": int(listing["lines"] > 0),
                                       "rows_with_numbers": int(listing["count"] > 0),
-                                      "today_unbacked": listing["today_unbacked"], "claim_unbacked": listing["claim_unbacked"],
-                                      "rows_today_unbacked": ["S1.1"] if listing["today_unbacked"] else [],
+                                      "rule3_unbacked": listing["rule3_unbacked"], "claim_unbacked": listing["claim_unbacked"],
+                                      "rows_rule3_unbacked": ["S1.1"] if listing["rule3_unbacked"] else [],
                                       "rows_claim_unbacked": ["S1.1"] if listing["claim_unbacked"] else [], "rows_error": []}
-    assert "- Note numbers (the model's notes; listed, not graded): " in (folder / "results.md").read_text(encoding="utf-8")
+    assert "- Note numbers (the model's notes): " in (folder / "results.md").read_text(encoding="utf-8")
     assert calls["grade"]["shown"] == calls["notes"]["shown"] == row["answer_full"]
     assert calls["notes"]["backed_extra"] is calls["grade"]["backed_extra"] and calls["notes"]["claims"] is calls["grade"]["claims"]
     assert calls["notes"]["run"] is calls["grade"]["run"] is True and calls["grade"]["backed_extra"]
@@ -290,7 +300,7 @@ def test_a_saved_folder_is_listed_without_changing_its_results(tmp_path):
     md = (folder / "note_numbers.md").read_text(encoding="utf-8").splitlines()
     assert md[2] == bench.note_line(summary)
     assert md[3] == "- Read from a cut answer: B26.5; run folders missing: B26.5; runs without answer.json: B26.7"
-    assert "- B26.4: 6 numbers; no backing today: none; no claim value: 3" in md
+    assert "- B26.4: 6 numbers; no backing under rule (3): none; no claim value: 3" in md
 
 
 def test_a_saved_folder_warns_on_one_kind_of_gap_and_keeps_failed_and_repeated_rows(tmp_path, monkeypatch):
@@ -305,7 +315,7 @@ def test_a_saved_folder_warns_on_one_kind_of_gap_and_keeps_failed_and_repeated_r
     monkeypatch.chdir(folder)
     assert bench.main(["--note-numbers", "."]) == 0
     md = (folder / "note_numbers.md").read_text(encoding="utf-8").splitlines()
-    assert md[0] == f"# Note numbers, {folder.name}" and "- B26.4: 1 number; no backing today: 2; no claim value: 1" in md
+    assert md[0] == f"# Note numbers, {folder.name}" and "- B26.4: 1 number; no backing under rule (3): 2; no claim value: 1" in md
     assert md[3] == "- Read from a cut answer: none; run folders missing: none; runs without answer.json: B26.4, B26.4 #2"
     assert set(json.loads((folder / "note_numbers.json").read_text(encoding="utf-8"))["rows"]) == {"B26.4", "B26.4 #2"}
 
@@ -314,7 +324,8 @@ def test_a_saved_folder_warns_on_one_kind_of_gap_and_keeps_failed_and_repeated_r
     monkeypatch.setattr(bench, "note_numbers", broken)
     assert bench.main(["--note-numbers", "."]) == 0
     md = (folder / "note_numbers.md").read_text(encoding="utf-8")
-    assert "- B26.4: 0 numbers; no backing today: none; no claim value: 0; listing failed: OverflowError: boom at the second line" in md
+    assert ("- B26.4: 0 numbers; no backing under rule (3): none; no claim value: 0; listing failed: OverflowError: boom at the "
+            "second line") in md
     assert "listing failed: B26.4, B26.4 #2" in md and ": 0 in 0 rows, of 2 rows with notes;" in md     # a failed row still has notes
 
 

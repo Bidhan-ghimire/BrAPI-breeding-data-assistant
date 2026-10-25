@@ -73,11 +73,15 @@ def test_an_alternative_from_the_grading_notes_passes():
     assert g["bucket"] == "pass" and "alternative" in g["why"]
 
 
-def test_a_number_only_in_the_model_notes_neither_passes_nor_counts_as_invented():
+def test_a_number_only_in_the_model_notes_never_passes_and_is_invented_when_nothing_backs_it():
+    """Decision (31)(a), rule (3) (Bidhan, coach 2026-10-25 12:20 UTC): a note number gets the checked reply's backing check,
+    and notes never count toward the pass match. Before, a note number was not checked at all."""
     shown = ("**Counts**\n\n- **5** rows in the complete studies table\n\n**Additional model notes (unverified)**\n\n"
              "- The trial has 960 plots and 17 blocks.")
     g = bench.grade(sub(), shown=shown, status="run ended", claims=[claim(5)])
-    assert g["bucket"] == "wrong" and g["invented"] == []
+    assert g["bucket"] == "invented" and [(i["value"], i["in"]) for i in g["invented"]] == [(960, "notes"), (17, "notes")]
+    backed = bench.grade(sub(), shown=shown, status="run ended", claims=[claim(5), claim(960), claim(17)])
+    assert backed["bucket"] == "wrong" and backed["invented"] == []       # backed, and still no pass: 960 is only in the notes
 
 
 def test_a_code_written_number_that_nothing_backs_is_invented():
