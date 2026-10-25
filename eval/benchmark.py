@@ -56,6 +56,16 @@ _STRUCTURAL = re.compile(r"source \d+|Showing \d+ of \d+ entries; \d+ additional
 _TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?")
 # A number in scientific notation, as the presenter writes a small value ("1.5e-05"; chat_presenter._number uses .12g).
 _SCIENTIFIC = re.compile(r"(?<![\w.])[+-]?\d+(?:\.\d+)?[eE][+-]?\d+(?!\w|\.\w)")     # a full stop after it ends a sentence
+# S2 (decision of Bidhan, coach 2026-10-25 14:35 UTC; pinned 14:49): identifiers are not quantities. A sign before a zero-padded
+# number (a 0 followed by at least one more digit before any dot) is no minus sign: "-00595", the abbreviated ending of the plot
+# name PEP2016CSR-ST03-00595, reads 595 and still needs backing; "-0.5", "-0" and "-0.25" keep their sign (a hyphen glued to a
+# letter or digit was never a sign). A name is a word of capital letters and digits that holds both (MZP2016UMB, CIP199062): its
+# whole digit runs of four or more digits that start with 1-9 (a year, a long ID) are no numbers of its text, but as a source they
+# back a number of that value (name_numbers), never a part of one. A code's short or zero-padded run (1 in ST01, 3 in ST03, 0045 in
+# 24Y2ND0045CUN) backs nothing: it would back an invented small count (review_s2.md and review_s2_2.md, MAJOR 1; the narrowing
+# was put to the coach in the builder's 16:54 UTC entry).
+_ZERO_PADDED = re.compile(r"[+-]0\d+(?:\.\d+)?")
+_WORD = re.compile(r"[A-Za-z0-9]+")
 _ASKED_FIRST_LINES = ("More detail is needed.",)
 _ASKED_STATUS = ("stopped: the app asked a question", "no run: the app asked whether to look it up")
 _BLOCKED_STATUS = ("error", "stopped: the catalog setup needs an approval", "stopped at a step", "stopped after")
@@ -120,7 +130,8 @@ def _numbers(text: str, *, written: bool = False) -> list[tuple[float, int, int,
     """Every number in the text (harness.numbers_in), with numbers in scientific notation read whole and ontology terms
     left out (blanked at the same length, so positions stay); full ISO timestamps are no numbers. written=True reads a number
     in scientific notation at the precision it is written with, as for a model's note ("5.6e-7" to two figures), not at the
-    four figures the app writes (rule (3), decision (31)(a))."""
+    four figures the app writes (rule (3), decision (31)(a)). A sign before a zero-padded digit run is no minus sign (S2:
+    "-00595" reads 595)."""
     blank = lambda m: " " * len(m.group())                                              # noqa: E731
     text = _TIMESTAMP.sub(blank, text)
     found = []
@@ -138,7 +149,19 @@ def _numbers(text: str, *, written: bool = False) -> list[tuple[float, int, int,
         decimals = (places if written else max(places, 3)) - int(exponent)
         found.append((value, decimals, match.start(), match.end()))
     found += harness.numbers_in(_ONTOLOGY.sub(blank, _SCIENTIFIC.sub(blank, text)))
+    found = [(abs(v), d, start, end) if _ZERO_PADDED.fullmatch(text, start, end) else (v, d, start, end) for v, d, start, end in found]
     return sorted(found, key=lambda n: n[2])
+
+
+def name_numbers(text: str) -> list[float]:
+    """The whole digit runs of four or more digits that start with 1-9 inside the names in the text (S2): a name is a word of
+    capital letters and digits that holds both (2016 in MZP2016UMB-ST01, 199062 in CIP199062.1; the 1 of ST01 is too short, the
+    0045 of 24Y2ND0045CUN is zero-padded); full timestamps, scientific numbers and ontology terms are blanked first. They are no
+    numbers of the text (the reader leaves them out); as a source they back a number of the same value."""
+    blank = lambda m: " " * len(m.group())                                              # noqa: E731
+    text = _ONTOLOGY.sub(blank, _SCIENTIFIC.sub(blank, _TIMESTAMP.sub(blank, text)))
+    return [float(run) for word in _WORD.findall(text) if word.isupper() and any(ch.isdigit() for ch in word)
+            for run in re.findall(r"(?<!\d)[1-9]\d{3,}", word)]
 
 
 def _numbers_for_invention(text: str) -> list[tuple[float, int, int, int]]:
@@ -171,11 +194,22 @@ def claim_numbers(claims: Iterable[dict[str, Any]]) -> list[float]:
     claims = list(claims)
     found = claim_values(claims)
     for c in claims:
-        denominator = c.get("denominator") or {}
-        for text in (*(c.get("filters") or {}).values(), *(c.get("grouping") or []), c.get("transformation") or "",
-                     c.get("missing_reason") or "", denominator.get("name") or "", *(e.get("reason") or "" for e in c.get("exclusions") or [])):
+        for text in _claim_texts(c):
             found += [n for n, *_ in _numbers(str(text))]
     return found
+
+
+def _claim_texts(c: dict[str, Any]) -> tuple[Any, ...]:
+    """A claim's texts: filters, grouping, method, missing reason, denominator name and exclusion reasons."""
+    denominator = c.get("denominator") or {}
+    return (*(c.get("filters") or {}).values(), *(c.get("grouping") or []), c.get("transformation") or "", c.get("missing_reason") or "",
+            denominator.get("name") or "", *(e.get("reason") or "" for e in c.get("exclusions") or []))
+
+
+def claim_names(claims: Iterable[dict[str, Any]]) -> list[float]:
+    """The digits inside the names in the claims' texts (S2, name_numbers). They back a number against invention; they make no
+    shown number a claim number (grade's wrong against no number reads claim_numbers alone)."""
+    return [n for c in claims for text in _claim_texts(c) for n in name_numbers(str(text))]
 
 
 def _backed(value: float, decimals: int, sources: list[float]) -> bool:
@@ -225,8 +259,9 @@ def _found_all(expected: list[dict[str, Any]], names: list[str], tolerance: dict
 
 def _note_sources(sources: list[float], text: str) -> list[float]:
     """Rule (3) (decision (31)(a)): a note number's sources are a checked-reply number's (sources) and the checked reply's own
-    numbers (text: the checked reply as grade reads it). grade and note_numbers both take them from here."""
-    return sources + [n for n, *_ in _numbers(text)]
+    numbers (text: the checked reply as grade reads it) with the digits inside its names (S2). grade and note_numbers both take
+    them from here."""
+    return sources + [n for n, *_ in _numbers(text)] + name_numbers(text)
 
 
 def note_invented(shown: str, sources: list[float]) -> list[dict[str, Any]]:
@@ -256,7 +291,7 @@ def grade(sub: dict[str, Any], *, shown: str, status: str, claims: list[dict[str
     (MODEL_REPLY_STATUS) is never scored and may hold only numbers from the question, unless it is byte-identical to one of
     code_replies (code_written_texts(): the line code writes then), whose numbers are not graded."""
     text = _without_quotes(harness.code_written(shown))
-    asked = [n for n, *_ in _numbers(sub.get("question", ""))]
+    asked = [n for n, *_ in _numbers(sub.get("question", ""))] + name_numbers(sub.get("question", ""))      # with its names' digits (S2)
     result: dict[str, Any] = {"bucket": "", "why": "", "invented": [], "matched": []}
 
     def flagged(numbers: list[tuple[float, int, int, int]], sources: list[float]) -> list[dict[str, Any]]:
@@ -276,7 +311,7 @@ def grade(sub: dict[str, Any], *, shown: str, status: str, claims: list[dict[str
     # The app's question screens answer nothing: their hint and choices (catalog counts) are written by code from the saved
     # catalog, the model's question is quoted and left out (baseline 2026-10-21: 44 false flags on them).
     if run and not code_catalog and not question_back:
-        sources = claim_numbers(claims) + asked + [float(x) for x in backed_extra]
+        sources = claim_numbers(claims) + claim_names(claims) + asked + [float(x) for x in backed_extra]
         invented = flagged(_numbers_for_invention(text), sources)
         noted = note_invented(shown, _note_sources(sources, text))          # rule (3): the notes too
         if invented or noted:
@@ -326,8 +361,8 @@ def note_numbers(sub: dict[str, Any], *, shown: str, claims: list[dict[str, Any]
     "claim_value", the claims' numeric fields alone (claim_values). A row grade does not check for invention (a question screen,
     a catalog answer) is still listed."""
     claims = list(claims)
-    asked = [n for n, *_ in _numbers(sub.get("question", ""))]
-    checked = claim_numbers(claims) + asked + [float(x) for x in backed_extra] if run else asked
+    asked = [n for n, *_ in _numbers(sub.get("question", ""))] + name_numbers(sub.get("question", ""))      # as grade reads it (S2)
+    checked = claim_numbers(claims) + claim_names(claims) + asked + [float(x) for x in backed_extra] if run else asked
     rule3 = _note_sources(checked, _without_quotes(harness.code_written(shown)))
     values = claim_values(claims)
     numbers = []
@@ -388,14 +423,15 @@ def run_numbers(run_dirs: Iterable[Path]) -> list[float]:
     refused fetch is reported as "Study 4777: ..."; variance run of 2026-10-21). Model text is not among them: a ledger
     entry's reason quotes the model's arguments, and its study_id is the model's own argument, so only an all-digit ID counts
     (review 2026-10-21: "mean=12.5" as a study ID must stay unbacked); a report line that quotes the model (_MODEL_QUOTED)
-    backs nothing, and the planner draft's quoted IDs and questions in coordinator notes (_DRAFT_LINES) are blanked first."""
+    backs nothing, and the planner draft's quoted IDs and questions in coordinator notes (_DRAFT_LINES) are blanked first.
+    The digits inside the names a cell or a field holds are among them (S2, name_numbers)."""
     found: list[float] = []
     for run_dir in run_dirs:
         for table in sorted((Path(run_dir) / "artifacts").glob("*.csv")):
             with table.open(encoding="utf-8", newline="") as handle:
                 for row in csv.reader(handle):
                     for cell in row:
-                        found += [n for n, *_ in _numbers(cell)]
+                        found += [n for n, *_ in _numbers(cell)] + name_numbers(cell)
         answer = Path(run_dir) / "answer.json"
         if answer.is_file():
             doc = json.loads(answer.read_text(encoding="utf-8"))
@@ -408,7 +444,7 @@ def run_numbers(run_dirs: Iterable[Path]) -> list[float]:
                     continue
                 if text.lower().startswith(_DRAFT_LINES):
                     text = _QUOTED_PART.sub(" ", text)
-                found += [n for n, *_ in _numbers(text)]
+                found += [n for n, *_ in _numbers(text)] + name_numbers(text)
     return found
 
 

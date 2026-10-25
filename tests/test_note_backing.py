@@ -26,12 +26,17 @@ _spec.loader.exec_module(bench)
 
 TEXTS = ["5.6e-7", "about 5.6e-7.", "p 6.8e-101 and 1.234e-301", "1e305", "the plot code 0E0326 was not found", "0e" + "9" * 5000,
          "2,039 rows", "2.38 t/ha", "-2.5 t/ha", "2026-09-28 22:49 and 2026-09-28T22:49:00Z", "CO_331:0000296 and CO_331:0001016",
-         "PEP2016CSR-ST03-00287, -00595 and -00858", "84.7 % of 314", "(df 19, p about 5.6e-7)", "1.5e300", "at 12:30", "x1.5", "3.",
+         "PEP2016CSR-ST03-00287, -00595 and -00858", "MZP2019CHL-ST01-00595", "(-00595)", "+007 and -05", "-0", "-0.5 and -0.25", "-3.2e-4",
+         "MZP2016UMB-ST01-00001 and CIP199062.1", "x1, Jewel2 and the 2nd plot", "art_54f81d_0001",
+         "x2016 and trial2017b", "2026-09-28T22:49:00.1234Z", "192NDS0007HCRN02, 24Y2ND0045CUN and LOT00123456",
+         "PH123 and AB123CD4567", "-05.3", "MZP_2017_UMB and MZP2017_UMB", "LOT0003",
+         "84.7 % of 314", "(df 19, p about 5.6e-7)", "1.5e300", "at 12:30", "x1.5", "3.",
          ".5", "+7", "1e5.", "1e5.5", "all 80 groups tie", "12 distinct IDs; source 3", "1,234.5 and 1,2345", "observation\\_units: 640"]
-CLAIMS = [{"kind": "count", "value": 278, "unit": None, "filters": {"studyDbId": "4620", "block": "40"}, "grouping": ["season 2016"],
+CLAIMS = [{"kind": "count", "value": 278, "unit": None, "filters": {"studyDbId": "4620", "block": "40", "studyName": "MZP2016UMB-ST01"},
+           "grouping": ["season 2016"],
            "denominator": {"n": 317, "name": "entries of 318 with a value"}, "n_independent_units": 317,
            "exclusions": [{"count": 1, "reason": "plots below 25 left out"}], "missing_reason": "7 plots not measured",
-           "transformation": "count of entries above the threshold 10.2685"},
+           "transformation": "count of entries above the threshold 10.2685 in MZP2017UMB-ST01"},
           {"kind": "test", "value": 5.603e-07, "filters": {}, "transformation": "paired t: p"}, {"kind": "mean", "value": None,
            "missing_reason": "no valid value", "filters": {}, "transformation": "mean"}]
 
@@ -40,6 +45,7 @@ def test_the_reader_is_the_graders():
     for text in TEXTS:
         for written in (False, True):
             assert nb.numbers(text, written=written) == bench._numbers(text, written=written), (text, written)
+        assert nb.name_numbers(text) == bench.name_numbers(text), text
     assert nb.plain("a **bold** observation\\_units &amp; 5") == bench.harness.plain("a **bold** observation\\_units &amp; 5")
 
 
@@ -49,6 +55,7 @@ def test_backed_and_claim_numbers_are_the_graders():
         assert nb.backed(value, decimals, sources) == bench._backed(value, decimals, sources), (value, decimals, sources)
     assert sorted(nb.claim_numbers(CLAIMS)) == sorted(bench.claim_numbers(CLAIMS))
     assert sorted(nb.claim_numbers(iter(CLAIMS))) == sorted(bench.claim_numbers(CLAIMS))
+    assert sorted(nb.claim_names(CLAIMS)) == sorted(bench.claim_names(CLAIMS)) == [2016, 2017]       # S2: a filter's and a method's names
 
 
 def test_the_checked_reply_backs_but_not_the_lines_it_quotes():
@@ -60,20 +67,42 @@ def test_the_checked_reply_backs_but_not_the_lines_it_quotes():
     assert 12.0 in sources and 2.5 in sources and 77.0 not in sources
 
 
+def test_the_sources_are_the_graders_whole_backing_of_a_note_number():
+    """note_backing.sources is grade's backing of a note number: the claims' numbers and names, the question's numbers and names,
+    the run's own numbers, and the checked reply's numbers and names without the lines it quotes (S2 included)."""
+    question = "Compare MZP2017UMB-ST01 (studyDbId 4788) with MZP2016UMB-ST01?"
+    checked = "> In MZP2015UMB-ST09 only?\nMean: 2.5 over the PEP2014CSR-ST03 plots."
+    asked = [n for n, *_ in bench._numbers(question)] + bench.name_numbers(question)
+    graded = bench._note_sources(bench.claim_numbers(CLAIMS) + bench.claim_names(CLAIMS) + asked + [7.0], bench._without_quotes(checked))
+    sources = nb.sources(claims=CLAIMS, question=question, extra=[7.0], checked_text=checked)
+    assert sorted(sources) == sorted(graded) and {2014.0, 2016.0, 2017.0} <= set(sources) and 2015.0 not in sources
+
+
+def test_the_sources_take_the_claims_once():
+    """Review MINOR 6: claims given as a one-shot iterable keep their names (sources reads them once)."""
+    assert sorted(nb.sources(claims=iter(CLAIMS), question="", extra=[], checked_text="")) == sorted(
+        nb.sources(claims=CLAIMS, question="", extra=[], checked_text=""))
+
+
 def test_run_numbers_are_the_graders(tmp_path):
     """The run's own tables (every cell) and code-written fields (caveats, warnings, notes, the study ledger's IDs), with the
     model's quoted words left out and a planner draft's quoted parts blanked, as eval/benchmark.py run_numbers reads them."""
     run_dir = tmp_path / "run_20261025T140000_abcdef"
     (run_dir / "artifacts").mkdir(parents=True)
-    (run_dir / "artifacts" / "0001_observation_units.csv").write_text("observationUnitDbId,rep,block\n1276868,1,40\n1276869,2,7\n",
-                                                                       encoding="utf-8")
+    (run_dir / "artifacts" / "0001_observation_units.csv").write_text(
+        "observationUnitDbId,observationUnitName,rep,block\n1276868,PEP2016CSR-ST03-00287,1,40\n1276869,PEP2016CSR-ST03-00595,2,7\n",
+        encoding="utf-8")
     (run_dir / "answer.json").write_text(json.dumps({
-        "analysis": {"caveats": ["numeric_summary: 951 of 960 values kept", "model: 4143.48 is a sum of squares"]},
+        "analysis": {"caveats": ["numeric_summary: 951 of 960 values of MZP2017UMB-ST01 kept", "model: MZP2088UMB has 4143.48 of squares"]},
         "retrieval": {"warnings": ["get_observations: 960 units read", "model note: 12 studies were looked at"],
-                      "study_ledger": [{"study_id": "4610"}, {"study_id": "mean=12.5"}]},
+                      "study_ledger": [{"study_id": "4610"}, {"study_id": "mean=12.5"}, {"study_id": "MZP2066UMB"}]},
         "notes": ["coordinator: attempt 2 rejected: at most 12 items, not 14 ['99991']", "a plain note of 3 plots"]}), encoding="utf-8")
     assert sorted(nb.run_numbers(run_dir)) == sorted(bench.run_numbers([run_dir]))
     assert 4143.48 not in nb.run_numbers(run_dir) and 99991.0 not in nb.run_numbers(run_dir) and nb.run_numbers(tmp_path / "none") == []
+    assert {2016.0, 2017.0, 287.0, 595.0} <= set(nb.run_numbers(run_dir))        # S2: the names in a cell and in a code-written field
+    assert not {2088.0, 2066.0} & set(nb.run_numbers(run_dir))      # a model-quoted line's names, a name-like ledger ID: nothing
+    assert nb.field_numbers(caveats=["model: the trial MZP2088UMB-ST09 was best"], warnings=["model note: MZP2077UMB"], notes=[],
+                            ledger=[{"study_id": "MZP2066UMB"}, SimpleNamespace(study_id="MZP2055UMB")]) == []
 
 
 def test_the_decisions_are_the_graders_on_real_looking_answers():
@@ -162,6 +191,26 @@ def test_a_claims_own_text_backs_a_note_number():
     note = "model: The threshold is 10.27."
     assert "The threshold is 10.27" in cp.answer_summary(view([claim], [note]))
     assert "The threshold is 10.27" not in cp.answer_summary(view([mean()], [note]))
+
+
+def test_identifier_endings_and_the_years_of_named_studies_keep_their_note_lines(tmp_path):
+    """S2 (decision 2026-10-25 14:35 UTC): A36.3's line stays when the run's table holds the plots; E18.2's line stays when the
+    question names the studies; with neither, both are dropped, with the numbers nothing backs."""
+    run_dir = tmp_path / "run_20261025T013700_abcdef"
+    (run_dir / "artifacts").mkdir(parents=True)
+    (run_dir / "artifacts" / "0001_observations.csv").write_text(
+        "observationUnitName,value\nPEP2016CSR-ST03-00287,20.1\nPEP2016CSR-ST03-00595,27.7\nPEP2016CSR-ST03-00858,31.2\n", encoding="utf-8")
+    plots = "model: The 140 plots include PEP2016CSR-ST03-00287, -00595 and -00858."
+    assert cp.dropped_notes(view([mean()], [plots], run_dir=run_dir)) == []
+    assert cp.dropped_notes(view([mean()], [plots])) == [{"line": plots[len("model: "):], "numbers": [287, 595, 858]}]
+    years = "model: Plot names differ between the studies (00001 is Jonathan in 2016 and Esther in 2017)."
+    plots = tmp_path / "run_20261025T040304_bcd548"                   # as in the run: its tables hold the plot MZP2016UMB-ST01-00001
+    (plots / "artifacts").mkdir(parents=True)
+    (plots / "artifacts" / "0001_observations.csv").write_text("observationUnitName,value\nMZP2016UMB-ST01-00001,30.1\n", encoding="utf-8")
+    named = view([mean()], [years], run_dir=plots)
+    named.plan.question = "Compare MZP2017UMB-ST01 (studyDbId 4788) with MZP2016UMB-ST01 (studyDbId 4777)."
+    assert "Esther in 2017" in cp.answer_summary(named) and cp.dropped_notes(named) == []
+    assert cp.dropped_notes(view([mean()], [years])) == [{"line": years[len("model: "):], "numbers": [1, 2016, 2017]}]
 
 
 def test_an_incomplete_answer_drops_its_unverified_note_paragraphs_too():
