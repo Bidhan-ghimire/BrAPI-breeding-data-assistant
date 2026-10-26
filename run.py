@@ -63,7 +63,7 @@ from catalog_answers import catalog_count_plan, capture_catalog_sources, run_cat
 import catalog_lists
 from breeding_mcp_server import BreedingMcpService
 from console import say as _say      # every console message (Luna 2026-10-23)
-from coordination_runtime import run_agent_led, SUPERVISOR_PROMPT
+from coordination_runtime import run_agent_led, NEXT_STEP_PROMPT
 
 __all__ = [
     "RunConfig", "Models", "Controller", "EXIT_CODES", "build_approval",
@@ -107,7 +107,7 @@ _ASKED = "clarification needed: "            # how agents.analyst records the An
 _clock = time.monotonic                      # the clock the budget uses (llm.run_agent_loop's default); tests replace it
 MAX_CLARIFICATION_ROUNDS = 5       # an upper bound for any caller; the command line uses 1, the chat 3
 MAX_OBSERVATION_PAGES = 20         # pages per plot-record fetch any run may ask for (the benchmark's budget; the app's own is 2)
-STATES = ("supervise", "config", "plan", "clarify", "metadata", "catalog_list", "catalog_setup", "resolve", "approve", "retrieve", "review_data", "analyze",
+STATES = ("next_step", "config", "plan", "clarify", "metadata", "catalog_list", "catalog_setup", "resolve", "approve", "retrieve", "review_data", "analyze",
           "render", "accept", "record")
 AnswerFn = Callable[[str], str]
 
@@ -141,7 +141,7 @@ class RunConfig:
     review_retrieved_data: bool = True
     agent_led: bool = True
     unified_mcp: bool = True
-    max_supervisor_turns: int = 8
+    max_next_step_turns: int = 8
     catalog_list: str | None = None        # one of catalog_lists.ENTITIES ("traits" ... "study_types"): a fixed list, no planner
     catalog_list_word: str | None = None   # keep only the names that contain this word, ignoring case
     follow_up_of: str | None = None        # a follow-up (chat memory, Step 2b): the earlier run it continues (or the app's
@@ -168,8 +168,8 @@ class RunConfig:
             problems.append("the hosted app requires human approval and retrieved-data review")
         if not self.agent_led:
             problems.append("the hosted app requires agent-led coordination")
-        if type(self.max_supervisor_turns) is not int or not 3 <= self.max_supervisor_turns <= 16:
-            problems.append("max_supervisor_turns must be an integer between 3 and 16")
+        if type(self.max_next_step_turns) is not int or not 3 <= self.max_next_step_turns <= 16:
+            problems.append("max_next_step_turns must be an integer between 3 and 16")
         if self.read_timeout is not None and (not math.isfinite(self.read_timeout) or not 1 <= self.read_timeout <= 600):
             problems.append("read_timeout must be finite and between 1 and 600 seconds")
         if not math.isfinite(self.max_elapsed_seconds) or not 60 <= self.max_elapsed_seconds <= 3600:
@@ -226,7 +226,7 @@ class Models:
     retriever: ModelClient | None = None
     analyst_factory: Callable[[str], ModelClient] | None = None     # prefix -> model (handles are known only at run time)
     requested: str = "configured model"
-    supervisor: ModelClient | None = None
+    next_step: ModelClient | None = None
 
 
 # --------------------------------------------------------------------------
@@ -631,14 +631,14 @@ class Controller:
         self._shared_service = None
         self._shared_analysis_ids: frozenset[str] | None = None
         self._shared_phases: list[str] = []
-        self.supervision: dict[str, Any] = {"mode": "agent_led" if self.config.agent_led else "fixed",
+        self.delegation: dict[str, Any] = {"mode": "agent_led" if self.config.agent_led else "fixed",
             "decisions": [], "plan_revisions": 0, "analysis_passes": 0,
             "plan_history": [], "analysis_history": [], "clarifications": []}
-        self.supervisor_questions: list[str] = []
-        self.supervisor_answers = 0
-        self._supervisor_revision: str | None = None
-        self._supervisor_analysis_instruction: str | None = None
-        self._supervisor_clock = lambda: _clock()
+        self.next_step_questions: list[str] = []
+        self.next_step_answers = 0
+        self._next_step_revision: str | None = None
+        self._next_step_analysis_instruction: str | None = None
+        self._next_step_clock = lambda: _clock()
         self.ctx: ToolContext | None = None
         self.execution_status: str = "failed"
         self.acceptance: str = "pending"
@@ -1016,8 +1016,8 @@ class Controller:
                                              log_dir=self.run_dir.parent, model_requested=self.models.requested, now=self.now(),
                                              person_reviews_scope=not self.config.auto,    # a person sees the approval screen first
                                              earlier_questions=list(self.planner_questions), max_plan_steps=self.config.max_plan_steps,
-                                             **({"supervisor_instruction": self._supervisor_revision}
-                                                if self._supervisor_revision else {}))   # so a reply such as "yes" makes sense
+                                             **({"next_step_instruction": self._next_step_revision}
+                                                if self._next_step_revision else {}))   # so a reply such as "yes" makes sense
         self.agents.extend(self.coordination.agents)
         self.notes.extend(f"coordinator: {n}" for n in self.coordination.notes)
         self.plan = self.coordination.plan
@@ -1363,9 +1363,9 @@ class Controller:
         if steps:
             notes.append("planned analysis steps (the argument names are the tools' own; follow them on the supplied artifacts unless "
                          "table_info shows they cannot work, and then say why): " + "; ".join(steps))
-        if self._supervisor_analysis_instruction:
+        if self._next_step_analysis_instruction:
             notes.append("Coordinator follow-up within the original question and reviewed artifacts only: " +
-                         self._supervisor_analysis_instruction)
+                         self._next_step_analysis_instruction)
         return notes
 
     async def analyze_phase(self) -> None:
@@ -1567,7 +1567,7 @@ class Controller:
                       "transport": "direct" if self.config.direct else "mcp"},
             "tool_transport": "direct" if self.config.direct else self.config.mcp_transport,
             "mcp_sessions": list(self.mcp_sessions), "analysis_execution": dict(self.analysis_execution), "data_review": dict(self.data_review),
-            "coordination": dict(self.supervision),
+            "coordination": dict(self.delegation),
             "retriever_clarifications": self.retriever_answers,
             "counts": result.counts.model_dump(), "started_at_utc": self.started.isoformat(), "finished_at_utc": self.now().isoformat(),
             "state_trace": list(self.trace), "notes": list(self.notes), "config": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(self.config).items()},

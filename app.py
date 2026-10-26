@@ -41,7 +41,7 @@ from app_help import QUICK_START, QUESTION_GUIDE, faq_items
 from chat_presenter import answer_summary, approval_summary
 from brapi_client import load_settings
 from llm import ModelProviderError, ProviderConfigError
-from run import (ANALYST_PROMPT, CLARIFY_PROMPT, CATALOG_PROMPT, CATALOG_SETUP_QUESTION, DATA_REVIEW_PROMPT, RETRIEVER_PROMPT, SUPERVISOR_PROMPT,
+from run import (ANALYST_PROMPT, CLARIFY_PROMPT, CATALOG_PROMPT, CATALOG_SETUP_QUESTION, DATA_REVIEW_PROMPT, RETRIEVER_PROMPT, NEXT_STEP_PROMPT,
                  Controller, Models, RunConfig, analyst_questions, source_host, standing_review_date)
 
 __all__ = ["Job", "live_config", "live_preflight", "respond", "render", "build_ui", "REPLY_TIMEOUT_S", "locked", "after_step",
@@ -105,7 +105,7 @@ class Job:
             text = "approve catalog"
         if self.waiting_on == DATA_REVIEW_PROMPT and text.strip().lower() == "approve":
             text = "continue"               # the first quick-reply button is labelled Continue to analysis here
-        if text.strip().lower() == "cancel" and self.waiting_on in (CLARIFY_PROMPT, ANALYST_PROMPT, RETRIEVER_PROMPT, SUPERVISOR_PROMPT):
+        if text.strip().lower() == "cancel" and self.waiting_on in (CLARIFY_PROMPT, ANALYST_PROMPT, RETRIEVER_PROMPT, NEXT_STEP_PROMPT):
             text = ""                            # there the controller's rule is 'empty = cancel'; a chat box cannot send an empty line
         self.inbox.put(text)
 
@@ -287,8 +287,8 @@ def render(job: Job, event: tuple[str, Any]) -> tuple[str, bool]:
     if kind == "prompt" and payload == DATA_REVIEW_PROMPT:
         return (controller.data_review_screen() + "\n\nReply **continue** to analyze these data, or **cancel**. "
                 "Continuing allows analysis; you will review and accept the final answer separately."), False
-    if kind == "prompt" and payload == SUPERVISOR_PROMPT:
-        asked = "\n".join("> " + _shorten(" ".join(q.split())) for q in controller.supervisor_questions)
+    if kind == "prompt" and payload == NEXT_STEP_PROMPT:
+        asked = "\n".join("> " + _shorten(" ".join(q.split())) for q in controller.next_step_questions)
         return ("I need one more detail before choosing the next step:\n\n" + asked +
                 "\n\nReply in the chat, or cancel. Any revised data request still needs your approval."), False
     if kind == "prompt" and payload == RETRIEVER_PROMPT:
@@ -529,8 +529,8 @@ def _pending_questions(job: Job) -> list[str]:
     controller, waiting_on = job.controller, _waiting_on(job)
     if waiting_on == CLARIFY_PROMPT:
         return list(getattr(controller.coordination, "questions", None) or [])
-    if waiting_on == SUPERVISOR_PROMPT:
-        return list(controller.supervisor_questions)
+    if waiting_on == NEXT_STEP_PROMPT:
+        return list(controller.next_step_questions)
     if waiting_on == RETRIEVER_PROMPT:
         return list(controller.retriever_questions)
     if waiting_on == ANALYST_PROMPT:
@@ -883,7 +883,7 @@ def reply_buttons(state: dict[str, Any] | None) -> tuple[bool, bool, bool, bool]
     waiting = job.waiting_on if job is not None and not asking else ""
     approval = waiting.startswith("approve / edit / cancel") or waiting in (CATALOG_PROMPT, DATA_REVIEW_PROMPT)
     answer = waiting.startswith("accept / reject")
-    question = waiting in (CLARIFY_PROMPT, ANALYST_PROMPT, RETRIEVER_PROMPT, SUPERVISOR_PROMPT)
+    question = waiting in (CLARIFY_PROMPT, ANALYST_PROMPT, RETRIEVER_PROMPT, NEXT_STEP_PROMPT)
     return approval, approval or question, answer, answer
 
 

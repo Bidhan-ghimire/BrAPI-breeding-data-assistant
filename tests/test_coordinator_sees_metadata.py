@@ -10,7 +10,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import coordination_runtime as cr
-from agents.coordinator import SUPERVISOR_SYSTEM_PROMPT
+from agents.coordinator import NEXT_STEP_SYSTEM_PROMPT
 from contracts import AnalysisReport, MetadataFact
 
 DESCRIPTION = "Specialty trial with 200 genotypes and 2 replications, late season drought"
@@ -25,7 +25,7 @@ def view(facts, claims=()):
     controller = SimpleNamespace(plan=None, config=SimpleNamespace(question="What does the study description say it tests?"),
                                  ctx=None, retrieval=None, data_review={"status": "approved"},
                                  analysis=AnalysisReport(status="completed", claims=list(claims), metadata_facts=facts),
-                                 supervision={"decisions": [], "plan_revisions": 0, "analysis_passes": 1})
+                                 delegation={"decisions": [], "plan_revisions": 0, "analysis_passes": 1})
     return cr._state(controller, "analyzed")["analysis"]
 
 
@@ -78,14 +78,14 @@ def test_claims_and_facts_both_show_and_a_report_without_facts_shows_none():
     assert len(both["claims"]) == 1 and both["metadata_facts"][0]["value"] == DESCRIPTION
     bare = SimpleNamespace(plan=None, config=SimpleNamespace(question="q"), ctx=None, retrieval=None, data_review={"status": "approved"},
                            analysis=SimpleNamespace(status="completed", claims=[], caveats=[]),
-                           supervision={"decisions": [], "plan_revisions": 0, "analysis_passes": 1})
+                           delegation={"decisions": [], "plan_revisions": 0, "analysis_passes": 1})
     state = cr._state(bare, "analyzed")["analysis"]
     assert state["metadata_facts"] == [] and state["metadata_facts_omitted"] == 0
 
 
 def test_the_finish_rule_names_the_metadata_facts():
     """The Coordinator's rule for finish counts a record's fields read by code, not only claims."""
-    text = " ".join(SUPERVISOR_SYSTEM_PROMPT.split())
+    text = " ".join(NEXT_STEP_SYSTEM_PROMPT.split())
     assert "finish: only after completed, code-validated analysis supports an answer: its claims, or" in text
     assert "for a question about what a record states" in text
     assert "its metadata_facts (fields read by code from the retrieved records)" in text

@@ -78,14 +78,15 @@ MODEL_REPLY_STATUS = "no run: the app answered without starting one"
 CODE_REPLY_WHY = "no run: code-written reply (triage.out_of_scope_line), numbers not graded"
 # Report lines that quote the model, not what code did: its notes; the IDs it named that nothing fetched, returned or produced
 # (agents/retriever.py build_report and _drop_unknown_kinds, agents/analyst.py build_report); its rejected tool arguments; the
-# agents' questions, with any answer to them (run.py's clarification notes; the harness never answers); the supervisor's stop
+# agents' questions, with any answer to them (run.py's clarification notes; the harness never answers); the Coordinator's stop
 # reason. They back no number: an ID on the run's record only because the model named it is an invented ID's path (coach,
 # 2026-10-21 20:50 UTC, answer 2; review 2026-10-22).
 # An agent error quotes the model when it reports the model's refusal, its malformed tool call or its unreadable final reply
 # (llm.py add_error). The retriever and the analyst write it as "agent error ...", the planner's arrives as "coordinator: agent
-# error ..." and the supervisor's as "supervisor: supervisor error ..." (review 2026-10-22, round 2, R1). A budget or provider
-# error is the code's own and still backs its numbers.
-_MODEL_ERRORS = tuple(f"{spelling} {code}" for spelling in ("agent error", "coordinator: agent error", "supervisor: supervisor error")
+# error ...", the next-step call's as "next step: next-step error ..." and, in results saved before 2026-10-26, as
+# "supervisor: supervisor error ..." (review 2026-10-22, round 2, R1). A budget or provider error is the code's own and
+# still backs its numbers.
+_MODEL_ERRORS = tuple(f"{spelling} {code}" for spelling in ("agent error", "coordinator: agent error", "next step: next-step error", "supervisor: supervisor error")
                       for code in ("model_refusal", "malformed_arguments", "invalid_json"))
 _MODEL_QUOTED = ("model:", "model note:", "model declared ids", "model listed resolved entries", "model named claim ids",
                  "studies named by the model", "clarification ", "retriever clarification ", "analyst clarification ",

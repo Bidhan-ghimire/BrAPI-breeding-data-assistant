@@ -144,7 +144,7 @@ def view(n_claims, status="completed"):
                   transformation="frequency of exact text values") for n in range(n_claims)]
     plain = SimpleNamespace(plan=None, retrieval=None, data_review={"status": "approved"},
                             analysis=AnalysisReport(status=status, claims=made),
-                            supervision={"decisions": [], "plan_revisions": 0, "analysis_passes": 1})
+                            delegation={"decisions": [], "plan_revisions": 0, "analysis_passes": 1})
     return cr._state(plain, "analyzed")["analysis"]
 
 

@@ -28,7 +28,7 @@ def config(tmp_path, **changes):
     return hosted_config(tmp_path, QUESTION, **changes)
 
 
-def supervisor(*decisions):
+def next_step_model(*decisions):
     replies = []
     for item in decisions:
         payload = {"action": item, "reason": "Synthetic next-stage decision."} if isinstance(item, str) else item
@@ -49,8 +49,8 @@ def human_replies(*values):
 
 
 def execute(tmp_path, decisions=SUCCESS_ACTIONS, *, models=None, answer_fn=None, **changes):
-    decision_model = supervisor(*decisions)
-    models = replace(models or synthetic_models(), supervisor=decision_model)
+    decision_model = next_step_model(*decisions)
+    models = replace(models or synthetic_models(), next_step=decision_model)
     controller = ctl.Controller(config(tmp_path, **changes), models=models,
         answer_fn=answer_fn or human_replies("approve", "continue", "accept"))
     result = asyncio.run(controller.run())
@@ -94,18 +94,18 @@ def test_the_coordinators_view_lists_overall_totals_before_per_item_counts():
     per_trait = [count(n, 1, {"observationVariableDbId": f"7{n:04d}"}) for n in range(22)]
     controller = SimpleNamespace(plan=None, retrieval=None, data_review={"status": "approved"},
                                  analysis=AnalysisReport(status="completed", claims=[*per_trait, count(99, 22, {})]),
-                                 supervision={"decisions": [], "plan_revisions": 0, "analysis_passes": 1})
+                                 delegation={"decisions": [], "plan_revisions": 0, "analysis_passes": 1})
     view = coordination_runtime._state(controller, "analyzed")["analysis"]
     assert view["claims"][0]["value"] == 22 and view["claims"][0]["filters"] == {} and view["claims_omitted"] == 3
     assert [c["claim_id"] for c in view["claims"][1:]] == [c.claim_id for c in per_trait[:19]]   # the rest in their order
 
 
-def test_hosted_entrypoint_opts_into_supervision_and_shared_service_only(tmp_path):
+def test_hosted_entrypoint_opts_into_delegation_and_shared_service_only(tmp_path):
     selected = config(tmp_path)
     assert selected.agent_led and selected.unified_mcp and selected.review_retrieved_data
     assert selected.uses_memory_mcp and not selected.direct and not selected.auto
     assert not selected.offline and not selected.mock_model
-    assert selected.max_supervisor_turns == 8
+    assert selected.max_next_step_turns == 8
     defaults = ctl.RunConfig(question=QUESTION)
     assert defaults.agent_led and defaults.unified_mcp      # on by default in the release (part2 had them off)
 
@@ -115,8 +115,8 @@ def test_hosted_entrypoint_opts_into_supervision_and_shared_service_only(tmp_pat
     {"mcp_transport": "stdio"},
     {"review_retrieved_data": False},
     {"auto": True},
-    {"max_supervisor_turns": 2},
-    {"max_supervisor_turns": 17},
+    {"max_next_step_turns": 2},
+    {"max_next_step_turns": 17},
 ])
 def test_agent_led_invalid_configuration_is_refused_before_models(tmp_path, changes):
     assert config(tmp_path, **changes).validate()
@@ -158,7 +158,7 @@ def test_real_protocol_happy_path_has_one_main_session_and_canonical_results(tmp
 
 
 @pytest.mark.parametrize("action", ["finish", "analyze", "delete_database"])
-def test_supervisor_cannot_skip_retrieval_or_dispatch_an_unknown_action(tmp_path, action):
+def test_next_step_cannot_skip_retrieval_or_dispatch_an_unknown_action(tmp_path, action):
     controller, result, manifest, decision_model = execute(tmp_path, (action,))
     assert result.execution_status != "completed", result.notes
     assert controller.retrieval is None and controller.analysis is None
@@ -181,7 +181,7 @@ def test_model_supplied_permission_fields_never_grant_authority(tmp_path, field,
     assert "get_observations" not in successful_calls(manifest)
 
 
-def test_missing_human_input_cannot_be_replaced_by_supervisor_retrieve(tmp_path):
+def test_missing_human_input_cannot_be_replaced_by_next_step_retrieve(tmp_path):
     controller, result, manifest, _ = execute(tmp_path, answer_fn=human_replies())
     assert result.execution_status != "completed" and controller.retrieval is None
     assert controller.approval is None
@@ -199,7 +199,7 @@ def test_data_review_requires_continue_and_never_calls_analyst_on_denial(tmp_pat
     workflow_session(manifest)
 
 
-def test_supervisor_cannot_return_to_retrieval_after_data_review(tmp_path):
+def test_next_step_cannot_return_to_retrieval_after_data_review(tmp_path):
     controller, result, manifest, _ = execute(tmp_path, ("retrieve", "retrieve"))
     assert result.execution_status != "completed", result.notes
     assert controller.data_review["status"] == "approved"
@@ -226,18 +226,18 @@ def test_third_analysis_is_denied_even_when_model_insists(tmp_path):
     assert result.human_acceptance != "accepted" and len(decision_model.requests) == 4
 
 
-def test_supervisor_turn_limit_is_enforced_before_next_model_call(tmp_path):
+def test_next_step_turn_limit_is_enforced_before_next_model_call(tmp_path):
     controller, result, manifest, decision_model = execute(tmp_path,
-        ("retrieve", "analyze", "analyze", "finish"), max_supervisor_turns=3)
+        ("retrieve", "analyze", "analyze", "finish"), max_next_step_turns=3)
     assert result.execution_status == "limit_reached", result.notes
     assert len(decision_model.requests) == 3
     assert len(manifest["coordination"]["decisions"]) == 3
     assert result.human_acceptance != "accepted"
 
 
-def test_supervisor_and_specialists_share_model_budget(tmp_path):
-    decision_model = supervisor(*SUCCESS_ACTIONS)
-    models = replace(synthetic_models(), supervisor=decision_model)
+def test_next_step_and_specialists_share_model_budget(tmp_path):
+    decision_model = next_step_model(*SUCCESS_ACTIONS)
+    models = replace(synthetic_models(), next_step=decision_model)
     prompts = []
     holder = {}
 
@@ -270,7 +270,7 @@ def test_revised_plan_requires_fresh_human_approval_and_cannot_autofetch(tmp_pat
     assert result.execution_status != "completed" and result.human_acceptance != "accepted"
 
 
-def test_more_than_two_supervisor_plan_revisions_is_denied(tmp_path):
+def test_more_than_two_next_step_plan_revisions_is_denied(tmp_path):
     revision = {"action": "revise_plan", "reason": "Try another layout.",
                 "instruction": "Keep S1 and yield in the original question."}
     controller, result, manifest, decision_model = execute(tmp_path, (revision, revision, revision))
@@ -280,7 +280,7 @@ def test_more_than_two_supervisor_plan_revisions_is_denied(tmp_path):
     assert controller.retrieval is None and controller.analysis is None
 
 
-def test_supervisor_clarification_is_shown_to_person_and_cancel_stops(tmp_path):
+def test_next_step_clarification_is_shown_to_person_and_cancel_stops(tmp_path):
     asked = "Should the report retain the pooled mean and clone means?"
     prompts = []
 
@@ -290,26 +290,26 @@ def test_supervisor_clarification_is_shown_to_person_and_cancel_stops(tmp_path):
 
     controller, result, manifest, _ = execute(tmp_path, (
         {"action": "clarify", "reason": "A person should resolve this.", "question": asked},), answer_fn=answer)
-    assert prompts == [ctl.SUPERVISOR_PROMPT]
-    assert asked in controller.supervisor_questions
+    assert prompts == [ctl.NEXT_STEP_PROMPT]
+    assert asked in controller.next_step_questions
     assert result.execution_status == "canceled", result.notes
     assert controller.retrieval is None and controller.approval is None
 
 
-def test_supervisor_clarification_continues_through_plan_and_fresh_approval(tmp_path):
+def test_next_step_clarification_continues_through_plan_and_fresh_approval(tmp_path):
     asked = "Keep the originally requested mean yield for study S1?"
     reply = "Yes, keep study S1 and yield, including clone means."
     controller, result, manifest, decision_model = execute(tmp_path, (
         {"action": "clarify", "reason": "Clarify the report shape.", "question": asked},
         *SUCCESS_ACTIONS), answer_fn=human_replies(reply, "approve", "continue", "accept"))
     assert result.execution_status == "completed", result.notes
-    assert controller.supervisor_answers == 1
+    assert controller.next_step_answers == 1
     assert len(decision_model.requests) == 4
     assert reply in controller.config.question
     assert result.human_acceptance == "accepted"
 
 
-def test_supervisor_clarification_round_limit_stops_without_more_human_input(tmp_path):
+def test_next_step_clarification_round_limit_stops_without_more_human_input(tmp_path):
     question = {"action": "clarify", "reason": "Synthetic clarification.",
                 "question": "Keep study S1 and yield?"}
     prompts = []
@@ -321,8 +321,8 @@ def test_supervisor_clarification_round_limit_stops_without_more_human_input(tmp
     controller, result, manifest, _ = execute(tmp_path, (question, question),
         answer_fn=answer, max_clarification_rounds=1)
     assert result.execution_status != "completed", result.notes
-    assert controller.supervisor_answers == 1
-    assert prompts == [ctl.SUPERVISOR_PROMPT]
+    assert controller.next_step_answers == 1
+    assert prompts == [ctl.NEXT_STEP_PROMPT]
     assert controller.retrieval is None and controller.analysis is None
 
 
@@ -333,12 +333,12 @@ def test_model_finish_still_leaves_acceptance_to_person(tmp_path):
 
 
 def execute_with_reviewed_table_tampering(tmp_path, action):
-    """Simulate an external local edit while a supervisor decision is pending."""
+    """Simulate an external local edit while a next-step decision is pending."""
     holder = {}
     prompts = []
     changed = []
 
-    class TamperingSupervisor(FakeModelClient):
+    class TamperingNextStep(FakeModelClient):
         async def complete(self, messages, tools, *, max_tokens):
             reply = await super().complete(messages, tools, max_tokens=max_tokens)
             if json.loads(reply.content)["payload"]["action"] == action:
@@ -356,7 +356,7 @@ def execute_with_reviewed_table_tampering(tmp_path, action):
                 changed.append(artifact_id)
             return reply
 
-    decision_model = TamperingSupervisor([
+    decision_model = TamperingNextStep([
         reply_text(json.dumps({"status": "completed", "payload": {
             "action": item, "reason": "Synthetic boundary integrity check."}}))
         for item in SUCCESS_ACTIONS
@@ -367,7 +367,7 @@ def execute_with_reviewed_table_tampering(tmp_path, action):
         return "continue" if prompt == ctl.DATA_REVIEW_PROMPT else "approve"
 
     controller = ctl.Controller(config(tmp_path),
-        models=replace(synthetic_models(), supervisor=decision_model), answer_fn=answer)
+        models=replace(synthetic_models(), next_step=decision_model), answer_fn=answer)
     holder["controller"] = controller
     result = asyncio.run(controller.run())
     manifest = json.loads(controller.output_paths()["manifest_json"].read_text(encoding="utf-8"))

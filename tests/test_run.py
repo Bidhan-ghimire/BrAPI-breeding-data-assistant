@@ -474,7 +474,7 @@ def test_the_run_prints_only_through_console_say():
 
 def test_the_coordinators_question_with_a_character_the_console_cannot_hold(tmp_path, monkeypatch):
     """Review of the fix: an agent-led run without --auto (the app, the CLI, the harness) whose coordinator asks a question holding
-    U+2265 failed in state supervise, the same crash one file over. The question now reaches the console with a "?"."""
+    U+2265 failed in the next-step state, the same crash one file over. The question now reaches the console with a "?"."""
     from dataclasses import replace
     from llm import FakeModelClient, reply_text
     from synthetic_support import hosted_config
@@ -484,11 +484,11 @@ def test_the_coordinators_question_with_a_character_the_console_cannot_hold(tmp_
     buffer = cp1252_console(monkeypatch)
     question = "Do you mean yield \u2265 20 t/ha, or every plot?"
     decisions = [{"action": "clarify", "reason": "Two readings.", "question": question}, "retrieve", "analyze", "finish"]
-    supervisor = FakeModelClient([reply_text(json.dumps({"status": "completed", "payload": item if isinstance(item, dict) else
+    next_step = FakeModelClient([reply_text(json.dumps({"status": "completed", "payload": item if isinstance(item, dict) else
                                                          {"action": item, "reason": "Synthetic next-stage decision."}})) for item in decisions])
     config = hosted_config(tmp_path, Q, auto=False)
     assert config.agent_led and not config.auto
-    controller = ctl.Controller(config, models=replace(synthetic_models(), supervisor=supervisor),
+    controller = ctl.Controller(config, models=replace(synthetic_models(), next_step=next_step),
                                 answer_fn=scripted(["every plot", "approve", "continue", "accept"]))
     result = asyncio.run(controller.run())
     assert not any("UnicodeEncodeError" in note for note in result.notes) and result.execution_status != "failed"

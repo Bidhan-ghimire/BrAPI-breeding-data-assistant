@@ -38,7 +38,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 import triage
 from llm import ModelProviderError
 from retrieval_review import _cell as _escaped       # the same escaping the data review uses for database text
-from run import (ANALYST_PROMPT, CATALOG_PROMPT, CLARIFY_PROMPT, DATA_REVIEW_PROMPT, RETRIEVER_PROMPT, SUPERVISOR_PROMPT,
+from run import (ANALYST_PROMPT, CATALOG_PROMPT, CLARIFY_PROMPT, DATA_REVIEW_PROMPT, RETRIEVER_PROMPT, NEXT_STEP_PROMPT,
                  is_approval_revision)
 
 __all__ = ["WaitingKind", "WaitingDecision", "waiting_kind", "control_word", "goes_straight_to_the_run", "asks_about_listing",
@@ -47,7 +47,7 @@ __all__ = ["WaitingKind", "WaitingDecision", "waiting_kind", "control_word", "go
            "OUT_OF_SCOPE_RULE"]
 
 WaitingKind = Literal["question", "plan_approval", "catalog", "data_review", "acceptance", "pass_through"]
-QUESTION_PROMPTS = (CLARIFY_PROMPT, SUPERVISOR_PROMPT, RETRIEVER_PROMPT, ANALYST_PROMPT)   # planner, coordinator, Retriever, Analyst
+QUESTION_PROMPTS = (CLARIFY_PROMPT, NEXT_STEP_PROMPT, RETRIEVER_PROMPT, ANALYST_PROMPT)   # planner, coordinator, Retriever, Analyst
 QUOTED_CHARS = 200        # the most of a question or message quoted back in a line written by code
 
 # The words each prompt itself understands (run.py and Job.reply); nothing else ever reaches the run without a label.

@@ -303,7 +303,7 @@ def test_the_local_smoke_never_calls_claude(tmp_path, monkeypatch):
 
 # --- requests ----------------------------------------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("agent, effort", [("retriever", "low"), ("coordinator_1", "medium"), ("supervisor_3", "medium"),
+@pytest.mark.parametrize("agent, effort", [("retriever", "low"), ("coordinator_1", "medium"), ("coordinator_next_3", "medium"),
                                            ("analyst", "medium"), ("smoke", "medium")])
 def test_every_request_carries_the_roles_effort_and_nothing_claude_refuses(tmp_path, agent, effort):
     client, sdk = open_client(claude_settings(tmp_path), [message([text(FINAL)])])
@@ -469,11 +469,12 @@ def test_a_used_up_budget_ends_the_step_after_one_request_with_a_plain_message(t
     assert RAW not in error.message and body_words not in error.message
 
 
-@pytest.mark.parametrize("where", ["planner", "next-step", "retriever", "analyst"])
+@pytest.mark.parametrize("where", ["planner", "next-step", "saved next-step", "retriever", "analyst"])
 def test_a_used_up_budget_shows_the_plain_screen_at_every_agent(where):
-    note = {"planner": "coordinator: agent error provider_quota: ", "next-step": "supervisor: supervisor error provider_quota: ",
+    note = {"planner": "coordinator: agent error provider_quota: ", "next-step": "next step: next-step error provider_quota: ",
+            "saved next-step": "supervisor: supervisor error provider_quota: ",          # runs saved before 2026-10-26
             "retriever": "agent error provider_quota: ", "analyst": "agent error provider_quota: "}[where] + llm.BUDGET_MESSAGE
-    controller = SimpleNamespace(execution_status="failed", notes=[note] if where in ("planner", "next-step") else [],
+    controller = SimpleNamespace(execution_status="failed", notes=[note] if where in ("planner", "next-step", "saved next-step") else [],
                                  retrieval=SimpleNamespace(status="failed", warnings=[note]) if where == "retriever" else None,
                                  analysis=AnalysisReport(status="failed", caveats=[note]) if where == "analyst" else None)
     shown = presenter.answer_summary(controller)
@@ -483,7 +484,8 @@ def test_a_used_up_budget_shows_the_plain_screen_at_every_agent(where):
 
 
 def test_only_code_written_prefixes_count_as_a_provider_failure():
-    for note in ("model: agent error provider_quota: x", "supervisor: agent error provider_quota: x",
+    for note in ("model: agent error provider_quota: x", "next step: agent error provider_quota: x",
+                 "coordinator: next-step error provider_quota: x", "supervisor: agent error provider_quota: x",
                  "coordinator: supervisor error provider_quota: x"):
         assert presenter._provider_failure(SimpleNamespace(notes=[note], analysis=None, retrieval=None)) is None
 
@@ -684,5 +686,5 @@ def test_other_models_are_untouched_and_a_role_view_has_no_lifetime_of_its_own(t
         anyio.run(view.__aenter__)
     with pytest.raises(ModelProviderError, match="not open"):
         anyio.run(lambda: view.complete([USER], [], max_tokens=10))
-    assert [llm.agent_role(name) for name in ("coordinator_2", "supervisor_10", "retriever", "analyst", "smoke", "coordinator")] == [
+    assert [llm.agent_role(name) for name in ("coordinator_2", "coordinator_next_10", "retriever", "analyst", "smoke", "coordinator")] == [
         "coordinator", "coordinator", "retriever", "analyst", "other", "coordinator"]

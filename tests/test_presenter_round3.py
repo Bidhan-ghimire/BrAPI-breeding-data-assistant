@@ -345,6 +345,7 @@ def test_full_report_separates_raw_model_independence_claim_from_recorded_action
 
 
 
-def test_a_shortened_reason_note_is_bookkeeping_not_the_reason_a_run_stopped():
-    note = "supervisor: the Coordinator's reason was shortened from 1000 to 600 characters"
+@pytest.mark.parametrize("prefix", ["next step", "supervisor"])        # supervisor: runs saved before 2026-10-26
+def test_a_shortened_reason_note_is_bookkeeping_not_the_reason_a_run_stopped(prefix):
+    note = f"{prefix}: the Coordinator's reason was shortened from 1000 to 600 characters"
     assert cp._NOT_A_REASON.match(note) and cp._fallback_notes([note]) == []

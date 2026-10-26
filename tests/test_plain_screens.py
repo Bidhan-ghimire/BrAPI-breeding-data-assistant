@@ -22,7 +22,7 @@ import chat_presenter as cp
 import run as ctl
 from artifacts import ArtifactRegistry
 from contracts import FetchManifest, MeasurementMeta, Plan, PlanStep, ResolvedScope, RetrievalReport
-from coordination_runtime import SUPERVISOR_PROMPT
+from coordination_runtime import NEXT_STEP_PROMPT
 from retrieval_review import review_snapshot
 
 BASE = "https://plain-test.invalid/brapi/v2"
@@ -150,7 +150,7 @@ def waiting_controller() -> SimpleNamespace:
         config=SimpleNamespace(question="Tell me about a study.", max_clarification_rounds=3),
         analysis=SimpleNamespace(caveats=["clarification needed: Use the seasons column instead?"]), analyst_answers=0,
         retriever_questions=["Which label should be used?"], retriever_answers=0,
-        supervisor_questions=["Should the plan include 2025?"])
+        next_step_questions=["Should the plan include 2025?"])
 
 
 @pytest.mark.parametrize("prompt, lead, kept", [
@@ -160,7 +160,7 @@ def waiting_controller() -> SimpleNamespace:
      ["Use the seasons column instead?", "nothing new is fetched", "reply **cancel**"]),
     (ctl.RETRIEVER_PROMPT, "I need one more detail while preparing your data (answer 1 of 3):",
      ["Which label should be used?", "within the approved scope", "**cancel** and start a new question"]),
-    (SUPERVISOR_PROMPT, "I need one more detail before choosing the next step:",
+    (NEXT_STEP_PROMPT, "I need one more detail before choosing the next step:",
      ["Should the plan include 2025?", "still needs your approval"]),
 ])
 def test_the_question_prompts_speak_plainly_as_i(prompt, lead, kept):

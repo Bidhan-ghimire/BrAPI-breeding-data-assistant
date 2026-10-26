@@ -154,15 +154,15 @@ def synthetic_context(*, offline: bool = True, cache_dir: Path | None = None, ou
 # --- new: part2's run flow on the release's runtime (setup for ported controller and chat tests) ----------
 # The release refuses part2's offline/mock/direct/--auto modes (run.RunConfig.validate). A ported test runs the
 # release flow instead and gets, through these hooks, what part2's mock mode supplied: the scripted planner above,
-# a supervisor that always takes the next step, the person's "continue" at the data review the release added, and
+# a next-step model that always takes the next step, the person's "continue" at the data review the release added, and
 # for tests written for --auto (no answer function) a scripted person who approves the data request and nothing else.
 
 PART2_STAGE_ACTIONS = {"planned": "retrieve", "data_reviewed": "analyze", "analyzed": "finish"}
 
 
-class StageSupervisor:
+class StageNextStep:
     """Always delegates the next step (plan -> retrieve -> analyze -> finish), like the release's own scripted
-    supervisor in coordination_runtime._choose (its mock_model branch)."""
+    next-step model in coordination_runtime._choose (its mock_model branch)."""
 
     reported_model = "mock-model"
 
@@ -173,7 +173,7 @@ class StageSupervisor:
         self.requests.append({"messages": [dict(m) for m in messages], "max_tokens": max_tokens})
         stage = json.loads(messages[1]["content"])["state"]["stage"]
         return reply_text(json.dumps({"status": "completed", "payload": {
-            "action": PART2_STAGE_ACTIONS[stage], "reason": "Synthetic offline supervisor script."}}), model="mock-model")
+            "action": PART2_STAGE_ACTIONS[stage], "reason": "Synthetic offline next-step script."}}), model="mock-model")
 
 
 def part2_runtime(monkeypatch, *, server: str | None = None, review: str | None = "continue") -> None:
@@ -189,10 +189,10 @@ def part2_runtime(monkeypatch, *, server: str | None = None, review: str | None 
 
     post_init = ctl.Controller.__post_init__
 
-    def with_supervisor(self) -> None:
+    def with_next_step(self) -> None:
         post_init(self)
-        if self.models.supervisor is None:
-            self.models = dataclasses.replace(self.models, supervisor=StageSupervisor())
+        if self.models.next_step is None:
+            self.models = dataclasses.replace(self.models, next_step=StageNextStep())
 
     ask = ctl.Controller._ask
 
@@ -204,7 +204,7 @@ def part2_runtime(monkeypatch, *, server: str | None = None, review: str | None 
         return ask(self, prompt)
 
     monkeypatch.setattr(ctl.Controller, "_model_for_coordinator", model_for_coordinator)
-    monkeypatch.setattr(ctl.Controller, "__post_init__", with_supervisor)
+    monkeypatch.setattr(ctl.Controller, "__post_init__", with_next_step)
     monkeypatch.setattr(ctl.Controller, "_ask", ask_like_part2)
 
 

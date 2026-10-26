@@ -1,4 +1,4 @@
-"""Supervisor decisions use fake models and cannot authorize work or reset budgets."""
+"""Next-step decisions use fake models and cannot authorize work or reset budgets."""
 from __future__ import annotations
 
 import json
@@ -6,7 +6,7 @@ import json
 import anyio
 import pytest
 
-from agents.coordinator import NoTools, SupervisorDecision, choose_next
+from agents.coordinator import NoTools, NextStepDecision, choose_next
 from llm import Budget, FakeModelClient, ModelProviderError, reply_text, reply_tools
 
 
@@ -21,7 +21,7 @@ def choose(model, tmp_path, *, budget=None, allowed=None, state=None, turn=1, cl
             model=model, question="Summarize trait V1 in study S1.",
             state=state or {"stage": "approved_plan"},
             allowed_actions=allowed if allowed is not None else ["retrieve", "clarify", "revise_plan", "stop"],
-            budget=budget if budget is not None else Budget(), run_id="run_supervisor_test",
+            budget=budget if budget is not None else Budget(), run_id="run_next_step_test",
             log_dir=tmp_path, model_requested="fake-model", turn=turn, clock=clock,
         )
     return anyio.run(go)
@@ -41,7 +41,7 @@ def test_selected_action_is_a_request_and_model_has_no_tools(tmp_path):
     assert (tmp_path / result.agent.log_path).is_file()
 
 
-def test_shared_budget_is_consumed_across_supervisor_turns(tmp_path):
+def test_shared_budget_is_consumed_across_next_step_turns(tmp_path):
     model = FakeModelClient([decision_reply(), decision_reply("analyze"), decision_reply("finish")])
     budget = Budget(max_model_calls=2)
     first = choose(model, tmp_path, budget=budget)
@@ -143,7 +143,7 @@ def test_malformed_json_uses_shared_bounded_repairs(tmp_path):
 
 def test_model_tool_attempts_cannot_dispatch_and_still_consume_budget(tmp_path, monkeypatch):
     async def forbidden(*args, **kwargs):
-        pytest.fail("a supervisor model must never dispatch a tool")
+        pytest.fail("a next-step model must never dispatch a tool")
     monkeypatch.setattr(NoTools, "call", forbidden)
     model = FakeModelClient([reply_tools([("get_observations", '{"study_db_id":"S1"}')]), decision_reply()])
     budget = Budget()
@@ -168,9 +168,9 @@ def test_untrusted_record_text_cannot_expand_allowed_actions(tmp_path):
 
 
 def test_decision_schema_is_frozen_and_excludes_authority():
-    decision = SupervisorDecision(action="stop", reason="  Missing evidence.  ")
+    decision = NextStepDecision(action="stop", reason="  Missing evidence.  ")
     assert decision.reason == "Missing evidence."
-    assert set(SupervisorDecision.model_fields) == {"action", "reason", "question", "instruction"}
+    assert set(NextStepDecision.model_fields) == {"action", "reason", "question", "instruction"}
     with pytest.raises(ValueError):
         decision.action = "finish"
 
@@ -192,7 +192,7 @@ def payload_reply(payload):
     return reply_text(json.dumps({"status": "completed", "payload": payload}))
 
 
-# Benchmark 2026-10-21 (Luna, item 3c): 3 of 12 supervisor replies were revise_plan replies with only one of reason and
+# Benchmark 2026-10-21 (Luna, item 3c): 3 of 12 next-step replies were revise_plan replies with only one of reason and
 # instruction, and each blocked its run. Coach 2026-10-21 22:55 UTC: one retry that names the exact missing field; code never
 # fills the field, and a reply still missing it stays rejected (this replaces e8a1781, where an instruction stood in for a reason).
 @pytest.mark.parametrize("first, named, second", [
@@ -220,7 +220,7 @@ def test_a_decision_missing_a_required_field_is_asked_once_naming_the_field(tmp_
     model, budget = FakeModelClient([payload_reply(first), payload_reply(second)]), Budget()
     result = choose(model, tmp_path, budget=budget)
     assert result.status == "completed" and len(model.requests) == 2 and budget.repairs == 1
-    assert result.decision == SupervisorDecision(**second) and result.notes == []        # the second reply as written: nothing filled
+    assert result.decision == NextStepDecision(**second) and result.notes == []        # the second reply as written: nothing filled
     asked = model.requests[1]["messages"][-1]
     assert asked["role"] == "user" and named in asked["content"]
     assert asked["content"] == missing_field_question(first, ["retrieve", "clarify", "revise_plan", "stop"])
@@ -231,9 +231,9 @@ def test_a_decision_missing_a_required_field_is_asked_once_naming_the_field(tmp_
 def test_a_reply_still_missing_the_field_after_the_one_retry_stays_rejected(tmp_path):
     """Code never fills the field, and never asks a second time."""
     for first, note in (({"action": "revise_plan", "reason": "Use a correlation tool."},
-                         "supervisor decision rejected at decision (value_error)"),
+                         "next-step decision rejected at decision (value_error)"),
                         ({"action": "revise_plan", "instruction": "Restrict to the six trials."},      # e8a1781 filled this one
-                         "supervisor decision rejected at reason (missing)")):
+                         "next-step decision rejected at reason (missing)")):
         model, budget = FakeModelClient([payload_reply(first), payload_reply(first), decision_reply("revise_plan", instruction="I.")]), Budget()
         result = choose(model, tmp_path, budget=budget)
         assert result.status == "blocked" and result.decision is None and result.notes == [note]
@@ -296,10 +296,10 @@ def test_an_over_long_question_or_instruction_still_blocks(tmp_path, field, size
     action = "clarify" if field == "question" else "revise_plan"
     result = choose(FakeModelClient([decision_reply(action, **{field: "y" * size})]), tmp_path)
     assert result.status == "blocked" and result.decision is None
-    assert result.notes == [f"supervisor decision rejected at {field} (string_too_long)"]
+    assert result.notes == [f"next-step decision rejected at {field} (string_too_long)"]
 
 
 def test_the_prompt_states_the_limits():
-    from agents.coordinator import SUPERVISOR_SYSTEM_PROMPT
+    from agents.coordinator import NEXT_STEP_SYSTEM_PROMPT
 
-    assert "Limits: reason at most 600 characters, question at most 600, instruction at most 1000." in SUPERVISOR_SYSTEM_PROMPT
+    assert "Limits: reason at most 600 characters, question at most 600, instruction at most 1000." in NEXT_STEP_SYSTEM_PROMPT

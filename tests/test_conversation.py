@@ -37,7 +37,7 @@ import app
 import conversation
 from app_help import faq_items
 from llm import FakeModelClient, LlmConfigError, ModelProviderError, reply_text, reply_tools
-from run import (ANALYST_PROMPT, CATALOG_PROMPT, CLARIFY_PROMPT, DATA_REVIEW_PROMPT, RETRIEVER_PROMPT, SUPERVISOR_PROMPT,
+from run import (ANALYST_PROMPT, CATALOG_PROMPT, CLARIFY_PROMPT, DATA_REVIEW_PROMPT, RETRIEVER_PROMPT, NEXT_STEP_PROMPT,
                  RunConfig)
 from agents.coordinator import KnownMetadata, KnownStudy, KnownVariable
 import catalog_lists
@@ -46,7 +46,7 @@ SOURCE = "https://waiting.invalid/brapi/v2"
 APPROVAL = "approve / edit / cancel: "
 FINAL_REVIEW = "accept / reject (anything else = leave pending): "
 EDIT_IDS = "study IDs, comma separated (empty = keep): "
-QUESTIONS = {CLARIFY_PROMPT: "Which study is meant?", SUPERVISOR_PROMPT: "Should the plan include 2025?",
+QUESTIONS = {CLARIFY_PROMPT: "Which study is meant?", NEXT_STEP_PROMPT: "Should the plan include 2025?",
              RETRIEVER_PROMPT: "Which label should be used?", ANALYST_PROMPT: "Use the seasons column instead?"}
 STILL_WAITING = {APPROVAL: "The plan above is still waiting: reply **approve**",
                  CATALOG_PROMPT: "The catalog setup above is still waiting: reply **approve** or **cancel**.",
@@ -54,7 +54,7 @@ STILL_WAITING = {APPROVAL: "The plan above is still waiting: reply **approve**",
                  FINAL_REVIEW: "The answer above is still waiting for your review: reply **accept** or **reject**.",
                  **{prompt: f"I'm still waiting for your answer to my question (or reply **cancel**): “{q}”" for prompt, q in QUESTIONS.items()}}
 EVERY_PROMPT = list(STILL_WAITING)
-IDS = {CLARIFY_PROMPT: "planner", SUPERVISOR_PROMPT: "coordinator", RETRIEVER_PROMPT: "retriever", ANALYST_PROMPT: "analyst",
+IDS = {CLARIFY_PROMPT: "planner", NEXT_STEP_PROMPT: "coordinator", RETRIEVER_PROMPT: "retriever", ANALYST_PROMPT: "analyst",
        APPROVAL: "plan-approval", CATALOG_PROMPT: "catalog", DATA_REVIEW_PROMPT: "data-review", FINAL_REVIEW: "final-review"}
 DECIDED_BY_TYPED_WORDS = [CATALOG_PROMPT, DATA_REVIEW_PROMPT, FINAL_REVIEW]
 
@@ -65,7 +65,7 @@ def waiting_controller(**changes) -> SimpleNamespace:
                   config=SimpleNamespace(question="Tell me about a study.", max_clarification_rounds=3),
                   analysis=SimpleNamespace(caveats=[f"clarification needed: {QUESTIONS[ANALYST_PROMPT]}"]), analyst_answers=0,
                   retriever_questions=[QUESTIONS[RETRIEVER_PROMPT]], retriever_answers=0,
-                  supervisor_questions=[QUESTIONS[SUPERVISOR_PROMPT]],
+                  next_step_questions=[QUESTIONS[NEXT_STEP_PROMPT]],
                   catalog_approval_screen=lambda: "Catalog scope: studies and variables", answer_markdown=lambda: "full report")
     values.update(changes)
     return SimpleNamespace(**values)
@@ -230,10 +230,10 @@ def test_the_side_reply_is_escaped_and_cut_like_database_text(chat):
 
 
 def test_an_empty_side_reply_still_says_what_the_run_waits_for(chat):
-    job = WaitingJob(SUPERVISOR_PROMPT)
+    job = WaitingJob(NEXT_STEP_PROMPT)
     _, _, factory = scripted(reply_text(decision("side_question", "")))
     history, _ = chat.turn("hmm", job, triage_model=factory)
-    assert history[-1]["content"] == STILL_WAITING[SUPERVISOR_PROMPT] and job.replies == []
+    assert history[-1]["content"] == STILL_WAITING[NEXT_STEP_PROMPT] and job.replies == []
 
 
 # --------------------------------------------------------------------------
@@ -241,7 +241,7 @@ def test_an_empty_side_reply_still_says_what_the_run_waits_for(chat):
 # --------------------------------------------------------------------------
 
 @pytest.mark.parametrize("waiting_on, typed, sent", [
-    (CLARIFY_PROMPT, "cancel", "cancel"), (SUPERVISOR_PROMPT, " CANCEL ", "cancel"), (RETRIEVER_PROMPT, "Cancel.", "cancel"),
+    (CLARIFY_PROMPT, "cancel", "cancel"), (NEXT_STEP_PROMPT, " CANCEL ", "cancel"), (RETRIEVER_PROMPT, "Cancel.", "cancel"),
     (ANALYST_PROMPT, "cancel", "cancel"), (APPROVAL, "Approve.", "approve"), (APPROVAL, "edit", "edit"), (APPROVAL, "cancel", "cancel"),
     (CATALOG_PROMPT, "approve", "approve"), (CATALOG_PROMPT, "approve catalog", "approve catalog"), (CATALOG_PROMPT, "cancel", "cancel"),
     (DATA_REVIEW_PROMPT, "continue", "continue"), (DATA_REVIEW_PROMPT, "Approve", "approve"), (DATA_REVIEW_PROMPT, "cancel", "cancel"),
@@ -457,11 +457,11 @@ def test_unsure_at_a_question_asks_before_sending_and_yes_sends_the_persons_word
 
 @pytest.mark.parametrize("no", ["no", "No.", "nope", "never mind"])
 def test_no_drops_the_unsent_answer_without_a_model_call(chat, no):
-    job = WaitingJob(SUPERVISOR_PROMPT)
+    job = WaitingJob(NEXT_STEP_PROMPT)
     model, _, factory = scripted(reply_text(decision("unsure")))
     _, state = chat.turn("hmm maybe", job, triage_model=factory)
     history, state = chat.turn(no, job, state, triage_model=factory)
-    assert history[-1]["content"] == STILL_WAITING[SUPERVISOR_PROMPT] and job.replies == [] and "unsent_reply" not in state
+    assert history[-1]["content"] == STILL_WAITING[NEXT_STEP_PROMPT] and job.replies == [] and "unsent_reply" not in state
     assert len(model.requests) == 1
 
 

@@ -49,7 +49,7 @@ def controller(registry, fetched, claims, *, question=QUESTION):
     return SimpleNamespace(plan=None, config=SimpleNamespace(question=question), ctx=SimpleNamespace(registry=registry),
                            retrieval=RetrievalReport(status="completed", artifacts=fetched, complete=True),
                            data_review={"status": "approved"}, analysis=AnalysisReport(status="completed", claims=claims),
-                           supervision={"decisions": [], "plan_revisions": 0, "analysis_passes": 1})
+                           delegation={"decisions": [], "plan_revisions": 0, "analysis_passes": 1})
 
 
 def view(registry, fetched, claims, **kw):
@@ -178,7 +178,7 @@ def test_no_fetched_tables_no_names_and_the_order_as_before():
                     transformation="frequency of exact text values") for n in range(3)]
     plain = SimpleNamespace(plan=None, retrieval=None, data_review={"status": "approved"},
                             analysis=AnalysisReport(status="completed", claims=claims),
-                            supervision={"decisions": [], "plan_revisions": 0, "analysis_passes": 1})
+                            delegation={"decisions": [], "plan_revisions": 0, "analysis_passes": 1})
     v = cr._state(plain, "analyzed")["analysis"]
     assert [c["claim_id"] for c in v["claims"]] == ["clm_plain_0", "clm_plain_1", "clm_plain_2"] and v["claims_omitted"] == 0
     assert not any("names_from_fetched_tables" in c for c in v["claims"])

@@ -356,7 +356,7 @@ def test_an_id_the_model_only_named_stays_invented(tmp_path):
 
 def test_report_lines_that_quote_the_model_back_nothing_and_code_lines_still_do(tmp_path):
     """The model's notes, its rejected tool arguments, the agents' questions (with any answer: the harness never answers) and
-    the supervisor's stop reason are model text too. A line the code wrote still backs its numbers, in warnings, caveats and
+    the Coordinator's stop reason are model text too. A line the code wrote still backs its numbers, in warnings, caveats and
     notes alike; a model-quoting phrase inside a code line does not silence it (prefixes, not substrings)."""
     run = _with_report_lines(_run_dir(tmp_path, []),
                              warnings=["clarification needed: Is it study 4612 or 4614?", "model note: Fetched 952 rows.",
@@ -432,12 +432,22 @@ def test_an_endless_number_backs_nothing(tmp_path):
     assert not bench._backed(12.5, 1, [math.inf]) and bench._backed(12.5, 1, [math.inf, 12.5])
 
 
-@pytest.mark.parametrize("spelling", ["agent error", "coordinator: agent error", "supervisor: supervisor error"])
+def test_the_apps_copy_reads_the_model_error_spellings_the_grader_reads():
+    """Saved answers are rendered again by the app's copy (note_backing), so it reads every spelling the grader reads, the
+    next-step call's old one ("supervisor: supervisor error", runs saved before 2026-10-26) included."""
+    import note_backing
+
+    assert note_backing._MODEL_ERRORS == bench._MODEL_ERRORS
+    assert any(spelling.startswith("supervisor: supervisor error ") for spelling in note_backing._MODEL_ERRORS)
+
+
+@pytest.mark.parametrize("spelling", ["agent error", "coordinator: agent error", "next step: next-step error", "supervisor: supervisor error"])
 def test_an_agent_error_that_quotes_the_model_backs_nothing_in_any_spelling(tmp_path, spelling):
     """Review 2026-10-22 (round 2, R1; coach 02:50 UTC, round 3 (a)): a refusal, a malformed tool call and an unreadable final
     reply quote the model's own text (llm.py add_error). The retriever and the analyst write them as "agent error ...", the
-    planner's arrive as "coordinator: agent error ..." and the supervisor's as "supervisor: supervisor error ...". A budget,
-    size or timeout error is the code's own and still backs its numbers (the saved A42.1 shows "fetch budget (5)")."""
+    planner's arrive as "coordinator: agent error ...", the next-step call's as "next step: next-step error ..." and, in
+    results saved before 2026-10-26, as "supervisor: supervisor error ...". A budget, size or timeout error is the code's own
+    and still backs its numbers (the saved A42.1 shows "fetch budget (5)")."""
     model_lines = [f"{spelling} model_refusal: I will not report study 99991",
                    f"{spelling} malformed_arguments: '99992': unknown tool '99992'; repair budget used up",
                    f"{spelling} invalid_json: final reply has unknown status '99993'"]

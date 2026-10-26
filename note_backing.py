@@ -39,7 +39,9 @@ _SCIENTIFIC = re.compile(r"(?<![\w.])[+-]?\d+(?:\.\d+)?[eE][+-]?\d+(?!\w|\.\w)")
 _ZERO_PADDED = re.compile(r"[+-]0\d+(?:\.\d+)?")
 _WORD = re.compile(r"[A-Za-z0-9]+")
 _TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?")
-_MODEL_ERRORS = tuple(f"{spelling} {code}" for spelling in ("agent error", "coordinator: agent error", "supervisor: supervisor error")
+# The next-step call's agent error was "supervisor: supervisor error ..." in runs saved before 2026-10-26; saved answers are
+# read again (rendered by this copy), so both spellings count, as in eval/benchmark.py.
+_MODEL_ERRORS = tuple(f"{spelling} {code}" for spelling in ("agent error", "coordinator: agent error", "next step: next-step error", "supervisor: supervisor error")
                       for code in ("model_refusal", "malformed_arguments", "invalid_json"))
 _MODEL_QUOTED = ("model:", "model note:", "model declared ids", "model listed resolved entries", "model named claim ids",
                  "studies named by the model", "clarification ", "retriever clarification ", "analyst clarification ",

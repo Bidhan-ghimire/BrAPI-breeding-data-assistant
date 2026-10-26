@@ -195,9 +195,9 @@ def test_the_cap_holds_for_the_whole_run_and_the_last_message_lists_every_round(
     asked three more times ("answer 4 of 3", "answer 5 of 3"); the last message showed only two rounds."""
     server, kwargs, tmp_path = live
     planner = scripted(ASKS, ASKS, READY, ASKS, ASKS, ASKS)
-    supervisor = scripted({"status": "completed", "payload": {"action": "revise_plan", "reason": "Scripted: a new plan.",
+    next_step = scripted({"status": "completed", "payload": {"action": "revise_plan", "reason": "Scripted: a new plan.",
                                                               "instruction": "Reframe the request and ask which study is meant."}})
-    kw = {**kwargs, "make_models": lambda: dataclasses.replace(synthetic_models(), coordinator=planner, supervisor=supervisor)}
+    kw = {**kwargs, "make_models": lambda: dataclasses.replace(synthetic_models(), coordinator=planner, next_step=next_step)}
     history, state = turn(VAGUE, [], {}, kw)
     shown = [history[-1]["content"]]
     answers = ("a yield study", "S1, mean yield per clone", "the yield trait")     # ("list all traits" is a new question now)
@@ -219,9 +219,9 @@ def test_the_cap_holds_for_the_whole_run_and_the_last_message_lists_every_round(
 def test_the_coordinators_own_question_counts_toward_the_same_cap(live):
     server, kwargs, tmp_path = live
     planner = scripted(ASKS, READY, ASKS, ASKS)
-    supervisor = scripted({"status": "completed", "payload": {"action": "clarify", "reason": "Scripted: one question first.",
+    next_step = scripted({"status": "completed", "payload": {"action": "clarify", "reason": "Scripted: one question first.",
                                                               "question": "Should the plan include 2025?"}})
-    kw = {**kwargs, "make_models": lambda: dataclasses.replace(synthetic_models(), coordinator=planner, supervisor=supervisor)}
+    kw = {**kwargs, "make_models": lambda: dataclasses.replace(synthetic_models(), coordinator=planner, next_step=next_step)}
     history, state = turn(VAGUE, [], {}, kw)                                      # answer 1 of 3: the planner's question
     history, state = turn("S1, mean yield per clone", history, state, kw)
     assert "Should the plan include 2025?" in history[-1]["content"]             # answer 2: the coordinator's question
@@ -240,8 +240,8 @@ def test_the_coordinator_may_ask_only_while_answers_are_left(answers, offered):
 
     from coordination_runtime import _allowed
 
-    c = SimpleNamespace(plan=SimpleNamespace(status="ready"), retrieval=None, supervision={"plan_revisions": 0},
-                        clarification_answers=answers, supervisor_answers=0, config=SimpleNamespace(max_clarification_rounds=3))
+    c = SimpleNamespace(plan=SimpleNamespace(status="ready"), retrieval=None, delegation={"plan_revisions": 0},
+                        clarification_answers=answers, next_step_answers=0, config=SimpleNamespace(max_clarification_rounds=3))
     assert ("clarify" in _allowed(c, "planned")) is offered
 
 

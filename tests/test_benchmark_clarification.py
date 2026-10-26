@@ -110,8 +110,8 @@ def test_without_the_hook_the_harness_still_never_answers(monkeypatch, tmp_path)
     assert outcome.status == "stopped: the app asked a question (the harness never answers one)"
 
 
-@pytest.mark.parametrize("prompt", ["ANALYST_PROMPT", "RETRIEVER_PROMPT", "SUPERVISOR_PROMPT"])
-def test_only_the_planners_question_is_answered_never_the_analysts_retrievers_or_supervisors(monkeypatch, tmp_path, prompt):
+@pytest.mark.parametrize("prompt", ["ANALYST_PROMPT", "RETRIEVER_PROMPT", "NEXT_STEP_PROMPT"])
+def test_only_the_planners_question_is_answered_never_the_analysts_retrievers_or_next_steps(monkeypatch, tmp_path, prompt):
     job = FakeJob(tmp_path)
     scripted_turns(monkeypatch, job, [(ASKED, getattr(harness, prompt))])
     outcome = harness.ask(f"What is the mean of '{BETA}'?", {}, answer_clarification=lambda shown: "76619")

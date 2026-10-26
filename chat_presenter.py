@@ -1123,8 +1123,9 @@ def _provider_failure(controller: Any) -> tuple[str, str, str] | None:
     retrieval = getattr(controller, "retrieval", None)
     notes = [*(getattr(analysis, "caveats", []) or []), *(getattr(retrieval, "warnings", []) or []),
              *(getattr(controller, "notes", []) or [])]
-    for note in notes:     # the planner's notes carry "coordinator: ", the next-step call's "supervisor: supervisor error"
-        match = re.fullmatch(r"(?:coordinator: agent|supervisor: supervisor|agent) error (provider_[a-z_]+): (.+)", note)
+    for note in notes:     # the planner's notes carry "coordinator: ", the next-step call's "next step: next-step error"
+        # ("supervisor: supervisor error" in runs saved before 2026-10-26, still read when saved answers are rendered again)
+        match = re.fullmatch(r"(?:coordinator: agent|next step: next-step|supervisor: supervisor|agent) error (provider_[a-z_]+): (.+)", note)
         if match:
             return note, match[1], match[2]
     return None
@@ -1135,7 +1136,7 @@ def _provider_failure(controller: Any) -> tuple[str, str, str] | None:
 # rounds (the needs_clarification screen lists those itself).
 _NOT_A_REASON = re.compile(r"coordinator: (?:scope\.study_ids |the planner judged |dropped clarification |program membership is not "
                            r"established|matching_study_count=|added required clarification)|clarification \d+: "
-                           r"|supervisor: the Coordinator's reason was shortened ")
+                           r"|(?:next step|supervisor): the Coordinator's reason was shortened ")   # supervisor: saved before 2026-10-26
 _CACHE_MISS = "metadata is not in the offline cache"                       # stale once the catalog setup has prepared them
 _CATALOGS_PREPARED = "complete study and variable catalogs prepared"
 

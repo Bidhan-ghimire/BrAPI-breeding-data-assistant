@@ -66,7 +66,7 @@ import llm  # noqa: E402
 from brapi_client import BrapiClient, TransportError, load_settings  # noqa: E402
 from cache_store import CacheStore  # noqa: E402
 from run import (ANALYST_PROMPT, CATALOG_PROMPT, CLARIFY_PROMPT, DATA_REVIEW_PROMPT, RETRIEVER_PROMPT,  # noqa: E402
-                 SUPERVISOR_PROMPT, RunConfig, RunResult)
+                 NEXT_STEP_PROMPT, RunConfig, RunResult)
 
 QUESTIONS = Path(__file__).resolve().parent / "questions.json"
 RESULTS = Path(__file__).resolve().parent / "results"
@@ -544,7 +544,7 @@ def _last(history: list) -> str:
 def _stopped_at(waiting: str) -> str:
     if waiting == CATALOG_PROMPT:
         return "stopped: the catalog setup needs an approval (the harness never approves it)"
-    if waiting in (CLARIFY_PROMPT, ANALYST_PROMPT, RETRIEVER_PROMPT, SUPERVISOR_PROMPT):
+    if waiting in (CLARIFY_PROMPT, ANALYST_PROMPT, RETRIEVER_PROMPT, NEXT_STEP_PROMPT):
         return "stopped: the app asked a question (the harness never answers one)"
     return "stopped at a step the harness does not answer"
 
@@ -578,7 +578,7 @@ def ask(question: str, chat: dict[str, Any], *, wait: float = 120.0,
     "continue" at the data review; anything else ends the question (a waiting run is ended, never accepted). With
     answer_clarification (the benchmark's, coach 2026-10-22 15:53 UTC), the planner's question (CLARIFY_PROMPT) is answered
     ONCE per question with what it returns for the chat's last message, and recorded in Outcome.answered; it returns None for
-    any question it does not answer. The analyst's, retriever's and supervisor's questions are never answered."""
+    any question it does not answer. The analyst's, retriever's and the Coordinator's next-step questions are never answered."""
     outcome = Outcome()
     first = len(TrackedJob.started)
     history, state = _turn(question, [], {}, chat)

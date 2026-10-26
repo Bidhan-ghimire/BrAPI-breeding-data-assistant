@@ -47,7 +47,7 @@ What is here:
   may return one message; the loop keeps that final in the conversation, adds the
   message as a user turn and asks again, at most once per loop. With no repair, model
   call or tool call left, the final ends the loop as before. The Analyst uses it when
-  no tool made a claim; the Coordinator's supervisor when a decision lacks a required field.
+  no tool made a claim; the Coordinator's next-step call when a decision lacks a required field.
   One reply may use DEFAULT_MAX_TOKENS tokens, thinking included; more room
   does not change the rule that a reply which is still cut off is no answer.
 * compact_tool_result — the summary a tool result becomes for the model: always
@@ -742,11 +742,11 @@ def make_model_client(settings: LlmSettings) -> Any:
     return AnthropicClient(settings) if settings.provider == "anthropic" else OpenAICompatibleClient(settings)
 
 
-AGENT_ROLES = {"coordinator": "coordinator", "supervisor": "coordinator", "retriever": "retriever", "analyst": "analyst"}
+AGENT_ROLES = {"coordinator": "coordinator", "coordinator_next": "coordinator", "retriever": "retriever", "analyst": "analyst"}
 
 
 def agent_role(agent_name: str) -> str:
-    """The role an agent asks as: coordinator_2 and supervisor_3 -> coordinator; retriever; analyst; anything else -> other."""
+    """The role an agent asks as: coordinator_2 and coordinator_next_3 -> coordinator; retriever; analyst; anything else -> other."""
     return AGENT_ROLES.get(re.sub(r"_\d+$", "", agent_name), "other")
 
 

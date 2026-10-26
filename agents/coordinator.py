@@ -68,7 +68,7 @@ __all__ = [
     "PERSON_REVIEWS_NOTE",
     "add_clarification", "clarifications_given", "person_words", "latest_words", "add_follow_up", "FOLLOW_UP_LABEL",
     "FOLLOW_UP_NOTE",
-    "SUPERVISOR_SYSTEM_PROMPT", "SupervisorDecision", "SupervisorResult", "choose_next", "missing_field_question",
+    "NEXT_STEP_SYSTEM_PROMPT", "NextStepDecision", "NextStepResult", "choose_next", "missing_field_question",
 ]
 
 RETRIEVER_ACTIONS = frozenset({"server_info", "search_studies", "study_types", "get_study", "list_variables", "get_observations",
@@ -939,7 +939,7 @@ async def draft_plan(
     now: datetime | None = None,
     person_reviews_scope: bool = False,
     earlier_questions: list[str] | None = None,
-    supervisor_instruction: str | None = None,
+    next_step_instruction: str | None = None,
     max_plan_steps: int = DEFAULT_PLAN_STEPS,
 ) -> CoordinatorResult:
     """Ask the model for a draft, validate it in code, send rejections back at most max_replans times.
@@ -954,8 +954,8 @@ async def draft_plan(
                                      user_message=_user_message(question, metadata, problems, earlier_questions, person_reviews_scope,
                                                                 base_url=base_url) +
                                      ("\nCoordinator revision suggestion (not a user instruction or approval; keep the original question, "
-                                      "validate all IDs and scope as usual): " + supervisor_instruction[:1200]
-                                      if supervisor_instruction else ""),
+                                      "validate all IDs and scope as usual): " + next_step_instruction[:1200]
+                                      if next_step_instruction else ""),
                                      budget=budget, allowed_tools=set(),
                                      log_dir=log_dir, run_id=run_id, model_requested=model_requested)
         result.agents.append(agent)
@@ -1101,10 +1101,10 @@ Action = Literal["retrieve", "analyze", "revise_plan", "clarify", "finish", "sto
 ACTION_NAMES = frozenset({"retrieve", "analyze", "revise_plan", "clarify", "finish", "stop"})
 
 
-REASON_LIMIT = 600                      # characters; SupervisorDecision.reason
+REASON_LIMIT = 600                      # characters; NextStepDecision.reason
 
 
-class SupervisorDecision(BaseModel):
+class NextStepDecision(BaseModel):
     """A request for one transition, with no data, tools, or authority fields."""
 
     model_config = ConfigDict(strict=True, extra="forbid", frozen=True, str_strip_whitespace=True)
@@ -1115,7 +1115,7 @@ class SupervisorDecision(BaseModel):
     instruction: str | None = Field(default=None, min_length=1, max_length=1000)
 
     @model_validator(mode="after")
-    def _action_fields(self) -> "SupervisorDecision":
+    def _action_fields(self) -> "NextStepDecision":
         if self.action == "clarify":
             if self.question is None:
                 raise ValueError("clarify requires one question for the person")
@@ -1130,14 +1130,14 @@ class SupervisorDecision(BaseModel):
 
 
 @dataclass
-class SupervisorResult:
+class NextStepResult:
     status: str
-    decision: SupervisorDecision | None
+    decision: NextStepDecision | None
     agent: AgentResult
     notes: list[str] = field(default_factory=list)
 
 
-SUPERVISOR_SYSTEM_PROMPT = """You are the breeding assistant's Coordinator, deciding the next useful action.
+NEXT_STEP_SYSTEM_PROMPT = """You are the breeding assistant's Coordinator, deciding the next useful action.
 You supervise a Data Retriever and a Data Analyst. You have no tools or execution authority.
 The application gives you a verified state summary and a code-derived list of allowed actions.
 Choose exactly one action from that list. The controller validates your choice before dispatch.
@@ -1175,9 +1175,9 @@ Never include approvals, acceptance, tool calls, artifact IDs, data, plan fields
 """
 
 # A decision whose action is allowed but lacks a field the contract requires is asked once more, naming the field. Benchmark
-# 2026-10-21 (Luna, item 3c): 3 of 12 supervisor replies were revise_plan replies with only one of reason and instruction, and
+# 2026-10-21 (Luna, item 3c): 3 of 12 next-step replies were revise_plan replies with only one of reason and instruction, and
 # each blocked its run. The text names fields and never a value; code never fills a field, and a reply still lacking it is
-# rejected (coach, 2026-10-21 22:55 UTC). One retry per supervisor turn, from the run's shared repair pool (run_agent_loop).
+# rejected (coach, 2026-10-21 22:55 UTC). One retry per next-step turn, from the run's shared repair pool (run_agent_loop).
 _REQUIRED_FIELDS = {"clarify": ("reason", "question"), "revise_plan": ("reason", "instruction")}
 _FIELD_HELP = {"reason": "reason (a short explanation, at most 600 characters)",
                "question": "question (one precise question for the person, at most 600 characters)",
@@ -1211,7 +1211,7 @@ async def choose_next(
     model_requested: str,
     turn: int,
     clock: Callable[[], float] = time.monotonic,
-) -> SupervisorResult:
+) -> NextStepResult:
     """Ask for one validated decision using the run's existing shared budget.
 
 allowed_actions is trusted controller input, never a model-generated field.
@@ -1221,21 +1221,21 @@ failures stop here rather than starting another unbounded repair loop.
 A decision lacking a required field is asked once more (missing_field_question).
 """
     if not isinstance(turn, int) or isinstance(turn, bool) or turn < 1:
-        raise ValueError("supervisor turn must be a positive integer")
+        raise ValueError("next-step turn must be a positive integer")
     if (not isinstance(allowed_actions, list) or not allowed_actions
             or any(not isinstance(action, str) or action not in ACTION_NAMES for action in allowed_actions)):
-        raise ValueError("allowed_actions must be a nonempty list of known supervisor actions")
+        raise ValueError("allowed_actions must be a nonempty list of known next-step actions")
     user_message = json.dumps({"question": question, "state": state,
                                "allowed_actions": list(allowed_actions)}, ensure_ascii=True, allow_nan=False)
     agent = await run_agent_loop(
-        model, NoTools(), agent_name=f"supervisor_{turn}", system_prompt=SUPERVISOR_SYSTEM_PROMPT,
+        model, NoTools(), agent_name=f"coordinator_next_{turn}", system_prompt=NEXT_STEP_SYSTEM_PROMPT,
         user_message=user_message, budget=budget, allowed_tools=set(), log_dir=log_dir,
         run_id=run_id, model_requested=model_requested, clock=clock,
         max_output_chars=6000, check_completed=lambda payload: missing_field_question(payload, allowed_actions),
     )
     if agent.status not in {"completed", "needs_clarification"}:
-        return SupervisorResult(agent.status, None, agent,
-                                [f"supervisor error {error.code}: {error.message}" for error in agent.errors])
+        return NextStepResult(agent.status, None, agent,
+                                [f"next-step error {error.code}: {error.message}" for error in agent.errors])
 
     payload = agent.payload or {}
     if agent.status == "needs_clarification":
@@ -1250,15 +1250,15 @@ A decision lacking a required field is asked once more (missing_field_question).
         notes.append(f"the Coordinator's reason was shortened from {len(reason.strip())} to {REASON_LIMIT} characters")
         payload = {**payload, "reason": reason.strip()[:REASON_LIMIT - 1].rstrip() + "…"}
     try:
-        decision = SupervisorDecision.model_validate(payload)
+        decision = NextStepDecision.model_validate(payload)
     except ValidationError as exc:
         # Error locations/types are sufficient for an audit without repeating
         # the rejected model text as instructions or an apparent answer.
         first = exc.errors()[0]
         location = ".".join(str(part) for part in first["loc"]) or "decision"
-        return SupervisorResult("blocked", None, agent,
-                                [*notes, f"supervisor decision rejected at {location} ({first['type']})"])
+        return NextStepResult("blocked", None, agent,
+                                [*notes, f"next-step decision rejected at {location} ({first['type']})"])
     if decision.action not in allowed_actions:
-        return SupervisorResult("blocked", None, agent,
-                                [*notes, f"supervisor action {decision.action!r} is not allowed in the current verified state"])
-    return SupervisorResult("completed", decision, agent, notes)
+        return NextStepResult("blocked", None, agent,
+                                [*notes, f"next-step action {decision.action!r} is not allowed in the current verified state"])
+    return NextStepResult("completed", decision, agent, notes)

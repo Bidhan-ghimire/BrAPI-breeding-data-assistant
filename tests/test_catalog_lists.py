@@ -105,14 +105,14 @@ class Models:
 
     def __init__(self, planner_replies: tuple[dict, ...] = ()):
         self.planner = FakeModelClient([reply_text(json.dumps(r), model="mock-model") for r in planner_replies])
-        self.retriever, self.supervisor, self.analysts = FakeModelClient([]), FakeModelClient([]), []
+        self.retriever, self.next_step, self.analysts = FakeModelClient([]), FakeModelClient([]), []
 
     def __call__(self) -> ctl.Models:
-        return ctl.Models(coordinator=self.planner, retriever=self.retriever, supervisor=self.supervisor,
+        return ctl.Models(coordinator=self.planner, retriever=self.retriever, next_step=self.next_step,
                           analyst_factory=lambda prefix: self.analysts.append(prefix) or FakeModelClient([]), requested="mock-model")
 
     def asked(self) -> int:
-        return len(self.planner.requests) + len(self.retriever.requests) + len(self.supervisor.requests) + len(self.analysts)
+        return len(self.planner.requests) + len(self.retriever.requests) + len(self.next_step.requests) + len(self.analysts)
 
 
 @pytest.fixture
